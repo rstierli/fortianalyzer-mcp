@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.2.0-beta] - 2024-12-08
+## [0.2.0-beta] - 2025-12-11
 
 ### Added
 - **PCAP Tools** (5 tools) - IPS log search and PCAP download for forensic analysis
@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Total tools increased from 67 to 72 (5 new PCAP tools)
 
-## [0.1.0-beta] - 2024-12-04
+## [0.1.0-beta] - 2025-12-04
 
 ### Added
 - Initial release with 67 MCP tools
@@ -89,7 +89,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Empty API responses handled gracefully (no more "Unexpected response format" errors)
 - Report polling logic handles empty running reports list
 
-## [0.0.1] - 2024-12-03
+## [0.0.1] - 2025-12-03
 
 ### Added
 - Initial project structure

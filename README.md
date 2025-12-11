@@ -40,7 +40,7 @@ This MCP server provides a comprehensive interface to FortiAnalyzer's capabiliti
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/fortianalyzer-mcp.git
+git clone https://github.com/rstierli/fortianalyzer-mcp.git
 cd fortianalyzer-mcp
 
 # Create and activate virtual environment
@@ -55,7 +55,7 @@ uv sync
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/fortianalyzer-mcp.git
+git clone https://github.com/rstierli/fortianalyzer-mcp.git
 cd fortianalyzer-mcp
 
 # Create virtual environment
