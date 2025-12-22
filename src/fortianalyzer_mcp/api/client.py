@@ -1,6 +1,6 @@
 """FortiAnalyzer API client wrapper using pyfmg library.
 
-Based on FNDN FortiAnalyzer 7.6.4 API specifications.
+Based on FNDN FortiAnalyzer 7.6.5 API specifications.
 """
 
 import json

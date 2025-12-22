@@ -144,6 +144,8 @@ tests/.env.test
 # Claude Code / AI Assistants
 # =============================================================================
 .claude/
+CLAUDE.md
+SKILL.md
 .cursor/
 .aider*
 

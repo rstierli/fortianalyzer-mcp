@@ -167,7 +167,7 @@ docker-compose down
 
 ## Available Tools
 
-### System Tools (9 tools)
+### System Tools (11 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -180,6 +180,8 @@ docker-compose down
 | `list_tasks` | List background tasks |
 | `get_task` | Get task details by ID |
 | `wait_for_task` | Wait for a task to complete |
+| `get_api_ratelimit` | Get API rate limiting configuration (FAZ 7.6.5+) |
+| `update_api_ratelimit` | Update API rate limits (FAZ 7.6.5+) |
 
 ### Device Management Tools (8 tools)
 
@@ -443,6 +445,28 @@ LOG_LEVEL=DEBUG fortianalyzer-mcp
 - Windows: `%APPDATA%\Claude\logs\mcp-server-fortianalyzer.log`
 
 ## Development
+
+### Comparing API Versions
+
+When new FortiAnalyzer versions are released, use the API comparison tool to identify changes:
+
+```bash
+# Compare two API documentation versions
+python tools/compare_api_versions.py docs/fndn/7.6.4 docs/fndn/7.6.5
+
+# Output to custom file
+python tools/compare_api_versions.py docs/fndn/7.6.4 docs/fndn/7.6.5 -o CHANGES.md
+
+# Print to stdout
+python tools/compare_api_versions.py docs/fndn/7.6.4 docs/fndn/7.6.5 --stdout
+```
+
+The tool detects:
+- New/removed API endpoints
+- New/removed definitions and tags
+- File size changes between versions
+
+Output is a markdown report listing all changes, making it easy to identify what code updates are needed.
 
 ### Running Tests
 

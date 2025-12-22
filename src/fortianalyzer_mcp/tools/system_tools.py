@@ -1,6 +1,6 @@
 """System and ADOM management tools for FortiAnalyzer.
 
-Based on FNDN FortiAnalyzer 7.6.4 SYS, DVMDB, and TASK API specifications.
+Based on FNDN FortiAnalyzer 7.6.5 SYS, DVMDB, CLI, and TASK API specifications.
 """
 
 import logging
@@ -410,3 +410,109 @@ async def wait_for_task(
     except Exception as e:
         logger.error(f"Failed to wait for task {task_id}: {e}")
         return {"status": "error", "completed": False, "message": str(e)}
+
+
+# =============================================================================
+# API Rate Limiting (FAZ 7.6.5+)
+# =============================================================================
+
+
+@mcp.tool()
+async def get_api_ratelimit() -> dict[str, Any]:
+    """Get the current API rate limiting configuration.
+
+    Returns the configured rate limits for API read and write operations.
+    This feature is available in FortiAnalyzer 7.6.5 and later.
+
+    Rate limiting helps protect the FortiAnalyzer from API abuse by limiting
+    the number of requests that can be made per second.
+
+    Returns:
+        dict: Rate limit configuration with keys:
+            - status: "success" or "error"
+            - data: Rate limit settings containing:
+                - read-limit: Max read requests per second (default: 1000)
+                - write-limit: Max write requests per second (default: 100)
+            - message: Error message if failed
+
+    Example:
+        >>> result = await get_api_ratelimit()
+        >>> print(f"Read limit: {result['data']['read-limit']} req/s")
+        >>> print(f"Write limit: {result['data']['write-limit']} req/s")
+    """
+    try:
+        client = _get_client()
+        data = await client.get("/cli/global/system/log/api-ratelimit")
+        return {
+            "status": "success",
+            "data": data,
+        }
+    except Exception as e:
+        logger.error(f"Failed to get API rate limit: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@mcp.tool()
+async def update_api_ratelimit(
+    read_limit: int | None = None,
+    write_limit: int | None = None,
+) -> dict[str, Any]:
+    """Update the API rate limiting configuration.
+
+    Configures rate limits for API read and write operations.
+    This feature is available in FortiAnalyzer 7.6.5 and later.
+
+    Args:
+        read_limit: Max read requests per second (1-10000, default: 1000)
+        write_limit: Max write requests per second (1-10000, default: 100)
+
+    Returns:
+        dict: Update result with keys:
+            - status: "success" or "error"
+            - message: Success or error message
+            - data: Updated configuration
+
+    Example:
+        >>> # Set stricter rate limits
+        >>> result = await update_api_ratelimit(read_limit=500, write_limit=50)
+        >>> if result['status'] == 'success':
+        ...     print("Rate limits updated successfully")
+
+        >>> # Only update read limit
+        >>> result = await update_api_ratelimit(read_limit=2000)
+    """
+    try:
+        if read_limit is None and write_limit is None:
+            return {
+                "status": "error",
+                "message": "At least one of read_limit or write_limit must be provided",
+            }
+
+        # Build update data
+        data: dict[str, Any] = {}
+        if read_limit is not None:
+            if not 1 <= read_limit <= 10000:
+                return {
+                    "status": "error",
+                    "message": "read_limit must be between 1 and 10000",
+                }
+            data["read-limit"] = read_limit
+        if write_limit is not None:
+            if not 1 <= write_limit <= 10000:
+                return {
+                    "status": "error",
+                    "message": "write_limit must be between 1 and 10000",
+                }
+            data["write-limit"] = write_limit
+
+        client = _get_client()
+        result = await client.update("/cli/global/system/log/api-ratelimit", data=data)
+
+        return {
+            "status": "success",
+            "message": "API rate limits updated successfully",
+            "data": result if result else data,
+        }
+    except Exception as e:
+        logger.error(f"Failed to update API rate limit: {e}")
+        return {"status": "error", "message": str(e)}

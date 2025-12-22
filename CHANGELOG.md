@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0-beta] - 2025-12-22
+
+### Added
+- **FortiAnalyzer 7.6.5 Support**
+- **API Rate Limiting Tools** (2 tools) - Configure API rate limits to protect FortiAnalyzer from API abuse
+  - `get_api_ratelimit`: Get current API rate limiting configuration (read/write limits per second)
+  - `update_api_ratelimit`: Update API rate limits (requires FAZ 7.6.5+)
+
+### Changed
+- Total tools increased from 72 to 74 (2 new API rate limiting tools)
+- Updated API specifications to FortiAnalyzer 7.6.5
+
+### Developer Tools
+- Added `tools/compare_api_versions.py` - Compare FortiAnalyzer API documentation between versions
+  - Detects new/removed endpoints, definitions, and tags
+  - Generates markdown reports for easy review
+  - Helps contributors identify required code changes
+
+### FortiAnalyzer 7.6.5 API Changes (Not Yet Implemented)
+The following new 7.6.5 features are available in the FortiAnalyzer API but not yet exposed as MCP tools.
+Contributions welcome:
+
+- **TACACS+ Accounting** (6 endpoints) - Configure TACACS+ accounting log filtering
+  - `/cli/global/system/locallog/tacacs+accounting/filter`
+  - `/cli/global/system/locallog/tacacs+accounting/setting`
+
+- **Client Certificate Authentication** (11 endpoints) - Configure client certificate auth for API access
+  - `/cli/global/system/log/settings/client-cert-auth`
+  - `/cli/global/system/log/settings/client-cert-auth/trusted-client`
+
 ## [0.2.0-beta] - 2025-12-11
 
 ### Added

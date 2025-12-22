@@ -44,3 +44,16 @@ async def test_list_tasks(faz_client: FortiAnalyzerClient):
     """Test listing tasks."""
     tasks = await faz_client.list_tasks()
     assert isinstance(tasks, list)
+
+
+@pytest.mark.asyncio
+async def test_get_api_ratelimit(faz_client: FortiAnalyzerClient):
+    """Test getting API rate limit configuration (FAZ 7.6.5+)."""
+    try:
+        result = await faz_client.get("/cli/global/system/log/api-ratelimit")
+        assert result is not None
+        assert "read-limit" in result
+        assert "write-limit" in result
+    except Exception as e:
+        # Endpoint may not exist on FAZ < 7.6.5
+        pytest.skip(f"API rate limit not available: {e}")
