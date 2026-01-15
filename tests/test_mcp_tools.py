@@ -21,8 +21,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-# Add src to path for imports
+# Add src and tests to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent))  # noqa: E402
 
 from test_config import (
     FAZ_ENVIRONMENTS,
