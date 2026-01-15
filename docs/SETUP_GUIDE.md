@@ -7,7 +7,7 @@ This guide explains how to set up and use the FortiAnalyzer MCP server with Clau
 1. [Prerequisites](#prerequisites)
 2. [Installation](#installation)
 3. [Configuration](#configuration)
-4. [Claude Desktop Setup](#claude-desktop-setup)
+4. [MCP Client Setup](#mcp-client-setup)
 5. [Testing the Connection](#testing-the-connection)
 6. [Available Tools](#available-tools)
 7. [Example Conversations](#example-conversations)
@@ -50,7 +50,7 @@ brew install uv
 Then install the FortiAnalyzer MCP server:
 
 ```bash
-cd /Users/rstierli/myCoding/API/fortianalyzer-mcp
+cd fortianalyzer-mcp
 
 # Create virtual environment and install dependencies
 uv venv
@@ -61,7 +61,7 @@ uv pip install -e .
 ### Option 2: Using pip
 
 ```bash
-cd /Users/rstierli/myCoding/API/fortianalyzer-mcp
+cd fortianalyzer-mcp
 
 # Create and activate virtual environment
 python3 -m venv .venv
@@ -104,7 +104,7 @@ Create a `.env` file in the project root:
 
 ```bash
 # FortiAnalyzer Connection
-FORTIANALYZER_HOST=faz-prod-02.home.mystier.li
+FORTIANALYZER_HOST=your-faz-hostname
 FORTIANALYZER_API_TOKEN=your-api-token-here
 FORTIANALYZER_VERIFY_SSL=false
 
@@ -114,29 +114,25 @@ LOG_LEVEL=INFO
 
 ---
 
-## Claude Desktop Setup
+## MCP Client Setup
 
-### Step 1: Locate Claude Desktop Configuration
+MCP (Model Context Protocol) is supported by multiple AI platforms. Choose your preferred client:
 
-The Claude Desktop configuration file is located at:
+### Claude Desktop
+
+Edit `claude_desktop_config.json`:
 
 - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 - **Linux**: `~/.config/Claude/claude_desktop_config.json`
 
-### Step 2: Configure the MCP Server
-
-Edit `claude_desktop_config.json` to add the FortiAnalyzer MCP server.
-
-**Option A: Using the script entry point (Recommended)**
-
 ```json
 {
   "mcpServers": {
     "fortianalyzer": {
-      "command": "/Users/rstierli/myCoding/API/fortianalyzer-mcp/.venv/bin/fortianalyzer-mcp",
+      "command": "/path/to/fortianalyzer-mcp/.venv/bin/fortianalyzer-mcp",
       "env": {
-        "FORTIANALYZER_HOST": "faz-prod-02.home.mystier.li",
+        "FORTIANALYZER_HOST": "your-faz-hostname",
         "FORTIANALYZER_API_TOKEN": "your-api-token-here",
         "FORTIANALYZER_VERIFY_SSL": "false",
         "LOG_LEVEL": "INFO"
@@ -146,39 +142,65 @@ Edit `claude_desktop_config.json` to add the FortiAnalyzer MCP server.
 }
 ```
 
-**Option B: Using Python module**
+Restart Claude Desktop after saving (Cmd+Q on macOS, then reopen).
+
+### Claude Code (CLI)
+
+```bash
+# Install Claude Code
+npm install -g @anthropic-ai/claude-code
+
+# Add the MCP server
+claude mcp add fortianalyzer -s user \
+  -e FORTIANALYZER_HOST=your-faz-hostname \
+  -e FORTIANALYZER_API_TOKEN=your-api-token \
+  -e FORTIANALYZER_VERIFY_SSL=false \
+  -- /path/to/fortianalyzer-mcp/.venv/bin/fortianalyzer-mcp
+
+# Verify connection
+claude mcp list
+```
+
+### Perplexity (Mac App)
+
+1. Install the **PerplexityXPC** helper app (required for local MCP)
+2. Open Perplexity Settings → MCP Connectors
+3. Add a new local MCP server:
 
 ```json
 {
-  "mcpServers": {
-    "fortianalyzer": {
-      "command": "/Users/rstierli/myCoding/API/fortianalyzer-mcp/.venv/bin/python",
-      "args": [
-        "-m",
-        "fortianalyzer_mcp"
-      ],
-      "env": {
-        "FORTIANALYZER_HOST": "faz-prod-02.home.mystier.li",
-        "FORTIANALYZER_API_TOKEN": "your-api-token-here",
-        "FORTIANALYZER_VERIFY_SSL": "false",
-        "LOG_LEVEL": "INFO"
-      }
+  "fortianalyzer": {
+    "type": "stdio",
+    "command": "/path/to/fortianalyzer-mcp/.venv/bin/fortianalyzer-mcp",
+    "env": {
+      "FORTIANALYZER_HOST": "your-faz-hostname",
+      "FORTIANALYZER_API_TOKEN": "your-api-token",
+      "FORTIANALYZER_VERIFY_SSL": "false"
     }
   }
 }
 ```
+
+### Other MCP-Compatible Clients
+
+MCP is now widely supported across AI platforms:
+
+| Client | MCP Support | Notes |
+|--------|-------------|-------|
+| **Claude Desktop** | ✓ Native | Full support via config file |
+| **Claude Code** | ✓ Native | CLI-based, `claude mcp add` |
+| **Perplexity** | ✓ Native | Mac app with PerplexityXPC |
+| **ChatGPT** | ✓ | Via plugins/actions |
+| **Google Gemini** | ✓ | Via extensions |
+| **VS Code Copilot** | ✓ | Via MCP extension |
+| **Cursor** | ✓ | Native MCP support |
+
+For other clients, use the standard stdio MCP configuration format shown above.
 
 **Important Notes:**
 - Use the **full path** to the command in your virtual environment
 - Replace credentials with your actual FortiAnalyzer details
 - Set `FORTIANALYZER_VERIFY_SSL` to `false` if using self-signed certificates
-
-### Step 3: Restart Claude Desktop
-
-After saving the configuration:
-1. Completely quit Claude Desktop (Cmd+Q on macOS)
-2. Reopen Claude Desktop
-3. The FortiAnalyzer MCP server should now be available
 
 ---
 
@@ -189,11 +211,11 @@ After saving the configuration:
 Before configuring Claude Desktop, test the server manually:
 
 ```bash
-cd /Users/rstierli/myCoding/API/fortianalyzer-mcp
+cd fortianalyzer-mcp
 source .venv/bin/activate
 
 # Set environment variables
-export FORTIANALYZER_HOST="faz-prod-02.home.mystier.li"
+export FORTIANALYZER_HOST="your-faz-hostname"
 export FORTIANALYZER_API_TOKEN="your-api-token"
 export FORTIANALYZER_VERIFY_SSL="false"
 
@@ -378,28 +400,20 @@ Claude will use `list_report_templates` and `run_report`.
 To verify your setup works correctly:
 
 ```bash
-cd /Users/rstierli/myCoding/API/fortianalyzer-mcp
+cd fortianalyzer-mcp
 source .venv/bin/activate
 
-# Copy and configure test credentials
-cp tests/.env.test.example tests/.env.test
-# Edit tests/.env.test with your API tokens
+# Run unit tests
+pytest tests/
 
-# Load test credentials
-source tests/.env.test
+# Run with coverage
+pytest --cov=src/fortianalyzer_mcp --cov-report=html
 
-# Run all MCP tools tests (23 tests)
-python tests/test_mcp_tools.py
-
-# Run specific category
-python tests/test_mcp_tools.py --category log
-python tests/test_mcp_tools.py --category fortiview
-
-# Run on different FortiAnalyzer environment
-python tests/test_mcp_tools.py --env prod-ai  # FAZ 8.0.0
-
-# List available test categories
-python tests/test_mcp_tools.py --list
+# Run integration tests (requires real FAZ)
+# First set environment variables
+export FORTIANALYZER_HOST="your-faz-hostname"
+export FORTIANALYZER_API_TOKEN="your-api-token"
+pytest tests/integration/
 ```
 
 ---
@@ -416,6 +430,6 @@ python tests/test_mcp_tools.py --list
 ## Support
 
 For issues or questions:
-- Check the [SESSION_PROGRESS.md](../SESSION_PROGRESS.md) for development notes
-- Review test files for usage examples
-- FNDN documentation: `/Users/rstierli/myCoding/API/FortiAnalyzer/FNDN/7.6.4/`
+- Open an issue on [GitHub](https://github.com/rstierli/fortianalyzer-mcp/issues)
+- Review test files in `tests/` for usage examples
+- Check FortiAnalyzer API documentation (FNDN) from Fortinet Developer Network
