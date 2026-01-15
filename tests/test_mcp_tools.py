@@ -44,7 +44,7 @@ def setup_environment_for_tools(config: FAZTestConfig):
 
 
 # We need to mock the server module's get_faz_client before importing tools
-from fortianalyzer_mcp.api.client import FortiAnalyzerClient
+from fortianalyzer_mcp.api.client import FortiAnalyzerClient  # noqa: E402
 
 # Global client that will be used by tools
 _test_client: FortiAnalyzerClient | None = None
@@ -77,10 +77,10 @@ def import_tools_with_mock(config: FAZTestConfig):
     from fortianalyzer_mcp.tools import (
         event_tools,
         fortiview_tools,
-        log_tools,
-        report_tools,
         incident_tools,
         ioc_tools,
+        log_tools,
+        report_tools,
     )
 
     # Patch the _get_client function in each tools module
@@ -97,6 +97,7 @@ def import_tools_with_mock(config: FAZTestConfig):
 
 class TestResult:
     """Container for test results."""
+
     def __init__(self, name: str, category: str):
         self.name = name
         self.category = category
@@ -205,21 +206,23 @@ class MCPToolsTestRunner:
         await self.run_test(
             "event_tools.get_alerts",
             "event",
-            self.event_tools.get_alerts(adom="root", time_range="24-hour", limit=10)
+            self.event_tools.get_alerts(adom="root", time_range="24-hour", limit=10),
         )
 
         # Test get_alert_count
         await self.run_test(
             "event_tools.get_alert_count",
             "event",
-            self.event_tools.get_alert_count(adom="root", time_range="24-hour")
+            self.event_tools.get_alert_count(adom="root", time_range="24-hour"),
         )
 
         # Test get_alert_incident_stats
         await self.run_test(
             "event_tools.get_alert_incident_stats",
             "event",
-            self.event_tools.get_alert_incident_stats(adom="root", time_range="7-day", stat_type="severity")
+            self.event_tools.get_alert_incident_stats(
+                adom="root", time_range="7-day", stat_type="severity"
+            ),
         )
 
     # =========================================================================
@@ -238,12 +241,8 @@ class MCPToolsTestRunner:
             "fortiview_tools.run_fortiview",
             "fortiview",
             self.fortiview_tools.run_fortiview(
-                view_name="top-sources",
-                adom="root",
-                device=device,
-                time_range="1-hour",
-                limit=10
-            )
+                view_name="top-sources", adom="root", device=device, time_range="1-hour", limit=10
+            ),
         )
 
         # If we got a TID, test fetch_fortiview
@@ -254,7 +253,7 @@ class MCPToolsTestRunner:
             await self.run_test(
                 "fortiview_tools.fetch_fortiview",
                 "fortiview",
-                self.fortiview_tools.fetch_fortiview(tid=tid, view_name="top-sources", adom="root")
+                self.fortiview_tools.fetch_fortiview(tid=tid, view_name="top-sources", adom="root"),
             )
 
         # Test get_fortiview_data (convenience function with auto TID handling)
@@ -267,29 +266,35 @@ class MCPToolsTestRunner:
                 device=device,
                 time_range="1-hour",
                 limit=5,
-                timeout=30
-            )
+                timeout=30,
+            ),
         )
 
         # Test get_top_sources
         await self.run_test(
             "fortiview_tools.get_top_sources",
             "fortiview",
-            self.fortiview_tools.get_top_sources(adom="root", device=device, time_range="1-hour", limit=5)
+            self.fortiview_tools.get_top_sources(
+                adom="root", device=device, time_range="1-hour", limit=5
+            ),
         )
 
         # Test get_top_applications
         await self.run_test(
             "fortiview_tools.get_top_applications",
             "fortiview",
-            self.fortiview_tools.get_top_applications(adom="root", device=device, time_range="1-hour", limit=5)
+            self.fortiview_tools.get_top_applications(
+                adom="root", device=device, time_range="1-hour", limit=5
+            ),
         )
 
         # Test get_top_threats
         await self.run_test(
             "fortiview_tools.get_top_threats",
             "fortiview",
-            self.fortiview_tools.get_top_threats(adom="root", device=device, time_range="24-hour", limit=5)
+            self.fortiview_tools.get_top_threats(
+                adom="root", device=device, time_range="24-hour", limit=5
+            ),
         )
 
     # =========================================================================
@@ -304,14 +309,12 @@ class MCPToolsTestRunner:
         await self.run_test(
             "log_tools.get_log_fields",
             "log",
-            self.log_tools.get_log_fields(adom="root", logtype="traffic")
+            self.log_tools.get_log_fields(adom="root", logtype="traffic"),
         )
 
         # Test get_log_stats - quick metadata query
         await self.run_test(
-            "log_tools.get_log_stats",
-            "log",
-            self.log_tools.get_log_stats(adom="root")
+            "log_tools.get_log_stats", "log", self.log_tools.get_log_stats(adom="root")
         )
 
         # Test query_logs - full TID workflow with traffic logs (short time range)
@@ -319,12 +322,8 @@ class MCPToolsTestRunner:
             "log_tools.query_logs (traffic)",
             "log",
             self.log_tools.query_logs(
-                adom="root",
-                logtype="traffic",
-                time_range="1-hour",
-                limit=10,
-                timeout=30
-            )
+                adom="root", logtype="traffic", time_range="1-hour", limit=10, timeout=30
+            ),
         )
 
         # If we got results with a TID, test fetch_more_logs
@@ -333,7 +332,7 @@ class MCPToolsTestRunner:
             await self.run_test(
                 "log_tools.fetch_more_logs",
                 "log",
-                self.log_tools.fetch_more_logs(adom="root", tid=tid, limit=5, offset=0)
+                self.log_tools.fetch_more_logs(adom="root", tid=tid, limit=5, offset=0),
             )
 
         # Test search_traffic_logs convenience function
@@ -341,11 +340,8 @@ class MCPToolsTestRunner:
             "log_tools.search_traffic_logs",
             "log",
             self.log_tools.search_traffic_logs(
-                adom="root",
-                time_range="1-hour",
-                limit=10,
-                timeout=30
-            )
+                adom="root", time_range="1-hour", limit=10, timeout=30
+            ),
         )
 
         # Test search_event_logs convenience function
@@ -353,11 +349,8 @@ class MCPToolsTestRunner:
             "log_tools.search_event_logs",
             "log",
             self.log_tools.search_event_logs(
-                adom="root",
-                time_range="1-hour",
-                limit=10,
-                timeout=30
-            )
+                adom="root", time_range="1-hour", limit=10, timeout=30
+            ),
         )
 
         # Test search_security_logs (attack logs) - may return empty if no attacks
@@ -365,11 +358,8 @@ class MCPToolsTestRunner:
             "log_tools.search_security_logs",
             "log",
             self.log_tools.search_security_logs(
-                adom="root",
-                time_range="24-hour",
-                limit=10,
-                timeout=30
-            )
+                adom="root", time_range="24-hour", limit=10, timeout=30
+            ),
         )
 
     # =========================================================================
@@ -384,14 +374,16 @@ class MCPToolsTestRunner:
         await self.run_test(
             "report_tools.list_report_templates",
             "report",
-            self.report_tools.list_report_templates(adom="root")
+            self.report_tools.list_report_templates(adom="root"),
         )
 
         # Test get_report_history
         await self.run_test(
             "report_tools.get_report_history",
             "report",
-            self.report_tools.get_report_history(adom="root", time_range="30-day", state="generated")
+            self.report_tools.get_report_history(
+                adom="root", time_range="30-day", state="generated"
+            ),
         )
 
         # Note: We don't test run_report as it actually generates a report
@@ -409,21 +401,21 @@ class MCPToolsTestRunner:
         await self.run_test(
             "incident_tools.get_incidents",
             "incident",
-            self.incident_tools.get_incidents(adom="root", time_range="30-day", limit=10)
+            self.incident_tools.get_incidents(adom="root", time_range="30-day", limit=10),
         )
 
         # Test get_incident_count
         await self.run_test(
             "incident_tools.get_incident_count",
             "incident",
-            self.incident_tools.get_incident_count(adom="root", time_range="30-day")
+            self.incident_tools.get_incident_count(adom="root", time_range="30-day"),
         )
 
         # Test get_incident_stats
         await self.run_test(
             "incident_tools.get_incident_stats",
             "incident",
-            self.incident_tools.get_incident_stats(adom="root", time_range="30-day")
+            self.incident_tools.get_incident_stats(adom="root", time_range="30-day"),
         )
 
         # Note: We don't test create_incident/update_incident to avoid modifying data
@@ -438,16 +430,14 @@ class MCPToolsTestRunner:
 
         # Test get_ioc_license_state
         await self.run_test(
-            "ioc_tools.get_ioc_license_state",
-            "ioc",
-            self.ioc_tools.get_ioc_license_state()
+            "ioc_tools.get_ioc_license_state", "ioc", self.ioc_tools.get_ioc_license_state()
         )
 
         # Test get_ioc_rescan_history
         await self.run_test(
             "ioc_tools.get_ioc_rescan_history",
             "ioc",
-            self.ioc_tools.get_ioc_rescan_history(adom="root")
+            self.ioc_tools.get_ioc_rescan_history(adom="root"),
         )
 
         # Note: We don't test run_ioc_rescan as it triggers an actual rescan
@@ -513,7 +503,7 @@ Examples:
     python test_mcp_tools.py --env prod-ai      # Run on FAZ 8.0.0 Beta
     python test_mcp_tools.py --category event   # Run only event tools tests
     python test_mcp_tools.py --list             # List available tests
-        """
+        """,
     )
 
     parser.add_argument(
@@ -544,13 +534,17 @@ Examples:
         print("  event     - event_tools: get_alerts, get_alert_count, get_alert_incident_stats")
         print("  fortiview - fortiview_tools: run_fortiview, fetch_fortiview, get_fortiview_data,")
         print("              get_top_sources, get_top_applications, get_top_threats")
-        print("  log       - log_tools: get_log_fields, get_log_stats, query_logs, fetch_more_logs,")
+        print(
+            "  log       - log_tools: get_log_fields, get_log_stats, query_logs, fetch_more_logs,"
+        )
         print("              search_traffic_logs, search_event_logs, search_security_logs")
         print("  report    - report_tools: list_report_templates, get_report_history")
         print("  incident  - incident_tools: get_incidents, get_incident_count, get_incident_stats")
         print("  ioc       - ioc_tools: get_ioc_license_state, get_ioc_rescan_history")
         print("  all       - Run all tests")
-        print("\nNote: Destructive operations (create_incident, run_ioc_rescan, etc.) are not tested")
+        print(
+            "\nNote: Destructive operations (create_incident, run_ioc_rescan, etc.) are not tested"
+        )
         return
 
     # Map env argument to FAZEnvironment
@@ -569,8 +563,8 @@ Examples:
 
     if not config.has_credentials:
         print(f"Error: No credentials configured for {config.name}")
-        print(f"Set environment variables:")
-        print(f"  FAZ_PROD_764_API_TOKEN or FAZ_PROD_764_PASSWORD")
+        print("Set environment variables:")
+        print("  FAZ_PROD_764_API_TOKEN or FAZ_PROD_764_PASSWORD")
         sys.exit(1)
 
     # Run tests

@@ -218,7 +218,7 @@ class FortiAnalyzerClient:
             result = response.json()
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON response: {response.text[:500]}")
-            raise APIError(f"Invalid JSON response: {e}")
+            raise APIError(f"Invalid JSON response: {e}") from e
 
         # Debug logging - show what we received (with sensitive data masked)
         logger.debug(f"API Response: {sanitize_json_for_logging(result, indent=2)[:2000]}")
@@ -358,18 +358,14 @@ class FortiAnalyzerClient:
         result = await self.get(f"/dvmdb/adom/{adom}/device", **params)
         return result if isinstance(result, list) else [result] if result else []
 
-    async def get_device(
-        self, device: str, adom: str = "root", loadsub: int = 0
-    ) -> dict[str, Any]:
+    async def get_device(self, device: str, adom: str = "root", loadsub: int = 0) -> dict[str, Any]:
         """Get specific device.
 
         FNDN: GET /dvmdb/adom/{adom}/device/{device}
         """
         return await self.get(f"/dvmdb/adom/{adom}/device/{device}", loadsub=loadsub)
 
-    async def list_device_vdoms(
-        self, device: str, adom: str = "root"
-    ) -> list[dict[str, Any]]:
+    async def list_device_vdoms(self, device: str, adom: str = "root") -> list[dict[str, Any]]:
         """List VDOMs for a device.
 
         FNDN: GET /dvmdb/adom/{adom}/device/{device}/vdom
@@ -991,9 +987,7 @@ class FortiAnalyzerClient:
         if sort_by:
             params["sort-by"] = sort_by
 
-        return await self._raw_request(
-            "add", f"/fortiview/adom/{adom}/{view_name}/run", **params
-        )
+        return await self._raw_request("add", f"/fortiview/adom/{adom}/{view_name}/run", **params)
 
     async def fortiview_fetch(
         self,
@@ -1042,9 +1036,7 @@ class FortiAnalyzerClient:
         if filter:
             params["filter"] = filter
 
-        return await self._raw_request(
-            "get", f"/config/adom/{adom}/sql-report/layout", **params
-        )
+        return await self._raw_request("get", f"/config/adom/{adom}/sql-report/layout", **params)
 
     async def report_run(
         self,
@@ -1096,9 +1088,7 @@ class FortiAnalyzerClient:
             adom: ADOM name
             tid: Task ID (UUID string from report_run)
         """
-        return await self._raw_request(
-            "get", f"/report/adom/{adom}/run/{tid}", apiver=API_VERSION
-        )
+        return await self._raw_request("get", f"/report/adom/{adom}/run/{tid}", apiver=API_VERSION)
 
     async def report_get_data(
         self,
@@ -1187,9 +1177,7 @@ class FortiAnalyzerClient:
         if layout_id is not None:
             params["filter"] = ["name", "==", str(layout_id)]
 
-        return await self._raw_request(
-            "get", f"/config/adom/{adom}/sql-report/schedule", **params
-        )
+        return await self._raw_request("get", f"/config/adom/{adom}/sql-report/schedule", **params)
 
     async def create_report_schedule(
         self,
@@ -1232,9 +1220,7 @@ class FortiAnalyzerClient:
 
         Returns list of reports currently being generated.
         """
-        return await self._raw_request(
-            "get", f"/report/adom/{adom}/run", apiver=API_VERSION
-        )
+        return await self._raw_request("get", f"/report/adom/{adom}/run", apiver=API_VERSION)
 
     # =========================================================================
     # Incident Management (from incidentmgmt.json)

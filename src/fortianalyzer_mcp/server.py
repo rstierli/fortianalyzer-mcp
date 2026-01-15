@@ -1,8 +1,9 @@
 """FortiAnalyzer MCP Server implementation."""
 
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
@@ -187,12 +188,14 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
             for tool_name, description in tools:
                 search_text = f"{tool_name} {category} {description}".lower()
                 if all(tok in search_text for tok in op.split()):
-                    results.append({
-                        "name": tool_name,
-                        "category": category,
-                        "description": description,
-                        "how_to_use": f"execute_advanced_tool(tool_name='{tool_name}', ...)",
-                    })
+                    results.append(
+                        {
+                            "name": tool_name,
+                            "category": category,
+                            "description": description,
+                            "how_to_use": f"execute_advanced_tool(tool_name='{tool_name}', ...)",
+                        }
+                    )
 
         return {
             "status": "success" if results else "not_found",
@@ -462,9 +465,9 @@ def run_stdio() -> None:
 
 def run_http() -> None:
     """Run MCP server in HTTP mode for Docker deployment."""
-    import uvicorn
     from contextlib import asynccontextmanager
 
+    import uvicorn
     from starlette.applications import Starlette
     from starlette.requests import Request
     from starlette.responses import JSONResponse

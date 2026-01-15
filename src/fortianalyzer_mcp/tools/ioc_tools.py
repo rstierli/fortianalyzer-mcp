@@ -298,7 +298,7 @@ async def run_and_wait_ioc_rescan(
         client = _get_client()
         tr = _parse_time_range(time_range)
 
-        logger.info(f"Running IOC rescan and waiting for completion")
+        logger.info("Running IOC rescan and waiting for completion")
 
         # Start the rescan
         run_result = await client.ioc_rescan_run(

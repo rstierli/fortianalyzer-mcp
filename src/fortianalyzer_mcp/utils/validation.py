@@ -258,8 +258,7 @@ def validate_log_type(logtype: str) -> str:
 
     if logtype not in VALID_LOG_TYPES:
         raise ValidationError(
-            f"Invalid log type '{logtype}'. "
-            f"Valid types: {', '.join(sorted(VALID_LOG_TYPES))}"
+            f"Invalid log type '{logtype}'. Valid types: {', '.join(sorted(VALID_LOG_TYPES))}"
         )
 
     return logtype

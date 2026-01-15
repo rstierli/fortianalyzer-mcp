@@ -13,7 +13,6 @@ import logging
 import os
 import zipfile
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 from fortianalyzer_mcp.server import get_faz_client, mcp
@@ -107,14 +106,14 @@ def _build_ips_filter(
             filters.append(f'severity="{severity[0]}"')
         else:
             sev_parts = [f'severity="{s}"' for s in severity]
-            filters.append(f'({" or ".join(sev_parts)})')
+            filters.append(f"({' or '.join(sev_parts)})")
 
     # Attack name filter
     if attack_exact:
         filters.append(f'attack="{attack_exact}"')
     elif attack_contains:
         # Wildcard search: attack=*Remote.Code.Execution*
-        filters.append(f'attack=*{attack_contains}*')
+        filters.append(f"attack=*{attack_contains}*")
 
     # Action filter: (action="blocked" or action="dropped")
     if action:
@@ -122,7 +121,7 @@ def _build_ips_filter(
             filters.append(f'action="{action[0]}"')
         else:
             act_parts = [f'action="{a}"' for a in action]
-            filters.append(f'({" or ".join(act_parts)})')
+            filters.append(f"({' or '.join(act_parts)})")
 
     # CVE filters
     if cve:
@@ -448,9 +447,7 @@ async def get_pcap_by_session(
                     "message": f"Search timed out after {timeout} seconds",
                 }
 
-            fetch_result = await client.logsearch_fetch(
-                adom=adom, tid=tid, limit=10, offset=0
-            )
+            fetch_result = await client.logsearch_fetch(adom=adom, tid=tid, limit=10, offset=0)
 
             if fetch_result.get("percentage", 0) >= 100:
                 break
@@ -1016,18 +1013,20 @@ async def list_available_pcaps(
         # Format results for easy reading
         events = []
         for log in search_result.get("logs", []):
-            events.append({
-                "session_id": log.get("sessionid"),
-                "attack": log.get("attack"),
-                "severity": log.get("severity"),
-                "action": log.get("action"),
-                "srcip": log.get("srcip"),
-                "dstip": log.get("dstip"),
-                "srcport": log.get("srcport"),
-                "dstport": log.get("dstport"),
-                "cve": log.get("cve"),
-                "timestamp": f"{log.get('date', '')} {log.get('time', '')}".strip(),
-            })
+            events.append(
+                {
+                    "session_id": log.get("sessionid"),
+                    "attack": log.get("attack"),
+                    "severity": log.get("severity"),
+                    "action": log.get("action"),
+                    "srcip": log.get("srcip"),
+                    "dstip": log.get("dstip"),
+                    "srcport": log.get("srcport"),
+                    "dstport": log.get("dstport"),
+                    "cve": log.get("cve"),
+                    "timestamp": f"{log.get('date', '')} {log.get('time', '')}".strip(),
+                }
+            )
 
         return {
             "status": "success",

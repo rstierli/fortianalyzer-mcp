@@ -393,5 +393,3 @@ async def get_alert_incident_stats(
     except Exception as e:
         logger.error(f"Failed to get alert-incident stats: {e}")
         return {"status": "error", "message": str(e)}
-
-

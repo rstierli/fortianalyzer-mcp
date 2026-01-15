@@ -26,8 +26,6 @@ from test_config import (
     FAZ_ENVIRONMENTS,
     FAZEnvironment,
     FAZTestConfig,
-    get_available_environments,
-    get_default_environment,
 )
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
@@ -35,6 +33,7 @@ from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 
 class TestResult:
     """Container for test results."""
+
     def __init__(self, name: str):
         self.name = name
         self.passed = False
@@ -107,17 +106,11 @@ class FAZTestRunner:
 
     async def test_system_status(self) -> TestResult:
         """Test: Get system status."""
-        return await self.run_test(
-            "system_status",
-            self.client.get_system_status()
-        )
+        return await self.run_test("system_status", self.client.get_system_status())
 
     async def test_ha_status(self) -> TestResult:
         """Test: Get HA status."""
-        return await self.run_test(
-            "ha_status",
-            self.client.get_ha_status()
-        )
+        return await self.run_test("ha_status", self.client.get_ha_status())
 
     # =========================================================================
     # ADOM Tests
@@ -125,17 +118,11 @@ class FAZTestRunner:
 
     async def test_list_adoms(self) -> TestResult:
         """Test: List all ADOMs."""
-        return await self.run_test(
-            "list_adoms",
-            self.client.list_adoms()
-        )
+        return await self.run_test("list_adoms", self.client.list_adoms())
 
     async def test_get_adom_root(self) -> TestResult:
         """Test: Get root ADOM details."""
-        return await self.run_test(
-            "get_adom_root",
-            self.client.get_adom("root")
-        )
+        return await self.run_test("get_adom_root", self.client.get_adom("root"))
 
     # =========================================================================
     # Device Tests
@@ -143,16 +130,12 @@ class FAZTestRunner:
 
     async def test_list_devices(self) -> TestResult:
         """Test: List devices in root ADOM."""
-        return await self.run_test(
-            "list_devices",
-            self.client.list_devices(adom="root")
-        )
+        return await self.run_test("list_devices", self.client.list_devices(adom="root"))
 
     async def test_list_device_groups(self) -> TestResult:
         """Test: List device groups."""
         return await self.run_test(
-            "list_device_groups",
-            self.client.list_device_groups(adom="root")
+            "list_device_groups", self.client.list_device_groups(adom="root")
         )
 
     # =========================================================================
@@ -161,10 +144,7 @@ class FAZTestRunner:
 
     async def test_list_tasks(self) -> TestResult:
         """Test: List tasks."""
-        return await self.run_test(
-            "list_tasks",
-            self.client.list_tasks()
-        )
+        return await self.run_test("list_tasks", self.client.list_tasks())
 
     # =========================================================================
     # LogView Tests
@@ -173,16 +153,12 @@ class FAZTestRunner:
     async def test_get_logfields(self) -> TestResult:
         """Test: Get log fields for traffic logs."""
         return await self.run_test(
-            "get_logfields_traffic",
-            self.client.get_logfields(adom="root", logtype="traffic")
+            "get_logfields_traffic", self.client.get_logfields(adom="root", logtype="traffic")
         )
 
     async def test_get_logstats(self) -> TestResult:
         """Test: Get log statistics."""
-        return await self.run_test(
-            "get_logstats",
-            self.client.get_logstats(adom="root")
-        )
+        return await self.run_test("get_logstats", self.client.get_logstats(adom="root"))
 
     async def test_logsearch_workflow(self) -> TestResult:
         """Test: Full log search workflow (start -> fetch -> cancel)."""
@@ -294,8 +270,7 @@ class FAZTestRunner:
             "end": end_time.strftime("%Y-%m-%d %H:%M:%S"),
         }
         return await self.run_test(
-            "get_alerts",
-            self.client.get_alerts(adom="root", time_range=time_range, limit=10)
+            "get_alerts", self.client.get_alerts(adom="root", time_range=time_range, limit=10)
         )
 
     async def test_get_alerts_count(self) -> TestResult:
@@ -307,8 +282,7 @@ class FAZTestRunner:
             "end": end_time.strftime("%Y-%m-%d %H:%M:%S"),
         }
         return await self.run_test(
-            "get_alerts_count",
-            self.client.get_alerts_count(adom="root", time_range=time_range)
+            "get_alerts_count", self.client.get_alerts_count(adom="root", time_range=time_range)
         )
 
     async def run_event_tests(self) -> None:
@@ -382,8 +356,7 @@ class FAZTestRunner:
     async def test_report_list_templates(self) -> TestResult:
         """Test: List report templates."""
         return await self.run_test(
-            "report_list_templates",
-            self.client.report_list_templates(adom="root")
+            "report_list_templates", self.client.report_list_templates(adom="root")
         )
 
     async def test_report_get_state(self) -> TestResult:
@@ -395,8 +368,7 @@ class FAZTestRunner:
             "end": end_time.strftime("%Y-%m-%d %H:%M:%S"),
         }
         return await self.run_test(
-            "report_get_state",
-            self.client.report_get_state(adom="root", time_range=time_range)
+            "report_get_state", self.client.report_get_state(adom="root", time_range=time_range)
         )
 
     async def run_report_tests(self) -> None:
@@ -418,8 +390,7 @@ class FAZTestRunner:
             "end": end_time.strftime("%Y-%m-%d %H:%M:%S"),
         }
         return await self.run_test(
-            "get_incidents",
-            self.client.get_incidents(adom="root", time_range=time_range, limit=10)
+            "get_incidents", self.client.get_incidents(adom="root", time_range=time_range, limit=10)
         )
 
     async def test_get_incidents_count(self) -> TestResult:
@@ -432,7 +403,7 @@ class FAZTestRunner:
         }
         return await self.run_test(
             "get_incidents_count",
-            self.client.get_incidents_count(adom="root", time_range=time_range)
+            self.client.get_incidents_count(adom="root", time_range=time_range),
         )
 
     async def run_incident_tests(self) -> None:
@@ -447,10 +418,7 @@ class FAZTestRunner:
 
     async def test_ioc_license_state(self) -> TestResult:
         """Test: Get IOC license state."""
-        return await self.run_test(
-            "ioc_license_state",
-            self.client.get_ioc_license_state()
-        )
+        return await self.run_test("ioc_license_state", self.client.get_ioc_license_state())
 
     async def run_ioc_tests(self) -> None:
         """Run all IOC tests."""
@@ -496,7 +464,7 @@ async def check_connectivity() -> None:
     """Check connectivity to all FAZ environments."""
     print("\n=== FortiAnalyzer Connectivity Check ===\n")
 
-    for env, config in FAZ_ENVIRONMENTS.items():
+    for _env, config in FAZ_ENVIRONMENTS.items():
         status = "AVAILABLE" if config.is_available else "NOT AVAILABLE"
         creds = "configured" if config.has_credentials else "NOT CONFIGURED"
 
@@ -520,7 +488,7 @@ async def check_connectivity() -> None:
                 await client.connect()
                 status = await client.get_system_status()
                 await client.disconnect()
-                print(f"  Connection:  OK")
+                print("  Connection:  OK")
                 print(f"  FAZ Version: {status.get('Version', 'unknown')}")
             except Exception as e:
                 print(f"  Connection:  FAILED - {e}")
@@ -540,7 +508,7 @@ Examples:
     python run_tests.py --test log         # Run only log tests
     python run_tests.py --status           # Check FAZ connectivity
     python run_tests.py --list             # List available tests
-        """
+        """,
     )
 
     parser.add_argument(
@@ -552,7 +520,19 @@ Examples:
 
     parser.add_argument(
         "--test",
-        choices=["all", "system", "adom", "device", "task", "log", "event", "fortiview", "report", "incident", "ioc"],
+        choices=[
+            "all",
+            "system",
+            "adom",
+            "device",
+            "task",
+            "log",
+            "event",
+            "fortiview",
+            "report",
+            "incident",
+            "ioc",
+        ],
         default="all",
         help="Test category to run (default: all)",
     )
@@ -618,8 +598,8 @@ Examples:
 
     if not config.has_credentials:
         print(f"Error: No credentials configured for {config.name}")
-        print(f"Set environment variables:")
-        print(f"  FAZ_PROD_764_API_TOKEN or FAZ_PROD_764_PASSWORD")
+        print("Set environment variables:")
+        print("  FAZ_PROD_764_API_TOKEN or FAZ_PROD_764_PASSWORD")
         sys.exit(1)
 
     # Run tests

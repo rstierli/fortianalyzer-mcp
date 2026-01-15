@@ -13,14 +13,16 @@ from enum import Enum
 
 class FAZEnvironment(Enum):
     """Available FortiAnalyzer test environments."""
-    PROD_764 = "faz-prod-02"      # FAZ 7.6.4 GA
-    PROD_AI = "faz-prod-ai"       # FAZ 8.0.0 Beta
-    PROD_748 = "faz-prod-74"      # FAZ 7.4.8 GA (not yet running)
+
+    PROD_764 = "faz-prod-02"  # FAZ 7.6.4 GA
+    PROD_AI = "faz-prod-ai"  # FAZ 8.0.0 Beta
+    PROD_748 = "faz-prod-74"  # FAZ 7.4.8 GA (not yet running)
 
 
 @dataclass
 class FAZTestConfig:
     """Configuration for a FortiAnalyzer test environment."""
+
     name: str
     host: str
     version: str

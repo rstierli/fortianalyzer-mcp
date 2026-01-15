@@ -151,10 +151,7 @@ class Settings(BaseSettings):
     @property
     def has_session_auth(self) -> bool:
         """Check if session-based authentication is configured."""
-        return (
-            self.FORTIANALYZER_USERNAME is not None
-            and self.FORTIANALYZER_PASSWORD is not None
-        )
+        return self.FORTIANALYZER_USERNAME is not None and self.FORTIANALYZER_PASSWORD is not None
 
     @property
     def base_url(self) -> str:
@@ -198,7 +195,7 @@ class Settings(BaseSettings):
         return handlers
 
 
-@lru_cache()
+@lru_cache
 def get_settings() -> Settings:
     """Get cached settings instance.
 

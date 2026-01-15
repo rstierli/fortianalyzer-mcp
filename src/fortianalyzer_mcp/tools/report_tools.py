@@ -11,7 +11,6 @@ import logging
 import os
 import zipfile
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 from fortianalyzer_mcp.server import get_faz_client, mcp
@@ -125,7 +124,7 @@ async def _get_layout_id_by_title(client: Any, adom: str, title: str) -> int | N
             layouts = [layouts] if layouts else []
 
         # Filter out templates - only search actual layouts
-        layouts = [l for l in layouts if l.get("is-template") != 1]
+        layouts = [layout for layout in layouts if layout.get("is-template") != 1]
 
         # Search for matching title (case-insensitive)
         title_lower = title.lower()
@@ -146,9 +145,7 @@ async def _get_layout_id_by_title(client: Any, adom: str, title: str) -> int | N
         return None
 
 
-async def _ensure_schedule_exists(
-    client: Any, adom: str, layout_id: int
-) -> dict[str, Any]:
+async def _ensure_schedule_exists(client: Any, adom: str, layout_id: int) -> dict[str, Any]:
     """Ensure a schedule exists for the given layout.
 
     FortiAnalyzer requires a schedule to exist before running a report.
@@ -175,9 +172,7 @@ async def _ensure_schedule_exists(
 
         # Create schedule if it doesn't exist
         logger.info(f"Creating schedule for layout-id {layout_id}")
-        create_result = await client.create_report_schedule(
-            adom=adom, layout_id=layout_id
-        )
+        create_result = await client.create_report_schedule(adom=adom, layout_id=layout_id)
         return {"exists": False, "created": True, "result": create_result}
 
     except Exception as e:
@@ -227,12 +222,14 @@ async def list_report_layouts(adom: str = "root") -> dict[str, Any]:
             # Skip templates - only show actual layouts
             if layout.get("is-template") == 1:
                 continue
-            simplified.append({
-                "layout-id": layout.get("layout-id"),
-                "title": layout.get("title"),
-                "description": layout.get("description", ""),
-                "category": layout.get("category", ""),
-            })
+            simplified.append(
+                {
+                    "layout-id": layout.get("layout-id"),
+                    "title": layout.get("title"),
+                    "description": layout.get("description", ""),
+                    "category": layout.get("category", ""),
+                }
+            )
 
         return {
             "status": "success",
@@ -433,9 +430,7 @@ async def get_report_data(
 
         logger.info(f"Downloading report data for TID {tid}")
 
-        result = await client.report_get_data(
-            adom=adom, tid=tid, output_format=output_format
-        )
+        result = await client.report_get_data(adom=adom, tid=tid, output_format=output_format)
 
         return {
             "status": "success",
@@ -649,7 +644,9 @@ async def run_and_wait_report(
 
             # Check running reports to see if our TID is still in progress
             running_result = await client.get_running_reports(adom=adom)
-            running_data = running_result.get("data", []) if isinstance(running_result, dict) else []
+            running_data = (
+                running_result.get("data", []) if isinstance(running_result, dict) else []
+            )
             if not isinstance(running_data, list):
                 running_data = [running_data] if running_data else []
 
@@ -739,9 +736,7 @@ async def save_report(
         logger.info(f"Downloading report {tid} in {output_format} format")
 
         # Get report data from FortiAnalyzer
-        result = await client.report_get_data(
-            adom=adom, tid=tid, output_format=output_format
-        )
+        result = await client.report_get_data(adom=adom, tid=tid, output_format=output_format)
 
         if not isinstance(result, dict):
             return {"status": "error", "message": "Unexpected response format"}
