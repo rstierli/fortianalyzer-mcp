@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
-from fortianalyzer_mcp.api.client import FortiAnalyzerClient
+from fortianalyzer_mcp.api.client import FortiAnalyzerClient  # noqa: E402
 
 
 @pytest.fixture
