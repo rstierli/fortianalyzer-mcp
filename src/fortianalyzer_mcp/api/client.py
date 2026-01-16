@@ -980,12 +980,13 @@ class FortiAnalyzerClient:
         self,
         adom: str,
         view_name: str,
-        device: list[dict[str, str]],
-        time_range: dict[str, str],
+        device: list[dict[str, str]] | None = None,
+        time_range: dict[str, str] | None = None,
         filter: str | None = None,
         limit: int = 100,
         offset: int = 0,
         sort_by: list[dict[str, str]] | None = None,
+        case_sensitive: bool = False,
     ) -> dict[str, Any]:
         """Start a FortiView request.
 
@@ -999,20 +1000,26 @@ class FortiAnalyzerClient:
             adom: ADOM name
             view_name: FortiView name (e.g., "top-sources", "top-destinations",
                        "top-applications", "top-threats", "top-websites", etc.)
-            device: Device filter list [{"devid": "FGT..."}, ...]
+            device: Device filter list [{"devid": "FGT..."}, ...], defaults to All_Devices
             time_range: {"start": "2024-01-01 00:00:00", "end": "2024-01-02 00:00:00"}
             filter: Filter expression
             limit: Max records (1-1000)
             offset: Record offset
             sort_by: Sort criteria [{"field": "sessions", "order": "desc"}]
+            case_sensitive: Whether filter is case-sensitive (default: False)
 
         Returns:
             {"tid": 12345} - Task ID for fetching results
         """
+        # Default to All_Devices if no device specified
+        if not device:
+            device = [{"devid": "All_Devices"}]
+
         params: dict[str, Any] = {
             "apiver": API_VERSION,
+            "case-sensitive": case_sensitive,
             "device": device,
-            "time-range": time_range,
+            "time-range": time_range or {},
             "limit": limit,
             "offset": offset,
         }
