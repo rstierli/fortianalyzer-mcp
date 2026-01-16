@@ -1,6 +1,5 @@
 """Tests for FortiAnalyzer system tools."""
 
-
 import pytest
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
