@@ -54,6 +54,7 @@ class FortiAnalyzerClient:
 
         self._fmg: FortiManager | None = None
         self._connected = False
+        self._faz_version: tuple[int, int, int] | None = None  # (major, minor, patch)
 
         logger.info(f"Initialized FortiAnalyzer client for {self.host}")
 
@@ -147,6 +148,39 @@ class FortiAnalyzerClient:
     def is_connected(self) -> bool:
         """Check if client is connected."""
         return self._connected and self._fmg is not None
+
+    @property
+    def faz_version(self) -> tuple[int, int, int] | None:
+        """Get cached FortiAnalyzer version tuple (major, minor, patch)."""
+        return self._faz_version
+
+    async def _detect_version(self) -> tuple[int, int, int]:
+        """Detect and cache FortiAnalyzer version.
+
+        Returns tuple of (major, minor, patch).
+        """
+        if self._faz_version is not None:
+            return self._faz_version
+
+        try:
+            status = await self.get_system_status()
+            version_str = status.get("Version", "7.0.0")
+            # Version format: "v7.6.5-build3653 251215 (GA.M)"
+            version_part = version_str.split("-")[0].split()[0]
+            # Strip leading 'v' if present
+            version_part = version_part.lstrip("v")
+            parts = version_part.split(".")
+            self._faz_version = (
+                int(parts[0]) if len(parts) > 0 else 7,
+                int(parts[1]) if len(parts) > 1 else 0,
+                int(parts[2]) if len(parts) > 2 else 0,
+            )
+            logger.info(f"Detected FortiAnalyzer version: {self._faz_version}")
+        except Exception as e:
+            logger.warning(f"Failed to detect FAZ version, assuming 7.0.0: {e}")
+            self._faz_version = (7, 0, 0)
+
+        return self._faz_version
 
     def _ensure_connected(self) -> FortiManager:
         """Ensure client is connected and return pyfmg instance."""

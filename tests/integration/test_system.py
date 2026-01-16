@@ -17,6 +17,31 @@ async def test_get_system_status(faz_client: FortiAnalyzerClient):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_detect_version(faz_client: FortiAnalyzerClient):
+    """Test version detection."""
+    # Version should not be set before detection
+    # (may already be set if other tests ran first, so we just verify the method works)
+    version = await faz_client._detect_version()
+
+    # Should return a 3-tuple of integers
+    assert isinstance(version, tuple)
+    assert len(version) == 3
+    assert all(isinstance(v, int) for v in version)
+
+    # Version should be reasonable (7.x.x or higher)
+    major, minor, patch = version
+    assert major >= 7
+
+    # Property should now return the cached version
+    assert faz_client.faz_version == version
+
+    # Calling again should return the same cached value
+    version2 = await faz_client._detect_version()
+    assert version2 == version
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_get_ha_status(faz_client: FortiAnalyzerClient):
     """Test getting HA status."""
     status = await faz_client.get_ha_status()

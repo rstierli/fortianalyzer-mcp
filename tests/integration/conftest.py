@@ -4,6 +4,10 @@ import os
 from datetime import datetime, timedelta
 
 import pytest
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 
