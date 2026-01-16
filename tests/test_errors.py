@@ -3,6 +3,7 @@
 import pytest
 
 from fortianalyzer_mcp.utils.errors import (
+    ERROR_CODE_MAP,
     APIError,
     AuthenticationError,
     ConnectionError,
@@ -12,10 +13,8 @@ from fortianalyzer_mcp.utils.errors import (
     TimeoutError,
     ValidationError,
     WorkspaceError,
-    ERROR_CODE_MAP,
     parse_faz_error,
 )
-
 
 # =============================================================================
 # Base Exception Tests

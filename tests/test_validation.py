@@ -12,8 +12,8 @@ from fortianalyzer_mcp.utils.validation import (
     DEVICE_SERIAL_PATTERN,
     MASK_VALUE,
     SENSITIVE_FIELDS,
-    VALID_LOG_TYPES,
     VALID_FORTIVIEW_VIEWS,
+    VALID_LOG_TYPES,
     VALID_SEVERITIES,
     ValidationError,
     get_allowed_output_dirs,
@@ -28,7 +28,6 @@ from fortianalyzer_mcp.utils.validation import (
     validate_output_path,
     validate_severity,
 )
-
 
 # =============================================================================
 # Sanitization Tests
@@ -225,9 +224,7 @@ class TestPatterns:
         """Test invalid serial numbers."""
         invalid = ["XX100FTK19001333", "FG123", "fg100ftk19001333", "12345678901234"]
         for serial in invalid:
-            assert not DEVICE_SERIAL_PATTERN.match(
-                serial
-            ), f"'{serial}' should be invalid"
+            assert not DEVICE_SERIAL_PATTERN.match(serial), f"'{serial}' should be invalid"
 
 
 # =============================================================================
@@ -535,9 +532,7 @@ class TestGetAllowedOutputDirs:
 
     def test_custom_dirs_from_env(self):
         """Test custom directories from environment."""
-        with patch.dict(
-            os.environ, {"FAZ_ALLOWED_OUTPUT_DIRS": "/tmp,/var/log"}, clear=False
-        ):
+        with patch.dict(os.environ, {"FAZ_ALLOWED_OUTPUT_DIRS": "/tmp,/var/log"}, clear=False):
             dirs = get_allowed_output_dirs()
             # Check that at least one custom dir is included (if exists)
             assert len(dirs) >= 0  # May be empty if dirs don't exist
@@ -564,9 +559,7 @@ class TestValidateOutputPath:
 
     def test_disallowed_path_raises(self):
         """Test path outside allowed dirs raises ValidationError."""
-        with patch.dict(
-            os.environ, {"FAZ_ALLOWED_OUTPUT_DIRS": "/tmp/allowed"}, clear=False
-        ):
+        with patch.dict(os.environ, {"FAZ_ALLOWED_OUTPUT_DIRS": "/tmp/allowed"}, clear=False):
             with pytest.raises(ValidationError, match="not within allowed"):
                 validate_output_path("/etc/passwd")
 

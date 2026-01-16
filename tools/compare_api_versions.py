@@ -258,7 +258,9 @@ def generate_markdown_report(result: ComparisonResult) -> str:
         for module in result.changed_modules:
             lines.append(f"### {module.name}")
             lines.append("")
-            lines.append(f"**File size**: {module.old_size:,} → {module.new_size:,} bytes ({module.size_diff_str})")
+            lines.append(
+                f"**File size**: {module.old_size:,} → {module.new_size:,} bytes ({module.size_diff_str})"
+            )
             lines.append("")
 
             if module.added_endpoints:
@@ -384,9 +386,11 @@ Examples:
         print(f"Report written to: {output_path}")
 
     # Print summary
-    print(f"\nSummary: {len(result.changed_modules)} modules changed, "
-          f"+{result.total_added_endpoints} endpoints added, "
-          f"-{result.total_removed_endpoints} endpoints removed")
+    print(
+        f"\nSummary: {len(result.changed_modules)} modules changed, "
+        f"+{result.total_added_endpoints} endpoints added, "
+        f"-{result.total_removed_endpoints} endpoints removed"
+    )
 
 
 if __name__ == "__main__":
