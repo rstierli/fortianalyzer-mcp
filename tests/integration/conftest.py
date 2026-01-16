@@ -1,6 +1,7 @@
 """Pytest fixtures for FortiAnalyzer MCP integration tests."""
 
 import os
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -46,3 +47,42 @@ async def faz_client(faz_host: str, faz_credentials: dict) -> FortiAnalyzerClien
 def test_adom() -> str:
     """Get test ADOM from environment."""
     return os.getenv("TEST_ADOM", "root")
+
+
+@pytest.fixture
+def test_device() -> str | None:
+    """Get test device name from environment."""
+    return os.getenv("TEST_DEVICE")
+
+
+@pytest.fixture
+def time_range_last_hour() -> dict[str, str]:
+    """Get time range for last hour."""
+    now = datetime.now()
+    start = now - timedelta(hours=1)
+    return {
+        "start": start.strftime("%Y-%m-%d %H:%M:%S"),
+        "end": now.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+@pytest.fixture
+def time_range_last_day() -> dict[str, str]:
+    """Get time range for last 24 hours."""
+    now = datetime.now()
+    start = now - timedelta(days=1)
+    return {
+        "start": start.strftime("%Y-%m-%d %H:%M:%S"),
+        "end": now.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+@pytest.fixture
+def time_range_last_week() -> dict[str, str]:
+    """Get time range for last 7 days."""
+    now = datetime.now()
+    start = now - timedelta(days=7)
+    return {
+        "start": start.strftime("%Y-%m-%d %H:%M:%S"),
+        "end": now.strftime("%Y-%m-%d %H:%M:%S"),
+    }

@@ -66,6 +66,9 @@ addopts = [
     "--cov-report=term-missing",
     "--cov-report=html",
 ]
+markers = [
+    "integration: marks tests as integration tests (requires real FortiAnalyzer)",
+]
 
 [tool.mypy]
 python_version = "3.12"
