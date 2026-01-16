@@ -17,9 +17,7 @@ async def test_get_incidents_count(
     time_range_last_week: dict[str, str],
 ):
     """Test getting incident count."""
-    result = await faz_client.get_incidents_count(
-        test_adom, time_range=time_range_last_week
-    )
+    result = await faz_client.get_incidents_count(test_adom, time_range=time_range_last_week)
     assert result is not None
 
 
@@ -42,9 +40,7 @@ async def test_get_incidents(
     time_range_last_week: dict[str, str],
 ):
     """Test getting incidents."""
-    result = await faz_client.get_incidents(
-        test_adom, time_range=time_range_last_week, limit=10
-    )
+    result = await faz_client.get_incidents(test_adom, time_range=time_range_last_week, limit=10)
     assert result is not None
     # Result should contain data array (may be empty)
     if isinstance(result, dict):

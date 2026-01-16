@@ -89,9 +89,7 @@ class TestFortiAnalyzerClientConnection:
         client._connected = True
         return client
 
-    async def test_connect_already_connected(
-        self, mock_client: FortiAnalyzerClient
-    ) -> None:
+    async def test_connect_already_connected(self, mock_client: FortiAnalyzerClient) -> None:
         """Test connect when already connected returns early."""
         mock_client._connected = True
         await mock_client.connect()
@@ -116,9 +114,7 @@ class TestFortiAnalyzerClientConnection:
         with pytest.raises(ConnectionError, match="Not connected"):
             client._ensure_connected()
 
-    def test_is_connected_property(
-        self, mock_client: FortiAnalyzerClient
-    ) -> None:
+    def test_is_connected_property(self, mock_client: FortiAnalyzerClient) -> None:
         """Test is_connected property."""
         assert mock_client.is_connected is True
         mock_client._connected = False
@@ -142,17 +138,13 @@ class TestFortiAnalyzerClientOperations:
         client._connected = True
         return client
 
-    async def test_get_system_status(
-        self, mock_client: FortiAnalyzerClient
-    ) -> None:
+    async def test_get_system_status(self, mock_client: FortiAnalyzerClient) -> None:
         """Test get_system_status returns expected data."""
         result = await mock_client.get_system_status()
         assert result["Hostname"] == "FAZ-TEST"
         assert result["Version"] == "v7.6.5"
 
-    async def test_get_ha_status(
-        self, mock_client: FortiAnalyzerClient
-    ) -> None:
+    async def test_get_ha_status(self, mock_client: FortiAnalyzerClient) -> None:
         """Test get_ha_status returns expected data."""
         result = await mock_client.get_ha_status()
         assert result["mode"] == "standalone"
@@ -169,18 +161,14 @@ class TestFortiAnalyzerClientOperations:
         result = await mock_client.get_adom("root")
         assert result["name"] == "root"
 
-    async def test_list_devices(
-        self, mock_client: FortiAnalyzerClient
-    ) -> None:
+    async def test_list_devices(self, mock_client: FortiAnalyzerClient) -> None:
         """Test list_devices returns list of devices."""
         result = await mock_client.list_devices(adom="root")
         assert len(result) == 2
         assert result[0]["name"] == "FGT-01"
         assert result[1]["name"] == "FGT-02"
 
-    async def test_list_device_groups(
-        self, mock_client: FortiAnalyzerClient
-    ) -> None:
+    async def test_list_device_groups(self, mock_client: FortiAnalyzerClient) -> None:
         """Test list_device_groups returns groups."""
         result = await mock_client.list_device_groups(adom="root")
         assert len(result) == 1
@@ -221,6 +209,4 @@ class TestFortiAnalyzerClientErrorHandling:
         from fortianalyzer_mcp.utils.errors import APIError
 
         with pytest.raises(APIError):
-            client._handle_response(
-                -1, {"status": {"message": "Error"}}, "test"
-            )
+            client._handle_response(-1, {"status": {"message": "Error"}}, "test")

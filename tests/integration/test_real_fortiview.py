@@ -34,9 +34,7 @@ async def _run_fortiview_query(
 
     # Poll for results (max 60 seconds)
     for _ in range(60):
-        fetch_result = await faz_client.fortiview_fetch(
-            adom=adom, view_name=view_name, tid=tid
-        )
+        fetch_result = await faz_client.fortiview_fetch(adom=adom, view_name=view_name, tid=tid)
         assert fetch_result is not None
 
         # Check if complete
@@ -56,9 +54,7 @@ async def test_fortiview_top_sources(
     time_range_last_day: dict[str, str],
 ):
     """Test FortiView top-sources query."""
-    result = await _run_fortiview_query(
-        faz_client, test_adom, "top-sources", time_range_last_day
-    )
+    result = await _run_fortiview_query(faz_client, test_adom, "top-sources", time_range_last_day)
     assert result is not None
     # Result should contain data array (may be empty if no traffic)
     assert "data" in result or "percentage" in result
@@ -105,9 +101,7 @@ async def test_fortiview_top_threats(
 
     Uses weekly time range as threat data may be sparse.
     """
-    result = await _run_fortiview_query(
-        faz_client, test_adom, "top-threats", time_range_last_week
-    )
+    result = await _run_fortiview_query(faz_client, test_adom, "top-threats", time_range_last_week)
     assert result is not None
     # May be empty if no threat data
     assert "data" in result or "percentage" in result
@@ -121,9 +115,7 @@ async def test_fortiview_top_websites(
     time_range_last_day: dict[str, str],
 ):
     """Test FortiView top-websites query."""
-    result = await _run_fortiview_query(
-        faz_client, test_adom, "top-websites", time_range_last_day
-    )
+    result = await _run_fortiview_query(faz_client, test_adom, "top-websites", time_range_last_day)
     assert result is not None
     assert "data" in result or "percentage" in result
 

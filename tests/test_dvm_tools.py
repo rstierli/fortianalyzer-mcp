@@ -15,9 +15,7 @@ class TestDVMTools:
         """Provide a mock client with configured responses."""
         return mock_client
 
-    async def test_list_devices_success(
-        self, mock_client_configured: FortiAnalyzerClient
-    ) -> None:
+    async def test_list_devices_success(self, mock_client_configured: FortiAnalyzerClient) -> None:
         """Test list_devices returns device list."""
         result = await mock_client_configured.list_devices(adom="root")
         assert len(result) == 2
@@ -28,14 +26,10 @@ class TestDVMTools:
         self, mock_client_configured: FortiAnalyzerClient
     ) -> None:
         """Test list_devices with field filter."""
-        result = await mock_client_configured.list_devices(
-            adom="root", fields=["name", "ip"]
-        )
+        result = await mock_client_configured.list_devices(adom="root", fields=["name", "ip"])
         assert len(result) == 2
 
-    async def test_get_device_success(
-        self, mock_client_configured: FortiAnalyzerClient
-    ) -> None:
+    async def test_get_device_success(self, mock_client_configured: FortiAnalyzerClient) -> None:
         """Test get_device returns device details."""
         result = await mock_client_configured.get_device("FGT-01", adom="root")
         assert result["name"] == "FGT-01"
@@ -44,9 +38,7 @@ class TestDVMTools:
         self, mock_client_configured: FortiAnalyzerClient
     ) -> None:
         """Test list_device_vdoms returns VDOMs."""
-        result = await mock_client_configured.list_device_vdoms(
-            device="FGT-01", adom="root"
-        )
+        result = await mock_client_configured.list_device_vdoms(device="FGT-01", adom="root")
         assert len(result) == 1
         assert result[0]["name"] == "root"
 
@@ -58,9 +50,7 @@ class TestDVMTools:
         assert len(result) == 1
         assert result[0]["name"] == "All_FortiGate"
 
-    async def test_add_device_success(
-        self, mock_client_configured: FortiAnalyzerClient
-    ) -> None:
+    async def test_add_device_success(self, mock_client_configured: FortiAnalyzerClient) -> None:
         """Test add_device creates device."""
         device = {
             "name": "FGT-NEW",
@@ -68,18 +58,12 @@ class TestDVMTools:
             "adm_usr": "admin",
             "adm_pass": "password",
         }
-        result = await mock_client_configured.add_device(
-            adom="root", device=device
-        )
+        result = await mock_client_configured.add_device(adom="root", device=device)
         assert result is not None
 
-    async def test_delete_device_success(
-        self, mock_client_configured: FortiAnalyzerClient
-    ) -> None:
+    async def test_delete_device_success(self, mock_client_configured: FortiAnalyzerClient) -> None:
         """Test delete_device removes device."""
-        result = await mock_client_configured.delete_device(
-            adom="root", device="FGT-01"
-        )
+        result = await mock_client_configured.delete_device(adom="root", device="FGT-01")
         assert result is not None
 
     async def test_add_device_list_success(
@@ -90,9 +74,7 @@ class TestDVMTools:
             {"name": "FGT-A", "ip": "192.168.1.10"},
             {"name": "FGT-B", "ip": "192.168.1.11"},
         ]
-        result = await mock_client_configured.add_device_list(
-            adom="root", devices=devices
-        )
+        result = await mock_client_configured.add_device_list(adom="root", devices=devices)
         assert result is not None
 
     async def test_delete_device_list_success(
@@ -103,7 +85,5 @@ class TestDVMTools:
             {"name": "FGT-A"},
             {"name": "FGT-B"},
         ]
-        result = await mock_client_configured.delete_device_list(
-            adom="root", devices=devices
-        )
+        result = await mock_client_configured.delete_device_list(adom="root", devices=devices)
         assert result is not None

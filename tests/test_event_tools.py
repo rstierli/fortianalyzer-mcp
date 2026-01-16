@@ -76,9 +76,7 @@ class TestAlertClient:
         """Provide a mock client with event API responses configured."""
         return mock_client
 
-    async def test_get_alerts_success(
-        self, mock_client_with_events: FortiAnalyzerClient
-    ) -> None:
+    async def test_get_alerts_success(self, mock_client_with_events: FortiAnalyzerClient) -> None:
         """Test get_alerts returns alert data."""
         result = await mock_client_with_events.get_alerts(
             adom="root",

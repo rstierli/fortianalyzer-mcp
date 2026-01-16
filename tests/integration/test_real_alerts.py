@@ -41,9 +41,7 @@ async def test_get_alerts(
     time_range_last_week: dict[str, str],
 ):
     """Test getting alerts."""
-    result = await faz_client.get_alerts(
-        test_adom, time_range=time_range_last_week, limit=10
-    )
+    result = await faz_client.get_alerts(test_adom, time_range=time_range_last_week, limit=10)
     assert result is not None
     # Result should contain data array (may be empty)
     if isinstance(result, dict):
@@ -125,9 +123,7 @@ async def test_acknowledge_alert_reversible(
     Only runs if there are unacknowledged alerts available.
     """
     # Get alerts
-    alerts_result = await faz_client.get_alerts(
-        test_adom, time_range=time_range_last_week, limit=1
-    )
+    alerts_result = await faz_client.get_alerts(test_adom, time_range=time_range_last_week, limit=1)
 
     # Extract alert data
     alerts = []
@@ -174,9 +170,7 @@ async def test_get_alert_logs(
 ):
     """Test getting alert logs for specific alerts."""
     # First get some alerts
-    alerts_result = await faz_client.get_alerts(
-        test_adom, time_range=time_range_last_week, limit=1
-    )
+    alerts_result = await faz_client.get_alerts(test_adom, time_range=time_range_last_week, limit=1)
 
     alerts = []
     if isinstance(alerts_result, dict):
@@ -193,9 +187,7 @@ async def test_get_alert_logs(
         pytest.skip("Alert has no ID field")
 
     try:
-        result = await faz_client.get_alert_logs(
-            test_adom, alert_ids=[str(alert_id)], limit=10
-        )
+        result = await faz_client.get_alert_logs(test_adom, alert_ids=[str(alert_id)], limit=10)
         assert result is not None
     except Exception as e:
         pytest.skip(f"Get alert logs failed: {e}")
@@ -210,9 +202,7 @@ async def test_get_alert_extra_details(
 ):
     """Test getting alert extra details."""
     # First get some alerts
-    alerts_result = await faz_client.get_alerts(
-        test_adom, time_range=time_range_last_week, limit=1
-    )
+    alerts_result = await faz_client.get_alerts(test_adom, time_range=time_range_last_week, limit=1)
 
     alerts = []
     if isinstance(alerts_result, dict):
@@ -229,9 +219,7 @@ async def test_get_alert_extra_details(
         pytest.skip("Alert has no ID field")
 
     try:
-        result = await faz_client.get_alert_extra_details(
-            test_adom, alert_ids=[str(alert_id)]
-        )
+        result = await faz_client.get_alert_extra_details(test_adom, alert_ids=[str(alert_id)])
         assert result is not None
     except Exception as e:
         pytest.skip(f"Get alert details failed: {e}")

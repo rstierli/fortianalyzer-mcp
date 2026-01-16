@@ -56,9 +56,7 @@ async def test_list_devices(faz_client: FortiAnalyzerClient, test_adom: str):
 @pytest.mark.asyncio
 async def test_list_devices_with_fields(faz_client: FortiAnalyzerClient, test_adom: str):
     """Test listing devices with specific fields."""
-    devices = await faz_client.list_devices(
-        test_adom, fields=["name", "ip", "sn", "platform_str"]
-    )
+    devices = await faz_client.list_devices(test_adom, fields=["name", "ip", "sn", "platform_str"])
     assert isinstance(devices, list)
     # If devices exist, verify fields are returned
     if devices:
@@ -79,7 +77,9 @@ async def test_get_device(faz_client: FortiAnalyzerClient, test_adom: str, test_
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_list_device_vdoms(faz_client: FortiAnalyzerClient, test_adom: str, test_device: str | None):
+async def test_list_device_vdoms(
+    faz_client: FortiAnalyzerClient, test_adom: str, test_device: str | None
+):
     """Test listing VDOMs for a device."""
     if not test_device:
         pytest.skip("TEST_DEVICE not set")

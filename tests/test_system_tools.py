@@ -1,6 +1,5 @@
 """Tests for FortiAnalyzer system tools."""
 
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -39,34 +38,26 @@ class TestSystemTools:
         with pytest.raises(ConnectionError, match="Not connected"):
             await client.get_system_status()
 
-    async def test_get_ha_status_success(
-        self, mock_client_configured: FortiAnalyzerClient
-    ) -> None:
+    async def test_get_ha_status_success(self, mock_client_configured: FortiAnalyzerClient) -> None:
         """Test get_ha_status returns HA info."""
         result = await mock_client_configured.get_ha_status()
         assert result["mode"] == "standalone"
         assert "peer" in result
 
-    async def test_list_adoms_success(
-        self, mock_client_configured: FortiAnalyzerClient
-    ) -> None:
+    async def test_list_adoms_success(self, mock_client_configured: FortiAnalyzerClient) -> None:
         """Test list_adoms returns ADOM list."""
         result = await mock_client_configured.list_adoms()
         assert len(result) == 2
         assert result[0]["name"] == "root"
         assert result[1]["name"] == "demo"
 
-    async def test_get_adom_success(
-        self, mock_client_configured: FortiAnalyzerClient
-    ) -> None:
+    async def test_get_adom_success(self, mock_client_configured: FortiAnalyzerClient) -> None:
         """Test get_adom returns specific ADOM."""
         result = await mock_client_configured.get_adom("root")
         assert result["name"] == "root"
         assert "oid" in result
 
-    async def test_list_devices_success(
-        self, mock_client_configured: FortiAnalyzerClient
-    ) -> None:
+    async def test_list_devices_success(self, mock_client_configured: FortiAnalyzerClient) -> None:
         """Test list_devices returns device list."""
         result = await mock_client_configured.list_devices(adom="root")
         assert len(result) == 2
@@ -82,18 +73,14 @@ class TestSystemTools:
         assert len(result) == 1
         assert result[0]["name"] == "All_FortiGate"
 
-    async def test_list_tasks_success(
-        self, mock_client_configured: FortiAnalyzerClient
-    ) -> None:
+    async def test_list_tasks_success(self, mock_client_configured: FortiAnalyzerClient) -> None:
         """Test list_tasks returns task list."""
         result = await mock_client_configured.list_tasks()
         assert len(result) == 2
         assert result[0]["title"] == "Log search"
         assert result[0]["state"] == 4  # Completed
 
-    async def test_get_task_success(
-        self, mock_client_configured: FortiAnalyzerClient
-    ) -> None:
+    async def test_get_task_success(self, mock_client_configured: FortiAnalyzerClient) -> None:
         """Test get_task returns task details."""
         result = await mock_client_configured.get_task(1)
         assert result["title"] == "Log search"

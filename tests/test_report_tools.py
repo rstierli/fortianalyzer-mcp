@@ -125,9 +125,7 @@ class TestReportClient:
         assert layouts[0]["layout-id"] == 1
         assert layouts[0]["title"] == "Executive Summary"
 
-    async def test_report_run_success(
-        self, mock_client_with_reports: FortiAnalyzerClient
-    ) -> None:
+    async def test_report_run_success(self, mock_client_with_reports: FortiAnalyzerClient) -> None:
         """Test report_run returns TID."""
         result = await mock_client_with_reports.report_run(
             adom="root",

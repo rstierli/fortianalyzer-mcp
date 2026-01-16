@@ -70,9 +70,7 @@ async def test_search_traffic_logs(
 
     # Poll for results (max 30 seconds)
     for _ in range(30):
-        fetch_result = await faz_client.logsearch_fetch(
-            adom=test_adom, tid=tid, limit=10
-        )
+        fetch_result = await faz_client.logsearch_fetch(adom=test_adom, tid=tid, limit=10)
         assert fetch_result is not None
 
         percentage = fetch_result.get("percentage", 0)
@@ -107,9 +105,7 @@ async def test_search_event_logs(
 
     # Poll for results (max 30 seconds)
     for _ in range(30):
-        fetch_result = await faz_client.logsearch_fetch(
-            adom=test_adom, tid=tid, limit=10
-        )
+        fetch_result = await faz_client.logsearch_fetch(adom=test_adom, tid=tid, limit=10)
         assert fetch_result is not None
 
         percentage = fetch_result.get("percentage", 0)
@@ -145,9 +141,7 @@ async def test_search_logs_with_filter(
 
     # Poll for results (max 30 seconds)
     for _ in range(30):
-        fetch_result = await faz_client.logsearch_fetch(
-            adom=test_adom, tid=tid, limit=10
-        )
+        fetch_result = await faz_client.logsearch_fetch(adom=test_adom, tid=tid, limit=10)
         percentage = fetch_result.get("percentage", 0)
         if percentage >= 100:
             break
@@ -179,7 +173,11 @@ async def test_logsearch_count(
     count_result = await faz_client.logsearch_count(test_adom, tid)
     assert count_result is not None
     # Should contain progress information
-    assert "progress-percent" in count_result or "percentage" in count_result or "matched-logs" in count_result
+    assert (
+        "progress-percent" in count_result
+        or "percentage" in count_result
+        or "matched-logs" in count_result
+    )
 
 
 @pytest.mark.integration

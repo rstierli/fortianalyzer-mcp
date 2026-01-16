@@ -486,9 +486,7 @@ def mock_get_faz_client(
     mock_client: FortiAnalyzerClient,
 ) -> Generator[MagicMock, None, None]:
     """Patch get_faz_client to return mocked client."""
-    with patch(
-        "fortianalyzer_mcp.server.get_faz_client", return_value=mock_client
-    ) as mock:
+    with patch("fortianalyzer_mcp.server.get_faz_client", return_value=mock_client) as mock:
         yield mock
 
 
