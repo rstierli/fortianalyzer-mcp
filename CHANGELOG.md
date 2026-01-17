@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0-beta] - 2026-01-17
+
+### Added
+- **Unit tests expanded** - 157 tests covering errors, validation, and tool modules
+- **Version detection** - `_detect_version()` method and `faz_version` property for FortiAnalyzer version awareness
+- **FortiView improvements** - Default to `All_Devices` device filter, case-sensitive parameter support
+
+### Fixed
+- FortiView API now defaults to All_Devices when no device specified
+- Import sorting in test files (ruff compliance)
+- E402 linting errors for post-dotenv imports
+
+### Technical
+- All CI checks passing
+- Integration tests verified against FortiAnalyzer 7.6.2
+- Total tools: 74 (unchanged)
+
 ## [0.3.0-beta] - 2025-12-22
 
 ### Added
