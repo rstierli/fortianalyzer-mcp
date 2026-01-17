@@ -3,7 +3,7 @@
 [![CI](https://github.com/rstierli/fortianalyzer-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/rstierli/fortianalyzer-mcp/actions/workflows/ci.yml)
 [![Python Version](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.3.0--beta-green)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.4.0--beta-green)](CHANGELOG.md)
 [![FortiAnalyzer](https://img.shields.io/badge/FortiAnalyzer-7.0%20%7C%207.2%20%7C%207.4%20%7C%207.6-red)](README.md)
 
 A Model Context Protocol (MCP) server for FortiAnalyzer JSON-RPC API. This server enables AI assistants like Claude to interact with FortiAnalyzer for log analysis, reporting, security monitoring, and SOC operations.
@@ -476,16 +476,51 @@ Output is a markdown report listing all changes, making it easy to identify what
 
 ### Running Tests
 
+The project includes 157 unit tests covering all tool modules, error handling, and validation logic.
+
 ```bash
 # Install dev dependencies
 uv sync --all-extras
 
-# Run tests
+# Run all unit tests
 pytest
 
-# Run with coverage
+# Run with coverage report
 pytest --cov=src/fortianalyzer_mcp --cov-report=html
+
+# Run specific test file
+pytest tests/test_log_tools.py -v
+
+# Run tests with verbose output
+pytest -v
 ```
+
+### Integration Tests
+
+Integration tests require a real FortiAnalyzer instance and are not run in CI.
+
+```bash
+# Set up environment
+export FORTIANALYZER_HOST=your-faz-host
+export FORTIANALYZER_API_TOKEN=your-token
+export FORTIANALYZER_VERIFY_SSL=false
+
+# Run integration tests (requires live FAZ)
+pytest tests/integration/ -v
+```
+
+**Note**: Integration tests are verified against FortiAnalyzer 7.6.2. Some features (like API rate limiting) require FAZ 7.6.5+.
+
+### CI Workflow
+
+The project uses GitHub Actions for continuous integration:
+
+- **Linting**: ruff check on all source files
+- **Type checking**: mypy with strict mode
+- **Unit tests**: pytest with coverage reporting
+- **Python versions**: 3.12+
+
+All CI checks must pass before merging pull requests.
 
 ### Code Quality
 
