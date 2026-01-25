@@ -134,7 +134,8 @@ VALID_FORTIVIEW_VIEWS = {
     "top-websites",
     "top-threats",
     "top-cloud-applications",
-    "policy-line",
+    "policy-hits",  # Per-policy hit counts (correct endpoint)
+    "policy-line",  # Time-series policy data
     "traffic-summary",
     "fortiview-traffic",
     "fortiview-threats",

@@ -80,7 +80,8 @@ async def run_fortiview(
             - "top-websites": Top websites accessed
             - "top-threats": Top security threats detected
             - "top-cloud-applications": Top cloud/SaaS apps
-            - "policy-line": Policy hit counts
+            - "policy-hits": Per-policy hit counts (recommended)
+            - "policy-line": Time-series policy data
             - "traffic-summary": Overall traffic summary
             - "fortiview-traffic": Detailed traffic view
             - "fortiview-threats": Threat analysis view
@@ -555,7 +556,7 @@ async def get_policy_hits(
 ) -> dict[str, Any]:
     """Get policy hit statistics.
 
-    Returns firewall policy usage and hit counts.
+    Returns firewall policy usage and hit counts per policy ID.
 
     Args:
         adom: ADOM name (default: "root")
@@ -567,10 +568,10 @@ async def get_policy_hits(
             - "bandwidth": Sort by total bytes
 
     Returns:
-        dict with policy hit statistics
+        dict with policy hit statistics including policyid
     """
     return await get_fortiview_data(
-        view_name="policy-line",
+        view_name="policy-hits",
         adom=adom,
         device=device,
         time_range=time_range,
