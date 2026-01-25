@@ -134,7 +134,7 @@ VALID_FORTIVIEW_VIEWS = {
     "top-websites",
     "top-threats",
     "top-cloud-applications",
-    "policy-hits",
+    "policy-line",
     "traffic-summary",
     "fortiview-traffic",
     "fortiview-threats",

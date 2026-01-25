@@ -312,7 +312,7 @@ class FAZTestRunner:
             fv_result = await self.client.fortiview_run(
                 adom="root",
                 view_name="top-sources",
-                device=[{"devid": "All_FortiGate"}],
+                device=[{"devname": "All_Device"}],
                 time_range=time_range,
                 limit=10,
             )

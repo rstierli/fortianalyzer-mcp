@@ -56,14 +56,14 @@ class TestFortiViewHelpers:
     def test_device_filter_build(self) -> None:
         """Test device filter building logic."""
         device = "FGT60F0000000001"
-        device_filter = [{"devid": device}] if device else [{"devid": "All_FortiGate"}]
-        assert device_filter == [{"devid": "FGT60F0000000001"}]
+        device_filter = [{"devname": device}] if device else [{"devname": "All_Device"}]
+        assert device_filter == [{"devname": "FGT60F0000000001"}]
 
     def test_device_filter_build_none(self) -> None:
-        """Test device filter with None defaults to All_FortiGate."""
+        """Test device filter with None defaults to All_Device."""
         device = None
-        device_filter = [{"devid": device}] if device else [{"devid": "All_FortiGate"}]
-        assert device_filter == [{"devid": "All_FortiGate"}]
+        device_filter = [{"devname": device}] if device else [{"devname": "All_Device"}]
+        assert device_filter == [{"devname": "All_Device"}]
 
     def test_sort_by_param_build(self) -> None:
         """Test sort_by parameter building logic."""
@@ -100,7 +100,7 @@ class TestFortiViewClient:
         result = await mock_client_with_fortiview.fortiview_run(
             adom="root",
             view_name="top-sources",
-            device=[{"devid": "All_FortiGate"}],
+            device=[{"devname": "All_Device"}],
             time_range={"start": "2024-01-01 00:00:00", "end": "2024-01-02 00:00:00"},
         )
         assert "tid" in result

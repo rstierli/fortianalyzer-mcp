@@ -999,21 +999,21 @@ class FortiAnalyzerClient:
         Args:
             adom: ADOM name
             view_name: FortiView name (e.g., "top-sources", "top-destinations",
-                       "top-applications", "top-threats", "top-websites", etc.)
-            device: Device filter list [{"devid": "FGT..."}, ...], defaults to All_Devices
+                       "top-applications", "top-threats", "top-websites", "policy-line", etc.)
+            device: Device filter list [{"devname": "FGT..."}, ...], defaults to All_Device
             time_range: {"start": "2024-01-01 00:00:00", "end": "2024-01-02 00:00:00"}
             filter: Filter expression
             limit: Max records (1-1000)
             offset: Record offset
-            sort_by: Sort criteria [{"field": "sessions", "order": "desc"}]
+            sort_by: Sort criteria [{"field": "counts", "order": "desc"}]
             case_sensitive: Whether filter is case-sensitive (default: False)
 
         Returns:
             {"tid": 12345} - Task ID for fetching results
         """
-        # Default to All_Devices if no device specified
+        # Default to All_Device if no device specified
         if not device:
-            device = [{"devid": "All_Devices"}]
+            device = [{"devname": "All_Device"}]
 
         params: dict[str, Any] = {
             "apiver": API_VERSION,

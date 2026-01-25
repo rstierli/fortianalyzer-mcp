@@ -80,7 +80,7 @@ async def run_fortiview(
             - "top-websites": Top websites accessed
             - "top-threats": Top security threats detected
             - "top-cloud-applications": Top cloud/SaaS apps
-            - "policy-hits": Policy hit counts
+            - "policy-line": Policy hit counts
             - "traffic-summary": Overall traffic summary
             - "fortiview-traffic": Detailed traffic view
             - "fortiview-threats": Threat analysis view
@@ -98,7 +98,7 @@ async def run_fortiview(
         offset: Record offset for pagination
         sort_by: Sort field (optional). Common fields:
             - "bandwidth": Sort by total bytes (traffic_in + traffic_out)
-            - "sessions": Sort by session count
+            - "counts": Sort by hit count
             - "threatweight": Sort by threat score
         sort_order: Sort order "asc" or "desc" (default: "desc")
 
@@ -119,7 +119,7 @@ async def run_fortiview(
         tr = _parse_time_range(time_range)
 
         # Convert device string to API format
-        device_filter = [{"devid": device}] if device else [{"devid": "All_FortiGate"}]
+        device_filter = [{"devname": device}] if device else [{"devname": "All_Device"}]
 
         # Build sort_by parameter in API format: [{"field": "...", "order": "..."}]
         sort_by_param = None
@@ -260,7 +260,7 @@ async def get_fortiview_data(
         tr = _parse_time_range(time_range)
 
         # Convert device string to API format
-        device_filter = [{"devid": device}] if device else [{"devid": "All_FortiGate"}]
+        device_filter = [{"devname": device}] if device else [{"devname": "All_Device"}]
 
         # Build sort_by parameter in API format
         sort_by_param = None
@@ -551,7 +551,7 @@ async def get_policy_hits(
     device: str | None = None,
     time_range: str = "24-hour",
     limit: int = 20,
-    sort_by: str = "sessions",
+    sort_by: str = "counts",
 ) -> dict[str, Any]:
     """Get policy hit statistics.
 
@@ -562,13 +562,15 @@ async def get_policy_hits(
         device: Device filter (serial number or name, optional)
         time_range: Time range (default: "24-hour")
         limit: Number of policies to return (default: 20)
-        sort_by: Sort field (default: "sessions")
+        sort_by: Sort field (default: "counts"). Options:
+            - "counts": Sort by hit count
+            - "bandwidth": Sort by total bytes
 
     Returns:
         dict with policy hit statistics
     """
     return await get_fortiview_data(
-        view_name="policy-hits",
+        view_name="policy-line",
         adom=adom,
         device=device,
         time_range=time_range,
