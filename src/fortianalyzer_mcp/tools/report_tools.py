@@ -16,6 +16,7 @@ from typing import Any
 from fortianalyzer_mcp.server import get_faz_client, mcp
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
+    get_default_adom,
     validate_adom,
     validate_output_path,
 )
@@ -181,7 +182,7 @@ async def _ensure_schedule_exists(client: Any, adom: str, layout_id: int) -> dic
 
 
 @mcp.tool()
-async def list_report_layouts(adom: str = "root") -> dict[str, Any]:
+async def list_report_layouts(adom: str | None = None) -> dict[str, Any]:
     """List available report layouts in FortiAnalyzer.
 
     IMPORTANT: Layouts are runnable reports. Templates are read-only blueprints.
@@ -191,7 +192,7 @@ async def list_report_layouts(adom: str = "root") -> dict[str, Any]:
     A schedule must exist for the layout before it can be run (created automatically).
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
 
     Returns:
         dict with report layouts list including:
@@ -206,6 +207,7 @@ async def list_report_layouts(adom: str = "root") -> dict[str, Any]:
         ...     print(f"[{layout['layout-id']}] {layout['title']}")
     """
     try:
+        adom = adom or get_default_adom()
         client = _get_client()
 
         logger.info(f"Listing report layouts in ADOM {adom}")
@@ -245,7 +247,7 @@ async def list_report_layouts(adom: str = "root") -> dict[str, Any]:
 @mcp.tool()
 async def run_report(
     layout: str,
-    adom: str = "root",
+    adom: str | None = None,
     device: str | None = None,
     time_range: str = "7-day",
 ) -> dict[str, Any]:
@@ -267,7 +269,7 @@ async def run_report(
             - Layout ID (number as string, e.g., "10042")
             - Layout title (e.g., "Secure SD-WAN Report", "VPN Report")
             Use list_report_layouts() to see available layouts.
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         device: Device ID filter (optional - run for specific device)
         time_range: Time range. Options:
             - Short format: "1-hour", "6-hour", "12-hour", "24-hour",
@@ -286,6 +288,7 @@ async def run_report(
         >>> print(f"TID: {result['tid']}")
     """
     try:
+        adom = adom or get_default_adom()
         client = _get_client()
 
         # Step 1: Determine layout_id
@@ -359,7 +362,7 @@ async def run_report(
 @mcp.tool()
 async def fetch_report(
     tid: str,
-    adom: str = "root",
+    adom: str | None = None,
 ) -> dict[str, Any]:
     """Fetch report status and progress by TID.
 
@@ -367,7 +370,7 @@ async def fetch_report(
 
     Args:
         tid: Task ID (UUID string) from run_report
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
 
     Returns:
         dict with report status including progress percentage
@@ -377,6 +380,7 @@ async def fetch_report(
         >>> print(f"Progress: {result.get('data', {}).get('percentage', 0)}%")
     """
     try:
+        adom = adom or get_default_adom()
         client = _get_client()
 
         logger.info(f"Fetching report status for TID {tid}")
@@ -397,7 +401,7 @@ async def fetch_report(
 @mcp.tool()
 async def get_report_data(
     tid: str,
-    adom: str = "root",
+    adom: str | None = None,
     output_format: str = "PDF",
 ) -> dict[str, Any]:
     """Download completed report data.
@@ -407,7 +411,7 @@ async def get_report_data(
 
     Args:
         tid: Task ID (UUID string) from run_report
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         output_format: Output format - "PDF", "HTML", "CSV", "XML" (default: "PDF")
 
     Returns:
@@ -426,6 +430,7 @@ async def get_report_data(
         ...     f.write(base64.b64decode(data))
     """
     try:
+        adom = adom or get_default_adom()
         client = _get_client()
 
         logger.info(f"Downloading report data for TID {tid}")
@@ -445,7 +450,7 @@ async def get_report_data(
 
 @mcp.tool()
 async def get_running_reports(
-    adom: str = "root",
+    adom: str | None = None,
 ) -> dict[str, Any]:
     """Get currently running reports.
 
@@ -453,7 +458,7 @@ async def get_running_reports(
     Use this after run_report() to monitor progress.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
 
     Returns:
         dict with list of running reports and their progress
@@ -464,6 +469,7 @@ async def get_running_reports(
         ...     print(f"TID: {report['tid']} - {report.get('percent', 0)}%")
     """
     try:
+        adom = adom or get_default_adom()
         client = _get_client()
 
         logger.info(f"Getting running reports in ADOM {adom}")
@@ -487,7 +493,7 @@ async def get_running_reports(
 
 @mcp.tool()
 async def get_report_history(
-    adom: str = "root",
+    adom: str | None = None,
     time_range: str = "30-day",
     title: str | None = None,
 ) -> dict[str, Any]:
@@ -496,7 +502,7 @@ async def get_report_history(
     Retrieves list of completed/generated reports.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         time_range: Time range to search (default: "30-day")
         title: Filter by report title (optional)
 
@@ -509,6 +515,7 @@ async def get_report_history(
         ...     print(f"{report['title']}: {report['state']}")
     """
     try:
+        adom = adom or get_default_adom()
         client = _get_client()
         tr = _parse_time_range(time_range)
 
@@ -539,7 +546,7 @@ async def get_report_history(
 @mcp.tool()
 async def run_and_wait_report(
     layout: str,
-    adom: str = "root",
+    adom: str | None = None,
     device: str | None = None,
     time_range: str = "7-day",
     timeout: int = 300,
@@ -559,7 +566,7 @@ async def run_and_wait_report(
             - Layout ID (number as string, e.g., "10042")
             - Layout title (e.g., "Secure SD-WAN Report", "VPN Report")
             Use list_report_layouts() to see available layouts.
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         device: Device ID filter (optional - run for specific device)
         time_range: Time range. Options:
             - Short format: "1-hour", "6-hour", "12-hour", "24-hour",
@@ -582,6 +589,7 @@ async def run_and_wait_report(
         ...     # Use get_report_data(tid=result['tid']) to download
     """
     try:
+        adom = adom or get_default_adom()
         client = _get_client()
 
         # Step 1: Determine layout_id
@@ -698,7 +706,7 @@ async def save_report(
     tid: str,
     output_dir: str = "~/Downloads",
     output_format: str = "PDF",
-    adom: str = "root",
+    adom: str | None = None,
 ) -> dict[str, Any]:
     """Download, extract, and save a completed report to disk.
 
@@ -710,7 +718,7 @@ async def save_report(
         tid: Task ID (UUID string) from run_report
         output_dir: Directory to save the report (default: ~/Downloads)
         output_format: Report format - "PDF", "HTML", "JSON", "CSV", "XML" (default: "PDF")
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
 
     Returns:
         dict with saved file paths and status
@@ -725,7 +733,7 @@ async def save_report(
     """
     try:
         # Validate inputs
-        adom = validate_adom(adom)
+        adom = validate_adom(adom or get_default_adom())
         output_path = validate_output_path(output_dir)
 
         client = _get_client()

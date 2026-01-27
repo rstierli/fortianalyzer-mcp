@@ -99,6 +99,22 @@ def sanitize_json_for_logging(data: Any, indent: int | None = None) -> str:
 # ADOM name pattern: alphanumeric, underscore, hyphen, 1-64 chars
 ADOM_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
+
+def get_default_adom() -> str:
+    """Get the default ADOM from configuration.
+
+    Returns the DEFAULT_ADOM setting from the config, or "root" if not set.
+
+    Returns:
+        Default ADOM name string
+    """
+    from fortianalyzer_mcp.utils.config import get_settings
+
+    try:
+        return get_settings().DEFAULT_ADOM
+    except Exception:
+        return "root"
+
 # Device name pattern: alphanumeric, underscore, hyphen, dot, 1-64 chars
 DEVICE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]{1,64}$")
 

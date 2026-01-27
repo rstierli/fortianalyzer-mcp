@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from fortianalyzer_mcp.server import get_faz_client, mcp
+from fortianalyzer_mcp.utils.validation import get_default_adom
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,7 @@ async def get_ioc_license_state() -> dict[str, Any]:
 async def acknowledge_ioc_events(
     ioc_ids: list[str],
     user: str,
-    adom: str = "root",
+    adom: str | None = None,
 ) -> dict[str, Any]:
     """Acknowledge IOC events.
 
@@ -91,7 +92,7 @@ async def acknowledge_ioc_events(
     Args:
         ioc_ids: List of IOC event IDs to acknowledge
         user: Username performing the acknowledgment
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
 
     Returns:
         dict with acknowledgment result
@@ -103,6 +104,7 @@ async def acknowledge_ioc_events(
         ... )
     """
     try:
+        adom = adom or get_default_adom()
         client = _get_client()
 
         logger.info(f"Acknowledging {len(ioc_ids)} IOC events in ADOM {adom}")
@@ -127,7 +129,7 @@ async def acknowledge_ioc_events(
 
 @mcp.tool()
 async def run_ioc_rescan(
-    adom: str = "root",
+    adom: str | None = None,
     device: str | None = None,
     time_range: str = "7-day",
 ) -> dict[str, Any]:
@@ -137,7 +139,7 @@ async def run_ioc_rescan(
     Returns a TID for tracking the rescan progress.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         device: Device filter (optional)
         time_range: Time range for logs to rescan. Options:
             - "1-day", "7-day", "30-day"
@@ -152,6 +154,7 @@ async def run_ioc_rescan(
         >>> # Check progress with get_ioc_rescan_status
     """
     try:
+        adom = adom or get_default_adom()
         client = _get_client()
         tr = _parse_time_range(time_range)
 
@@ -179,7 +182,7 @@ async def run_ioc_rescan(
 @mcp.tool()
 async def get_ioc_rescan_status(
     tid: int,
-    adom: str = "root",
+    adom: str | None = None,
 ) -> dict[str, Any]:
     """Get IOC rescan status.
 
@@ -187,7 +190,7 @@ async def get_ioc_rescan_status(
 
     Args:
         tid: Task ID from run_ioc_rescan
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
 
     Returns:
         dict with rescan status
@@ -197,6 +200,7 @@ async def get_ioc_rescan_status(
         >>> print(f"Progress: {result['data'].get('percentage', 0)}%")
     """
     try:
+        adom = adom or get_default_adom()
         client = _get_client()
 
         logger.info(f"Getting IOC rescan status for TID {tid}")
@@ -219,14 +223,14 @@ async def get_ioc_rescan_status(
 
 @mcp.tool()
 async def get_ioc_rescan_history(
-    adom: str = "root",
+    adom: str | None = None,
 ) -> dict[str, Any]:
     """Get IOC rescan history.
 
     Retrieves history of previous IOC rescan operations.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
 
     Returns:
         dict with rescan history
@@ -237,6 +241,7 @@ async def get_ioc_rescan_history(
         ...     print(f"{scan['time-begin']}: {scan['status']}")
     """
     try:
+        adom = adom or get_default_adom()
         client = _get_client()
 
         logger.info(f"Getting IOC rescan history for ADOM {adom}")
@@ -270,7 +275,7 @@ async def get_ioc_rescan_history(
 
 @mcp.tool()
 async def run_and_wait_ioc_rescan(
-    adom: str = "root",
+    adom: str | None = None,
     device: str | None = None,
     time_range: str = "7-day",
     timeout: int = 300,
@@ -281,7 +286,7 @@ async def run_and_wait_ioc_rescan(
     Handles the TID workflow automatically.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         device: Device filter (optional)
         time_range: Time range for logs to rescan (default: "7-day")
         timeout: Maximum wait time in seconds (default: 300)
@@ -295,6 +300,7 @@ async def run_and_wait_ioc_rescan(
         ...     print(f"Found {result['data'].get('hits', 0)} IOC matches")
     """
     try:
+        adom = adom or get_default_adom()
         client = _get_client()
         tr = _parse_time_range(time_range)
 

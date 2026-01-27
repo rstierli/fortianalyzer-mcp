@@ -12,6 +12,7 @@ from typing import Any
 from fortianalyzer_mcp.server import get_faz_client, mcp
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
+    get_default_adom,
     validate_adom,
     validate_log_type,
 )
@@ -102,7 +103,7 @@ def _build_device_filter(device: str | None) -> list[dict[str, str]]:
 
 @mcp.tool()
 async def query_logs(
-    adom: str = "root",
+    adom: str | None = None,
     logtype: str = "traffic",
     device: str | None = None,
     time_range: str = "1-hour",
@@ -118,7 +119,7 @@ async def query_logs(
     2. Poll for results until complete
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         logtype: Log type to query. Options:
             - "traffic": Firewall traffic logs
             - "event": System event logs
@@ -172,7 +173,7 @@ async def query_logs(
     """
     try:
         # Validate inputs
-        adom = validate_adom(adom)
+        adom = validate_adom(adom or get_default_adom())
         logtype = validate_log_type(logtype)
 
         client = _get_client()
@@ -259,13 +260,13 @@ async def query_logs(
 
 @mcp.tool()
 async def get_log_search_progress(
-    adom: str = "root",
+    adom: str | None = None,
     tid: int = 0,
 ) -> dict[str, Any]:
     """Get progress of an ongoing log search.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         tid: Task ID from a previous query_logs call
 
     Returns:
@@ -285,6 +286,7 @@ async def get_log_search_progress(
         if tid <= 0:
             return {"status": "error", "message": "Invalid TID"}
 
+        adom = adom or get_default_adom()
         client = _get_client()
         result = await client.logsearch_count(adom, tid)
 
@@ -302,7 +304,7 @@ async def get_log_search_progress(
 
 @mcp.tool()
 async def fetch_more_logs(
-    adom: str = "root",
+    adom: str | None = None,
     tid: int = 0,
     limit: int = 100,
     offset: int = 0,
@@ -312,7 +314,7 @@ async def fetch_more_logs(
     Use this for pagination after an initial query_logs call.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         tid: Task ID from a previous query_logs call
         limit: Maximum logs to return (default: 100, max: 500)
         offset: Offset for pagination (default: 0)
@@ -336,6 +338,7 @@ async def fetch_more_logs(
         if tid <= 0:
             return {"status": "error", "message": "Invalid TID"}
 
+        adom = adom or get_default_adom()
         client = _get_client()
         result = await client.logsearch_fetch(
             adom=adom,
@@ -360,13 +363,13 @@ async def fetch_more_logs(
 
 @mcp.tool()
 async def cancel_log_search(
-    adom: str = "root",
+    adom: str | None = None,
     tid: int = 0,
 ) -> dict[str, Any]:
     """Cancel an ongoing log search.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         tid: Task ID from a previous query_logs call
 
     Returns:
@@ -381,6 +384,7 @@ async def cancel_log_search(
         if tid <= 0:
             return {"status": "error", "message": "Invalid TID"}
 
+        adom = adom or get_default_adom()
         client = _get_client()
         await client.logsearch_cancel(adom, tid)
 
@@ -395,7 +399,7 @@ async def cancel_log_search(
 
 @mcp.tool()
 async def get_log_stats(
-    adom: str = "root",
+    adom: str | None = None,
     device: str | None = None,
 ) -> dict[str, Any]:
     """Get log statistics for an ADOM.
@@ -403,7 +407,7 @@ async def get_log_stats(
     Returns statistics about log storage, rates, and device logging status.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         device: Specific device name (optional)
 
     Returns:
@@ -417,6 +421,7 @@ async def get_log_stats(
         >>> print(result['stats'])
     """
     try:
+        adom = adom or get_default_adom()
         client = _get_client()
         device_filter = _build_device_filter(device) if device else None
         stats = await client.get_logstats(adom, device_filter)
@@ -431,7 +436,7 @@ async def get_log_stats(
 
 @mcp.tool()
 async def get_log_fields(
-    adom: str = "root",
+    adom: str | None = None,
     logtype: str = "traffic",
     devtype: str = "FortiGate",
 ) -> dict[str, Any]:
@@ -440,7 +445,7 @@ async def get_log_fields(
     Useful for understanding what fields can be used in filters.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         logtype: Log type (traffic, event, attack, etc.)
         devtype: Device type (default: "FortiGate")
 
@@ -456,6 +461,7 @@ async def get_log_fields(
         ...     print(f"{field['name']}: {field['description']}")
     """
     try:
+        adom = adom or get_default_adom()
         client = _get_client()
         result = await client.get_logfields(adom, logtype, devtype)
         return {
@@ -469,7 +475,7 @@ async def get_log_fields(
 
 @mcp.tool()
 async def search_traffic_logs(
-    adom: str = "root",
+    adom: str | None = None,
     srcip: str | None = None,
     dstip: str | None = None,
     srcport: int | None = None,
@@ -487,7 +493,7 @@ async def search_traffic_logs(
     network-based filters.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         srcip: Source IP address filter
         dstip: Destination IP address filter
         srcport: Source port filter
@@ -517,6 +523,7 @@ async def search_traffic_logs(
         ... )
     """
     try:
+        adom = adom or get_default_adom()
         # Build filter string using FortiAnalyzer syntax
         filters = []
         if srcip:
@@ -556,7 +563,7 @@ async def search_traffic_logs(
 
 @mcp.tool()
 async def search_security_logs(
-    adom: str = "root",
+    adom: str | None = None,
     attack_name: str | None = None,
     severity: str | None = None,
     srcip: str | None = None,
@@ -572,7 +579,7 @@ async def search_security_logs(
     malware detections, and other security-related logs.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         attack_name: Attack/signature name filter
         severity: Severity filter ("critical", "high", "medium", "low", "info")
         srcip: Source IP address filter
@@ -599,6 +606,7 @@ async def search_security_logs(
         ... )
     """
     try:
+        adom = adom or get_default_adom()
         # Build filter string
         filters = []
         if attack_name:
@@ -634,7 +642,7 @@ async def search_security_logs(
 
 @mcp.tool()
 async def search_event_logs(
-    adom: str = "root",
+    adom: str | None = None,
     subtype: str | None = None,
     level: str | None = None,
     device: str | None = None,
@@ -648,7 +656,7 @@ async def search_event_logs(
     admin actions, system status changes, and VPN events.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         subtype: Event subtype filter. Options:
             - "system": System events
             - "vpn": VPN events
@@ -679,6 +687,7 @@ async def search_event_logs(
         ... )
     """
     try:
+        adom = adom or get_default_adom()
         # Build filter string
         filters = []
         if subtype:
@@ -710,7 +719,7 @@ async def search_event_logs(
 
 @mcp.tool()
 async def get_logfiles_state(
-    adom: str = "root",
+    adom: str | None = None,
     device: str | None = None,
     vdom: str | None = None,
     time_range: str | None = None,
@@ -720,7 +729,7 @@ async def get_logfiles_state(
     Lists available log files on disk for a device/VDOM.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         device: Device ID (optional)
         vdom: VDOM name (optional)
         time_range: Time range filter (optional)
@@ -735,6 +744,7 @@ async def get_logfiles_state(
         >>> result = await get_logfiles_state("root", "FGT-001")
     """
     try:
+        adom = adom or get_default_adom()
         client = _get_client()
 
         time_range_dict = None

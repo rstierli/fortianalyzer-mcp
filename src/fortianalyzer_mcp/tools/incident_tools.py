@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from fortianalyzer_mcp.server import get_faz_client, mcp
+from fortianalyzer_mcp.utils.validation import get_default_adom
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,7 @@ def _parse_time_range(time_range: str) -> dict[str, str]:
 
 @mcp.tool()
 async def get_incidents(
-    adom: str = "root",
+    adom: str | None = None,
     time_range: str = "7-day",
     filter: str | None = None,
     limit: int = 100,
@@ -61,7 +62,7 @@ async def get_incidents(
     Incidents can be created manually or automatically from alerts.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         time_range: Time range for incidents. Options:
             - "1-hour", "6-hour", "12-hour", "24-hour"
             - "1-day", "7-day", "30-day", "90-day"
@@ -78,6 +79,7 @@ async def get_incidents(
         >>> print(f"Found {result.get('count', 0)} incidents")
     """
     try:
+        adom = adom or get_default_adom()
         client = _get_client()
         tr = _parse_time_range(time_range)
 
@@ -110,7 +112,7 @@ async def get_incidents(
 @mcp.tool()
 async def get_incident(
     incident_id: str,
-    adom: str = "root",
+    adom: str | None = None,
 ) -> dict[str, Any]:
     """Get a specific incident by ID.
 
@@ -118,7 +120,7 @@ async def get_incident(
 
     Args:
         incident_id: Incident ID to retrieve
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
 
     Returns:
         dict with incident details
@@ -128,6 +130,7 @@ async def get_incident(
         >>> print(f"Incident: {result['data']['name']}")
     """
     try:
+        adom = adom or get_default_adom()
         client = _get_client()
 
         logger.info(f"Getting incident {incident_id} from ADOM {adom}")
@@ -150,14 +153,14 @@ async def get_incident(
 
 @mcp.tool()
 async def get_incident_count(
-    adom: str = "root",
+    adom: str | None = None,
     time_range: str = "7-day",
     filter: str | None = None,
 ) -> dict[str, Any]:
     """Get count of incidents matching criteria.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         time_range: Time range for incidents
         filter: Filter expression (optional)
 
@@ -169,6 +172,7 @@ async def get_incident_count(
         >>> print(f"Total incidents: {result['data']['count']}")
     """
     try:
+        adom = adom or get_default_adom()
         client = _get_client()
         tr = _parse_time_range(time_range)
 
@@ -195,7 +199,7 @@ async def get_incident_count(
 async def create_incident(
     name: str,
     severity: str,
-    adom: str = "root",
+    adom: str | None = None,
     category: str | None = None,
     description: str | None = None,
 ) -> dict[str, Any]:
@@ -210,7 +214,7 @@ async def create_incident(
             - "high": High severity
             - "medium": Medium severity
             - "low": Low severity
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         category: Incident category (optional)
         description: Detailed description (optional)
 
@@ -226,6 +230,7 @@ async def create_incident(
         >>> print(f"Created incident: {result['data']['id']}")
     """
     try:
+        adom = adom or get_default_adom()
         client = _get_client()
 
         logger.info(f"Creating incident '{name}' in ADOM {adom}")
@@ -253,7 +258,7 @@ async def create_incident(
 @mcp.tool()
 async def update_incident(
     incident_id: str,
-    adom: str = "root",
+    adom: str | None = None,
     status: str | None = None,
     severity: str | None = None,
     assignee: str | None = None,
@@ -264,7 +269,7 @@ async def update_incident(
 
     Args:
         incident_id: Incident ID to update
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         status: New status (optional):
             - "new": New incident
             - "investigating": Under investigation
@@ -285,6 +290,7 @@ async def update_incident(
         ... )
     """
     try:
+        adom = adom or get_default_adom()
         client = _get_client()
 
         logger.info(f"Updating incident {incident_id} in ADOM {adom}")
@@ -310,7 +316,7 @@ async def update_incident(
 
 @mcp.tool()
 async def get_incident_stats(
-    adom: str = "root",
+    adom: str | None = None,
     time_range: str = "30-day",
     stats_items: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -320,7 +326,7 @@ async def get_incident_stats(
     including counts by severity, status, and trends.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         time_range: Time range for statistics (default: "30-day")
         stats_items: List of stats to retrieve. Options:
             - "total": Total incident count
@@ -338,6 +344,7 @@ async def get_incident_stats(
         >>> print(f"High severity: {result['data']['severity']['high']}")
     """
     try:
+        adom = adom or get_default_adom()
         client = _get_client()
         tr = _parse_time_range(time_range)
 

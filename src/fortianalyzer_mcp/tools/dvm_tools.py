@@ -9,6 +9,7 @@ import logging
 from typing import Any
 
 from fortianalyzer_mcp.server import get_faz_client, mcp
+from fortianalyzer_mcp.utils.validation import get_default_adom
 
 logger = logging.getLogger(__name__)
 
@@ -28,14 +29,14 @@ def _get_client():
 
 @mcp.tool()
 async def list_device_groups(
-    adom: str = "root",
+    adom: str | None = None,
 ) -> dict[str, Any]:
     """List all device groups in an ADOM.
 
     Device groups allow organizing devices for policy and log management.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
 
     Returns:
         dict: Device groups with keys:
@@ -50,6 +51,7 @@ async def list_device_groups(
         ...     print(f"Group: {group['name']}")
     """
     try:
+        adom = adom or get_default_adom()
         client = _get_client()
         groups = await client.list_device_groups(adom)
 
@@ -66,7 +68,7 @@ async def list_device_groups(
 @mcp.tool()
 async def list_device_vdoms(
     device: str,
-    adom: str = "root",
+    adom: str | None = None,
 ) -> dict[str, Any]:
     """List VDOMs for a specific device.
 
@@ -75,7 +77,7 @@ async def list_device_vdoms(
 
     Args:
         device: Device name
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
 
     Returns:
         dict: VDOM list with keys:
@@ -90,6 +92,7 @@ async def list_device_vdoms(
         ...     print(f"VDOM: {vdom['name']}")
     """
     try:
+        adom = adom or get_default_adom()
         client = _get_client()
         vdoms = await client.list_device_vdoms(device, adom)
 
@@ -372,7 +375,7 @@ async def delete_devices_bulk(
 @mcp.tool()
 async def get_device_info(
     device: str,
-    adom: str = "root",
+    adom: str | None = None,
     include_vdoms: bool = False,
 ) -> dict[str, Any]:
     """Get detailed information about a specific device.
@@ -381,7 +384,7 @@ async def get_device_info(
 
     Args:
         device: Device name
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         include_vdoms: Include VDOM information (default: False)
 
     Returns:
@@ -397,6 +400,7 @@ async def get_device_info(
         >>> print(f"Platform: {result['device']['platform_str']}")
     """
     try:
+        adom = adom or get_default_adom()
         client = _get_client()
         device_data = await client.get_device(device, adom, loadsub=1)
 
@@ -417,7 +421,7 @@ async def get_device_info(
 
 @mcp.tool()
 async def search_devices(
-    adom: str = "root",
+    adom: str | None = None,
     name_filter: str | None = None,
     platform_filter: str | None = None,
     os_version_filter: str | None = None,
@@ -426,7 +430,7 @@ async def search_devices(
     """Search for devices with filters.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         name_filter: Filter by device name (partial match)
         platform_filter: Filter by platform type
         os_version_filter: Filter by OS version
@@ -447,6 +451,7 @@ async def search_devices(
         >>> result = await search_devices(connection_status="down")
     """
     try:
+        adom = adom or get_default_adom()
         client = _get_client()
 
         # Build filter list

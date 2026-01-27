@@ -59,6 +59,12 @@ class Settings(BaseSettings):
         description="Maximum number of retry attempts",
     )
 
+    # Default ADOM
+    DEFAULT_ADOM: str = Field(
+        default="root",
+        description="Default ADOM for API operations",
+    )
+
     # MCP Server Settings
     MCP_SERVER_HOST: str = Field(
         default="0.0.0.0",

@@ -12,6 +12,7 @@ from typing import Any
 from fortianalyzer_mcp.server import get_faz_client, mcp
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
+    get_default_adom,
     validate_adom,
     validate_fortiview_view,
 )
@@ -58,7 +59,7 @@ def _parse_time_range(time_range: str) -> dict[str, str]:
 @mcp.tool()
 async def run_fortiview(
     view_name: str,
-    adom: str = "root",
+    adom: str | None = None,
     device: str | None = None,
     time_range: str = "1-hour",
     filter: str | None = None,
@@ -85,7 +86,7 @@ async def run_fortiview(
             - "traffic-summary": Overall traffic summary
             - "fortiview-traffic": Detailed traffic view
             - "fortiview-threats": Threat analysis view
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         device: Device filter (serial number or name, optional)
         time_range: Time range. Options:
             - "now", "5-min", "15-min": Real-time
@@ -113,7 +114,7 @@ async def run_fortiview(
     """
     try:
         # Validate inputs
-        adom = validate_adom(adom)
+        adom = validate_adom(adom or get_default_adom())
         view_name = validate_fortiview_view(view_name)
 
         client = _get_client()
@@ -160,7 +161,7 @@ async def run_fortiview(
 async def fetch_fortiview(
     tid: int,
     view_name: str,
-    adom: str = "root",
+    adom: str | None = None,
 ) -> dict[str, Any]:
     """Fetch FortiView query results by TID.
 
@@ -169,7 +170,7 @@ async def fetch_fortiview(
     Args:
         tid: Task ID from run_fortiview
         view_name: Same view name used in run_fortiview
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
 
     Returns:
         dict with FortiView analytics data
@@ -180,6 +181,7 @@ async def fetch_fortiview(
         ...     print(f"{item['srcip']}: {item['bytes']} bytes")
     """
     try:
+        adom = adom or get_default_adom()
         client = _get_client()
 
         logger.info(f"Fetching FortiView results for TID {tid}")
@@ -209,7 +211,7 @@ async def fetch_fortiview(
 @mcp.tool()
 async def get_fortiview_data(
     view_name: str,
-    adom: str = "root",
+    adom: str | None = None,
     device: str | None = None,
     time_range: str = "1-hour",
     filter: str | None = None,
@@ -225,7 +227,7 @@ async def get_fortiview_data(
 
     Args:
         view_name: FortiView view type (see run_fortiview for options)
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         device: Device filter (serial number or name, optional)
         time_range: Time range (default: "1-hour")
         filter: Filter expression (optional). Examples:
@@ -254,7 +256,7 @@ async def get_fortiview_data(
     """
     try:
         # Validate inputs
-        adom = validate_adom(adom)
+        adom = validate_adom(adom or get_default_adom())
         view_name = validate_fortiview_view(view_name)
 
         client = _get_client()
@@ -335,7 +337,7 @@ async def get_fortiview_data(
 
 @mcp.tool()
 async def get_top_sources(
-    adom: str = "root",
+    adom: str | None = None,
     device: str | None = None,
     time_range: str = "1-hour",
     limit: int = 10,
@@ -346,7 +348,7 @@ async def get_top_sources(
     Returns the top source IP addresses by traffic volume.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         device: Device filter (serial number or name, optional)
         time_range: Time range (default: "1-hour")
         limit: Number of top sources to return (default: 10)
@@ -375,7 +377,7 @@ async def get_top_sources(
 
 @mcp.tool()
 async def get_top_destinations(
-    adom: str = "root",
+    adom: str | None = None,
     device: str | None = None,
     time_range: str = "1-hour",
     limit: int = 10,
@@ -386,7 +388,7 @@ async def get_top_destinations(
     Returns the top destination IP addresses by traffic volume.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         device: Device filter (serial number or name, optional)
         time_range: Time range (default: "1-hour")
         limit: Number of top destinations to return (default: 10)
@@ -407,7 +409,7 @@ async def get_top_destinations(
 
 @mcp.tool()
 async def get_top_applications(
-    adom: str = "root",
+    adom: str | None = None,
     device: str | None = None,
     time_range: str = "1-hour",
     limit: int = 10,
@@ -418,7 +420,7 @@ async def get_top_applications(
     Returns the top applications detected based on traffic analysis.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         device: Device filter (serial number or name, optional)
         time_range: Time range (default: "1-hour")
         limit: Number of top applications to return (default: 10)
@@ -444,7 +446,7 @@ async def get_top_applications(
 
 @mcp.tool()
 async def get_top_threats(
-    adom: str = "root",
+    adom: str | None = None,
     device: str | None = None,
     time_range: str = "24-hour",
     limit: int = 10,
@@ -456,7 +458,7 @@ async def get_top_threats(
     including IPS attacks, malware, and other security events.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         device: Device filter (serial number or name, optional)
         time_range: Time range (default: "24-hour")
         limit: Number of top threats to return (default: 10)
@@ -484,7 +486,7 @@ async def get_top_threats(
 
 @mcp.tool()
 async def get_top_websites(
-    adom: str = "root",
+    adom: str | None = None,
     device: str | None = None,
     time_range: str = "1-hour",
     limit: int = 10,
@@ -495,7 +497,7 @@ async def get_top_websites(
     Returns the most frequently accessed websites by traffic volume.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         device: Device filter (serial number or name, optional)
         time_range: Time range (default: "1-hour")
         limit: Number of top websites to return (default: 10)
@@ -516,7 +518,7 @@ async def get_top_websites(
 
 @mcp.tool()
 async def get_top_cloud_applications(
-    adom: str = "root",
+    adom: str | None = None,
     device: str | None = None,
     time_range: str = "1-hour",
     limit: int = 10,
@@ -527,7 +529,7 @@ async def get_top_cloud_applications(
     Returns the most used cloud and SaaS applications.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         device: Device filter (serial number or name, optional)
         time_range: Time range (default: "1-hour")
         limit: Number of top cloud apps to return (default: 10)
@@ -548,7 +550,7 @@ async def get_top_cloud_applications(
 
 @mcp.tool()
 async def get_policy_hits(
-    adom: str = "root",
+    adom: str | None = None,
     device: str | None = None,
     time_range: str = "24-hour",
     limit: int = 20,
@@ -559,7 +561,7 @@ async def get_policy_hits(
     Returns firewall policy usage and hit counts per policy ID.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         device: Device filter (serial number or name, optional)
         time_range: Time range (default: "24-hour")
         limit: Number of policies to return (default: 20)

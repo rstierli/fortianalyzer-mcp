@@ -109,6 +109,9 @@ FORTIANALYZER_VERIFY_SSL=false
 FORTIANALYZER_TIMEOUT=30
 FORTIANALYZER_MAX_RETRIES=3
 
+# Default ADOM (optional, defaults to "root")
+DEFAULT_ADOM=root
+
 # Logging
 LOG_LEVEL=INFO  # DEBUG for troubleshooting
 ```
@@ -149,6 +152,7 @@ Add to your Claude Desktop configuration file:
         "FORTIANALYZER_HOST": "your-faz-hostname",
         "FORTIANALYZER_API_TOKEN": "your-api-token",
         "FORTIANALYZER_VERIFY_SSL": "false",
+        "DEFAULT_ADOM": "root",
         "LOG_LEVEL": "INFO"
       }
     }
@@ -156,7 +160,7 @@ Add to your Claude Desktop configuration file:
 }
 ```
 
-**Note**: Use the full path to the `fortianalyzer-mcp` executable in your virtual environment.
+**Note**: Use the full path to the `fortianalyzer-mcp` executable in your virtual environment. The `DEFAULT_ADOM` setting is optional and defaults to "root" if not specified.
 
 ### Docker Mode
 

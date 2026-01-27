@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 from fortianalyzer_mcp.server import get_faz_client, mcp
+from fortianalyzer_mcp.utils.validation import get_default_adom
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +176,7 @@ async def get_adom(
 
 @mcp.tool()
 async def list_devices(
-    adom: str = "root",
+    adom: str | None = None,
     fields: list[str] | None = None,
 ) -> dict[str, Any]:
     """List all devices registered in an ADOM.
@@ -184,7 +185,7 @@ async def list_devices(
     This lists all devices configured to send logs to this ADOM.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         fields: Specific fields to return (optional)
 
     Returns:
@@ -200,6 +201,7 @@ async def list_devices(
         ...     print(f"{device['name']}: {device.get('ip', 'N/A')}")
     """
     try:
+        adom = adom or get_default_adom()
         client = _get_client()
         devices = await client.list_devices(adom, fields=fields)
         return {
@@ -215,14 +217,14 @@ async def list_devices(
 @mcp.tool()
 async def get_device(
     name: str,
-    adom: str = "root",
+    adom: str | None = None,
     include_details: bool = False,
 ) -> dict[str, Any]:
     """Get detailed information about a specific device.
 
     Args:
         name: Device name
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         include_details: Include sub-objects like VDOMs (default: False)
 
     Returns:
@@ -237,6 +239,7 @@ async def get_device(
         >>> print(f"Platform: {result['device']['platform_str']}")
     """
     try:
+        adom = adom or get_default_adom()
         client = _get_client()
         loadsub = 1 if include_details else 0
         device = await client.get_device(name, adom, loadsub=loadsub)

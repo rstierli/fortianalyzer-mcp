@@ -18,6 +18,7 @@ from typing import Any
 from fortianalyzer_mcp.server import get_faz_client, mcp
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
+    get_default_adom,
     validate_adom,
     validate_output_path,
 )
@@ -157,7 +158,7 @@ def _build_ips_filter(
 
 @mcp.tool()
 async def search_ips_logs(
-    adom: str = "root",
+    adom: str | None = None,
     severity: list[str] | None = None,
     attack_contains: str | None = None,
     attack_exact: str | None = None,
@@ -181,7 +182,7 @@ async def search_ips_logs(
     used to download associated PCAP files.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         severity: Filter by severity levels. Options:
             - "critical": Critical severity attacks
             - "high": High severity attacks
@@ -253,7 +254,7 @@ async def search_ips_logs(
     """
     try:
         # Validate inputs
-        adom = validate_adom(adom)
+        adom = validate_adom(adom or get_default_adom())
 
         client = _get_client()
 
@@ -357,7 +358,7 @@ async def search_ips_logs(
 @mcp.tool()
 async def get_pcap_by_session(
     session_id: int,
-    adom: str = "root",
+    adom: str | None = None,
     device: str | None = None,
     time_range: str = "24-hour",
     output_dir: str = "~/Downloads",
@@ -370,7 +371,7 @@ async def get_pcap_by_session(
 
     Args:
         session_id: The session ID to download PCAP for
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         device: Device filter (optional, defaults to All_FortiGate)
         time_range: Time range to search for the session. Options:
             - "1-hour", "6-hour", "12-hour", "24-hour"
@@ -398,7 +399,7 @@ async def get_pcap_by_session(
     """
     try:
         # Validate inputs
-        adom = validate_adom(adom)
+        adom = validate_adom(adom or get_default_adom())
         output_path = validate_output_path(output_dir)
 
         if session_id <= 0:
@@ -703,7 +704,7 @@ async def download_pcap_by_url(
 
 @mcp.tool()
 async def search_and_download_pcaps(
-    adom: str = "root",
+    adom: str | None = None,
     severity: list[str] | None = None,
     attack_contains: str | None = None,
     action: list[str] | None = None,
@@ -724,7 +725,7 @@ async def search_and_download_pcaps(
     into a single operation. Useful for bulk forensic collection.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         severity: Filter by severity ["critical", "high", "medium", "low"]
         attack_contains: Partial match on attack name
         action: Filter by action ["detected", "blocked", "dropped", "reset"]
@@ -768,7 +769,7 @@ async def search_and_download_pcaps(
     """
     try:
         # Validate inputs
-        adom = validate_adom(adom)
+        adom = validate_adom(adom or get_default_adom())
         output_path = validate_output_path(output_dir)
 
         # Limit max downloads
@@ -942,7 +943,7 @@ async def search_and_download_pcaps(
 
 @mcp.tool()
 async def list_available_pcaps(
-    adom: str = "root",
+    adom: str | None = None,
     severity: list[str] | None = None,
     attack_contains: str | None = None,
     srcip: str | None = None,
@@ -958,7 +959,7 @@ async def list_available_pcaps(
     Returns a summary of each event with session ID for targeted download.
 
     Args:
-        adom: ADOM name (default: "root")
+        adom: ADOM name (default: from config DEFAULT_ADOM)
         severity: Filter by severity levels
         attack_contains: Partial match on attack name
         srcip: Source IP filter
@@ -991,7 +992,7 @@ async def list_available_pcaps(
         ...     print(f"Session {event['session_id']}: {event['attack']}")
     """
     try:
-        adom = validate_adom(adom)
+        adom = validate_adom(adom or get_default_adom())
 
         # Use search_ips_logs with has_pcap=True
         search_result = await search_ips_logs(
