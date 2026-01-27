@@ -115,6 +115,7 @@ def get_default_adom() -> str:
     except Exception:
         return "root"
 
+
 # Device name pattern: alphanumeric, underscore, hyphen, dot, 1-64 chars
 DEVICE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]{1,64}$")
 
