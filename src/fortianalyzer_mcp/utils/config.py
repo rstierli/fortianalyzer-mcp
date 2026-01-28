@@ -8,12 +8,16 @@ from typing import Literal
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Compute project root (3 levels up from this file: utils -> fortianalyzer_mcp -> src -> project)
+_PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
+_ENV_FILE = _PROJECT_ROOT / ".env"
+
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(_ENV_FILE) if _ENV_FILE.exists() else None,
         env_file_encoding="utf-8",
         case_sensitive=True,
         extra="ignore",
