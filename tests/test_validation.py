@@ -520,37 +520,48 @@ class TestValidSeverities:
 class TestGetAllowedOutputDirs:
     """Tests for get_allowed_output_dirs function."""
 
-    def test_default_dirs(self):
-        """Test default allowed directories."""
+    def test_no_env_raises_validation_error(self):
+        """Test that missing env var raises ValidationError (secure by default)."""
         with patch.dict(os.environ, {}, clear=True):
-            # Remove FAZ_ALLOWED_OUTPUT_DIRS if set
             os.environ.pop("FAZ_ALLOWED_OUTPUT_DIRS", None)
-            dirs = get_allowed_output_dirs()
-            assert len(dirs) > 0
-            # Should include home
-            assert Path.home() in dirs
+            with pytest.raises(ValidationError, match="No output directories configured"):
+                get_allowed_output_dirs()
+
+    def test_empty_env_raises_validation_error(self):
+        """Test that empty env var raises ValidationError."""
+        with patch.dict(os.environ, {"FAZ_ALLOWED_OUTPUT_DIRS": ""}, clear=False):
+            with pytest.raises(ValidationError, match="No output directories configured"):
+                get_allowed_output_dirs()
 
     def test_custom_dirs_from_env(self):
         """Test custom directories from environment."""
-        with patch.dict(os.environ, {"FAZ_ALLOWED_OUTPUT_DIRS": "/tmp,/var/log"}, clear=False):
+        with patch.dict(os.environ, {"FAZ_ALLOWED_OUTPUT_DIRS": "/tmp"}, clear=False):
             dirs = get_allowed_output_dirs()
-            # Check that at least one custom dir is included (if exists)
-            assert len(dirs) >= 0  # May be empty if dirs don't exist
+            assert len(dirs) > 0
+            assert Path("/tmp").resolve() in dirs
+
+    def test_nonexistent_dir_ignored(self):
+        """Test that non-existent directories are ignored."""
+        with patch.dict(os.environ, {"FAZ_ALLOWED_OUTPUT_DIRS": "/nonexistent/path"}, clear=False):
+            with pytest.raises(ValidationError, match="No output directories configured"):
+                get_allowed_output_dirs()
 
 
 class TestValidateOutputPath:
     """Tests for validate_output_path function."""
 
-    def test_valid_path_in_home(self):
-        """Test path in home directory is valid."""
-        home = str(Path.home())
-        result = validate_output_path(home)
-        assert result == Path.home()
+    def test_valid_path_in_allowed_dir(self):
+        """Test path in allowed directory is valid."""
+        with patch.dict(os.environ, {"FAZ_ALLOWED_OUTPUT_DIRS": "/tmp"}, clear=False):
+            result = validate_output_path("/tmp")
+            assert result == Path("/tmp").resolve()
 
     def test_valid_path_with_tilde(self):
         """Test path with ~ expansion."""
-        result = validate_output_path("~")
-        assert result == Path.home()
+        home = str(Path.home())
+        with patch.dict(os.environ, {"FAZ_ALLOWED_OUTPUT_DIRS": home}, clear=False):
+            result = validate_output_path("~")
+            assert result == Path.home()
 
     def test_empty_raises(self):
         """Test empty path raises ValidationError."""
@@ -559,7 +570,7 @@ class TestValidateOutputPath:
 
     def test_disallowed_path_raises(self):
         """Test path outside allowed dirs raises ValidationError."""
-        with patch.dict(os.environ, {"FAZ_ALLOWED_OUTPUT_DIRS": "/tmp/allowed"}, clear=False):
+        with patch.dict(os.environ, {"FAZ_ALLOWED_OUTPUT_DIRS": "/tmp"}, clear=False):
             with pytest.raises(ValidationError, match="not within allowed"):
                 validate_output_path("/etc/passwd")
 

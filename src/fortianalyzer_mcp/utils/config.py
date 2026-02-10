@@ -113,8 +113,9 @@ class Settings(BaseSettings):
     # Report Output Security
     FAZ_ALLOWED_OUTPUT_DIRS: str | None = Field(
         default=None,
-        description="Comma-separated list of allowed output directories for reports. "
-        "Default: home directory and common subdirs (Downloads, Documents, Desktop, Reports)",
+        description="Comma-separated list of allowed output directories for reports and PCAPs. "
+        "No defaults — file output is disabled until explicitly configured. "
+        "Example: FAZ_ALLOWED_OUTPUT_DIRS=~/Downloads",
     )
 
     # Testing Configuration

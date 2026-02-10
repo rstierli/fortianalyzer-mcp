@@ -342,11 +342,22 @@ def validate_severity(severity: str) -> str:
 def get_allowed_output_dirs() -> list[Path]:
     """Get list of allowed output directories.
 
-    Returns directories from FAZ_ALLOWED_OUTPUT_DIRS env var,
-    or defaults to home directory subdirectories.
+    Returns directories from FAZ_ALLOWED_OUTPUT_DIRS env var.
+    No default directories are permitted — file output must be
+    explicitly configured via the environment variable.
+
+    This follows the principle of secure-by-default: tools that
+    only query data work without any output directory configuration.
+    File output (PCAPs, reports) requires explicit opt-in.
+
+    Set FAZ_ALLOWED_OUTPUT_DIRS to a comma-separated list of directories:
+        FAZ_ALLOWED_OUTPUT_DIRS=~/Downloads,~/Reports
 
     Returns:
         List of allowed Path objects
+
+    Raises:
+        ValidationError: If no output directories are configured
     """
     env_dirs = os.environ.get("FAZ_ALLOWED_OUTPUT_DIRS", "")
 
@@ -362,15 +373,12 @@ def get_allowed_output_dirs() -> list[Path]:
         if dirs:
             return dirs
 
-    # Default: common subdirectories under home
-    home = Path.home()
-    return [
-        home,
-        home / "Downloads",
-        home / "Documents",
-        home / "Desktop",
-        home / "Reports",
-    ]
+    # Secure by default: no output directories allowed without explicit config
+    raise ValidationError(
+        "No output directories configured. File output is disabled by default. "
+        "Set FAZ_ALLOWED_OUTPUT_DIRS environment variable to enable file output. "
+        "Example: FAZ_ALLOWED_OUTPUT_DIRS=~/Downloads"
+    )
 
 
 def validate_output_path(output_dir: str) -> Path:
