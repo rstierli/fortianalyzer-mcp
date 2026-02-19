@@ -9,7 +9,7 @@ actual MCP tool functions that will be exposed to MCP clients.
 
 Usage:
     python tests/test_mcp_tools.py                     # Run all MCP tool tests
-    python tests/test_mcp_tools.py --env prod-ai       # Run on specific environment
+    python tests/test_mcp_tools.py --env faz-800       # Run on specific environment
     python tests/test_mcp_tools.py --category event    # Run specific category
     python tests/test_mcp_tools.py --list              # List available tests
 """
@@ -501,7 +501,7 @@ async def main():
         epilog="""
 Examples:
     python test_mcp_tools.py                    # Run all MCP tool tests
-    python test_mcp_tools.py --env prod-ai      # Run on FAZ 8.0.0 Beta
+    python test_mcp_tools.py --env faz-800      # Run on FAZ 8.0.0 Beta
     python test_mcp_tools.py --category event   # Run only event tools tests
     python test_mcp_tools.py --list             # List available tests
         """,
@@ -509,9 +509,9 @@ Examples:
 
     parser.add_argument(
         "--env",
-        choices=["prod-764", "prod-ai", "prod-748"],
-        default="prod-764",
-        help="FAZ environment to test against (default: prod-764)",
+        choices=["faz-764", "faz-800", "faz-748"],
+        default="faz-764",
+        help="FAZ environment to test against (default: faz-764)",
     )
 
     parser.add_argument(
@@ -550,9 +550,9 @@ Examples:
 
     # Map env argument to FAZEnvironment
     env_map = {
-        "prod-764": FAZEnvironment.PROD_764,
-        "prod-ai": FAZEnvironment.PROD_AI,
-        "prod-748": FAZEnvironment.PROD_748,
+        "faz-764": FAZEnvironment.FAZ_764,
+        "faz-800": FAZEnvironment.FAZ_800,
+        "faz-748": FAZEnvironment.FAZ_748,
     }
 
     env = env_map[args.env]

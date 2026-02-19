@@ -6,7 +6,7 @@ environments without requiring the full MCP server to be running.
 
 Usage:
     python tests/run_tests.py                     # Run all tests on default FAZ
-    python tests/run_tests.py --env prod-ai       # Run on specific environment
+    python tests/run_tests.py --env faz-800       # Run on specific environment
     python tests/run_tests.py --test system       # Run specific test category
     python tests/run_tests.py --list              # List available tests
     python tests/run_tests.py --status            # Check FAZ connectivity
@@ -503,7 +503,7 @@ async def main():
         epilog="""
 Examples:
     python run_tests.py                    # Run all tests on default FAZ (7.6.4)
-    python run_tests.py --env prod-ai      # Run on FAZ 8.0.0 Beta
+    python run_tests.py --env faz-800      # Run on FAZ 8.0.0 Beta
     python run_tests.py --test system      # Run only system tests
     python run_tests.py --test log         # Run only log tests
     python run_tests.py --status           # Check FAZ connectivity
@@ -513,9 +513,9 @@ Examples:
 
     parser.add_argument(
         "--env",
-        choices=["prod-764", "prod-ai", "prod-748"],
-        default="prod-764",
-        help="FAZ environment to test against (default: prod-764)",
+        choices=["faz-764", "faz-800", "faz-748"],
+        default="faz-764",
+        help="FAZ environment to test against (default: faz-764)",
     )
 
     parser.add_argument(
@@ -579,14 +579,14 @@ Examples:
         print("\nAvailable environments:")
         for env, cfg in FAZ_ENVIRONMENTS.items():
             status = "" if cfg.is_available else " (not available)"
-            print(f"  {env.value.replace('faz-', '')}: {cfg.host} - v{cfg.version}{status}")
+            print(f"  {env.value}: {cfg.host} - v{cfg.version}{status}")
         return
 
     # Map env argument to FAZEnvironment
     env_map = {
-        "prod-764": FAZEnvironment.PROD_764,
-        "prod-ai": FAZEnvironment.PROD_AI,
-        "prod-748": FAZEnvironment.PROD_748,
+        "faz-764": FAZEnvironment.FAZ_764,
+        "faz-800": FAZEnvironment.FAZ_800,
+        "faz-748": FAZEnvironment.FAZ_748,
     }
 
     env = env_map[args.env]

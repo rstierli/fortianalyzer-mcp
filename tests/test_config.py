@@ -1,9 +1,9 @@
 """Test configuration for FortiAnalyzer MCP testing.
 
 Defines the 3 test FortiAnalyzer environments:
-- faz-prod-02: FAZ 7.6.4 GA (Production)
-- faz-prod-ai: FAZ 8.0.0 Beta (AI/Testing)
-- faz-prod-74: FAZ 7.4.8 GA (Legacy - not yet running)
+- faz-764: FAZ 7.6.4 GA (Production)
+- faz-800: FAZ 8.0.0 Beta (AI/Testing)
+- faz-748: FAZ 7.4.8 GA (Legacy - not yet running)
 """
 
 import os
@@ -14,9 +14,9 @@ from enum import Enum
 class FAZEnvironment(Enum):
     """Available FortiAnalyzer test environments."""
 
-    PROD_764 = "faz-prod-02"  # FAZ 7.6.4 GA
-    PROD_AI = "faz-prod-ai"  # FAZ 8.0.0 Beta
-    PROD_748 = "faz-prod-74"  # FAZ 7.4.8 GA (not yet running)
+    FAZ_764 = "faz-764"  # FAZ 7.6.4 GA
+    FAZ_800 = "faz-800"  # FAZ 8.0.0 Beta
+    FAZ_748 = "faz-748"  # FAZ 7.4.8 GA (not yet running)
 
 
 @dataclass
@@ -42,9 +42,9 @@ class FAZTestConfig:
 
 # Test environment configurations
 FAZ_ENVIRONMENTS: dict[FAZEnvironment, FAZTestConfig] = {
-    FAZEnvironment.PROD_764: FAZTestConfig(
-        name="faz-prod-02",
-        host="faz-prod-02.home.mystier.li",
+    FAZEnvironment.FAZ_764: FAZTestConfig(
+        name="faz-764",
+        host="faz-764.example.com",
         version="7.6.4",
         api_token=os.getenv("FAZ_PROD_764_API_TOKEN"),
         username=os.getenv("FAZ_PROD_764_USERNAME", "admin"),
@@ -52,9 +52,9 @@ FAZ_ENVIRONMENTS: dict[FAZEnvironment, FAZTestConfig] = {
         is_available=True,
         description="FortiAnalyzer 7.6.4 GA - Production",
     ),
-    FAZEnvironment.PROD_AI: FAZTestConfig(
-        name="faz-prod-ai",
-        host="faz-prod-ai.home.mystier.li",
+    FAZEnvironment.FAZ_800: FAZTestConfig(
+        name="faz-800",
+        host="faz-800.example.com",
         version="8.0.0",
         api_token=os.getenv("FAZ_PROD_AI_API_TOKEN"),
         username=os.getenv("FAZ_PROD_AI_USERNAME", "admin"),
@@ -62,9 +62,9 @@ FAZ_ENVIRONMENTS: dict[FAZEnvironment, FAZTestConfig] = {
         is_available=True,
         description="FortiAnalyzer 8.0.0 Beta - AI Testing",
     ),
-    FAZEnvironment.PROD_748: FAZTestConfig(
-        name="faz-prod-74",
-        host="faz-prod-74.home.mystier.li",
+    FAZEnvironment.FAZ_748: FAZTestConfig(
+        name="faz-748",
+        host="faz-748.example.com",
         version="7.4.8",
         api_token=os.getenv("FAZ_PROD_748_API_TOKEN"),
         username=os.getenv("FAZ_PROD_748_USERNAME", "admin"),
@@ -87,4 +87,4 @@ def get_environment(env: FAZEnvironment) -> FAZTestConfig:
 
 def get_default_environment() -> FAZTestConfig:
     """Get the default test environment (7.6.4 GA)."""
-    return FAZ_ENVIRONMENTS[FAZEnvironment.PROD_764]
+    return FAZ_ENVIRONMENTS[FAZEnvironment.FAZ_764]
