@@ -3,10 +3,12 @@
 [![CI](https://github.com/rstierli/fortianalyzer-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/rstierli/fortianalyzer-mcp/actions/workflows/ci.yml)
 [![Python Version](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.4.0--beta-green)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.4.1--beta-green)](CHANGELOG.md)
 [![FortiAnalyzer](https://img.shields.io/badge/FortiAnalyzer-7.0%20%7C%207.2%20%7C%207.4%20%7C%207.6-red)](README.md)
 
 A Model Context Protocol (MCP) server for FortiAnalyzer JSON-RPC API. This server enables AI assistants like Claude to interact with FortiAnalyzer for log analysis, reporting, security monitoring, and SOC operations.
+
+> **Note**: This is an independent open-source project and is not affiliated with, endorsed by, or supported by Fortinet, Inc. FortiAnalyzer is a trademark of Fortinet, Inc.
 
 ## Overview
 
@@ -161,6 +163,27 @@ Add to your Claude Desktop configuration file:
 ```
 
 **Note**: Use the full path to the `fortianalyzer-mcp` executable in your virtual environment. The `DEFAULT_ADOM` setting is optional and defaults to "root" if not specified.
+
+### Claude Code Integration
+
+Add to `~/.claude/mcp_servers.json`:
+
+```json
+{
+  "mcpServers": {
+    "fortianalyzer": {
+      "command": "/path/to/fortianalyzer-mcp/.venv/bin/fortianalyzer-mcp",
+      "env": {
+        "FORTIANALYZER_HOST": "your-faz-hostname",
+        "FORTIANALYZER_API_TOKEN": "your-api-token",
+        "FORTIANALYZER_VERIFY_SSL": "false",
+        "DEFAULT_ADOM": "root",
+        "LOG_LEVEL": "INFO"
+      }
+    }
+  }
+}
+```
 
 ### Docker Mode
 
@@ -456,31 +479,9 @@ LOG_LEVEL=DEBUG fortianalyzer-mcp
 
 ## Development
 
-### Comparing API Versions
-
-When new FortiAnalyzer versions are released, use the API comparison tool to identify changes:
-
-```bash
-# Compare two API documentation versions
-python tools/compare_api_versions.py docs/fndn/7.6.4 docs/fndn/7.6.5
-
-# Output to custom file
-python tools/compare_api_versions.py docs/fndn/7.6.4 docs/fndn/7.6.5 -o CHANGES.md
-
-# Print to stdout
-python tools/compare_api_versions.py docs/fndn/7.6.4 docs/fndn/7.6.5 --stdout
-```
-
-The tool detects:
-- New/removed API endpoints
-- New/removed definitions and tags
-- File size changes between versions
-
-Output is a markdown report listing all changes, making it easy to identify what code updates are needed.
-
 ### Running Tests
 
-The project includes 157 unit tests covering all tool modules, error handling, and validation logic.
+The project includes 290+ tests covering all tool modules, error handling, and validation logic.
 
 ```bash
 # Install dev dependencies
@@ -548,11 +549,7 @@ ruff format src/
 
 ## Contributing
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on how to submit bug reports, feature requests, and pull requests.
 
 ## License
 
@@ -560,11 +557,9 @@ MIT License - See [LICENSE](LICENSE) file for details.
 
 ## Acknowledgments
 
-- [jmpijll/fortimanager-mcp](https://github.com/jmpijll/fortimanager-mcp) - Architectural inspiration and reference implementation for FortiManager MCP server
-- [Anthropic](https://anthropic.com) for the Model Context Protocol
+- [Anthropic](https://anthropic.com) for the [Model Context Protocol](https://modelcontextprotocol.io)
 - [Fortinet](https://fortinet.com) for FortiAnalyzer
-- [pyfmg](https://github.com/ftntcorecse/pyfmg) library for FortiManager/FortiAnalyzer API
 
 ## Related Projects
 
-- [fortimanager-mcp](https://github.com/jmpijll/fortimanager-mcp) - MCP server for FortiManager with 590+ tools
+- [fortimanager-mcp](https://github.com/rstierli/fortimanager-mcp) - MCP server for FortiManager with 100+ tools
