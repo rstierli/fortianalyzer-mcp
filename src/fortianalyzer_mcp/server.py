@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.utils.config import get_settings
@@ -59,11 +60,19 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[dict]:
         logger.info("FortiAnalyzer MCP server shut down")
 
 
+# Configure transport security for reverse proxy deployments
+_transport_security = None
+if settings.MCP_ALLOWED_HOSTS:
+    _transport_security = TransportSecuritySettings(
+        allowed_hosts=settings.MCP_ALLOWED_HOSTS,
+    )
+
 # Create FastMCP server
 mcp = FastMCP(
     "FortiAnalyzer API Server",
     stateless_http=True,  # Stateless for Docker deployment
     lifespan=server_lifespan,
+    transport_security=_transport_security,
 )
 
 
