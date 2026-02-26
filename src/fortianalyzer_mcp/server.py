@@ -1,5 +1,6 @@
 """FortiAnalyzer MCP Server implementation."""
 
+import hmac
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -512,7 +513,7 @@ def run_http() -> None:
             auth_value = headers.get(b"authorization", b"").decode()
             expected = f"Bearer {settings.MCP_AUTH_TOKEN}"
 
-            if auth_value != expected:
+            if not hmac.compare_digest(auth_value, expected):
                 response = Response(
                     content=json.dumps(
                         {"error": "Unauthorized", "detail": "Invalid or missing Bearer token"}
