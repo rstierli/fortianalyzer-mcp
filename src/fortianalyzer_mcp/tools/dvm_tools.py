@@ -318,10 +318,7 @@ async def add_devices_bulk(
 
         # Sanitize device configs to avoid leaking credentials
         sensitive_keys = {"adm_pass", "adm_passwd"}
-        devices_safe = [
-            {k: v for k, v in d.items() if k not in sensitive_keys}
-            for d in devices
-        ]
+        devices_safe = [{k: v for k, v in d.items() if k not in sensitive_keys} for d in devices]
 
         return {
             "status": "success",

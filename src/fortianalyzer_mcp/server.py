@@ -505,7 +505,9 @@ def run_http() -> None:
 
             if auth_value != expected:
                 response = Response(
-                    content=json.dumps({"error": "Unauthorized", "detail": "Invalid or missing Bearer token"}),
+                    content=json.dumps(
+                        {"error": "Unauthorized", "detail": "Invalid or missing Bearer token"}
+                    ),
                     status_code=401,
                     media_type="application/json",
                 )
