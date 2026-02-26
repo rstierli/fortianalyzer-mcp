@@ -1,6 +1,7 @@
 """Configuration management for FortiAnalyzer MCP server."""
 
 import logging
+import stat
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -213,6 +214,24 @@ class Settings(BaseSettings):
         return handlers
 
 
+def _check_env_file_permissions() -> None:
+    """Warn if .env files have overly permissive permissions."""
+    logger = logging.getLogger(__name__)
+    for env_file in _PROJECT_ROOT.glob(".env*"):
+        if env_file.is_file() and not env_file.name.endswith(".example"):
+            try:
+                file_stat = env_file.stat()
+                mode = file_stat.st_mode
+                # Warn if group or other can read
+                if mode & (stat.S_IRGRP | stat.S_IROTH):
+                    logger.warning(
+                        f"Security: {env_file.name} is readable by group/others "
+                        f"(mode {oct(mode & 0o777)}). Run: chmod 600 {env_file}"
+                    )
+            except OSError:
+                pass
+
+
 @lru_cache
 def get_settings() -> Settings:
     """Get cached settings instance.
@@ -223,4 +242,5 @@ def get_settings() -> Settings:
     Raises:
         ValidationError: If required settings are missing or invalid
     """
+    _check_env_file_permissions()
     return Settings()
