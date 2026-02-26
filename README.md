@@ -76,9 +76,54 @@ pip install -e .
 
 ### Using Docker
 
+Pre-built images are available on GitHub Container Registry:
+
 ```bash
-# Build and run with Docker Compose
-docker-compose up -d
+docker pull ghcr.io/rstierli/fortianalyzer-mcp:latest
+```
+
+Quick start with Docker Compose:
+
+```yaml
+# docker-compose.yml
+services:
+  fortianalyzer-mcp:
+    image: ghcr.io/rstierli/fortianalyzer-mcp:latest
+    container_name: fortianalyzer-mcp
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env
+    environment:
+      - MCP_SERVER_MODE=http
+      - MCP_SERVER_HOST=0.0.0.0
+      - MCP_SERVER_PORT=8001
+      - FORTIANALYZER_HOST=your-faz-hostname
+      - FORTIANALYZER_VERIFY_SSL=false
+      - DEFAULT_ADOM=root
+      - FAZ_TOOL_MODE=full
+      - LOG_LEVEL=INFO
+```
+
+Create a `.env` file for secrets (not tracked in git):
+
+```bash
+# .env
+FORTIANALYZER_API_TOKEN=your-api-token
+MCP_AUTH_TOKEN=your-secret-bearer-token  # optional, enables HTTP auth
+```
+
+```bash
+chmod 600 .env
+docker compose up -d
+```
+
+Verify the server is running:
+
+```bash
+curl http://localhost:8001/health
+# {"status": "healthy", "service": "fortianalyzer-mcp", "fortianalyzer_connected": true}
 ```
 
 ## Configuration
@@ -119,6 +164,11 @@ LOG_LEVEL=INFO  # DEBUG for troubleshooting
 
 # HTTP Authentication (optional, recommended for Docker/HTTP deployments)
 # MCP_AUTH_TOKEN=your-secret-token
+
+# Allowed Host headers for reverse proxy deployments (optional)
+# Required when running behind a reverse proxy (e.g., Traefik, nginx).
+# The MCP SDK rejects non-localhost Host headers by default for DNS rebinding protection.
+# MCP_ALLOWED_HOSTS=["mcp.example.com"]
 ```
 
 ### Generating an API Token
@@ -192,13 +242,114 @@ Add to `~/.claude/mcp_servers.json`:
 
 ```bash
 # Start the server
-docker-compose up -d
+docker compose up -d
 
 # View logs
-docker-compose logs -f
+docker compose logs -f
 
 # Stop the server
-docker-compose down
+docker compose down
+```
+
+### HTTP Mode (Remote Access)
+
+When running in HTTP mode (Docker or standalone with `MCP_SERVER_MODE=http`), MCP clients connect via the Streamable HTTP transport:
+
+**Claude Code** (`~/.claude/mcp_servers.json`):
+
+```json
+{
+  "mcpServers": {
+    "fortianalyzer": {
+      "type": "streamable-http",
+      "url": "https://your-mcp-host.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer your-mcp-auth-token"
+      }
+    }
+  }
+}
+```
+
+**Claude Desktop** (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "fortianalyzer": {
+      "type": "streamable-http",
+      "url": "https://your-mcp-host.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer your-mcp-auth-token"
+      }
+    }
+  }
+}
+```
+
+### Production Deployment (Reverse Proxy)
+
+For production deployments behind a TLS-terminating reverse proxy:
+
+```
+MCP Client → HTTPS → Reverse Proxy (Traefik/nginx) → HTTP → MCP Container → FortiAnalyzer
+```
+
+**Key considerations:**
+
+1. **MCP_ALLOWED_HOSTS** — The MCP SDK validates Host headers to prevent DNS rebinding attacks. Behind a reverse proxy, the Host header is your external hostname (not `localhost`). You must configure allowed hosts:
+
+   ```bash
+   MCP_ALLOWED_HOSTS=["mcp.example.com"]
+   ```
+
+2. **MCP_AUTH_TOKEN** — Always set a Bearer token for HTTP deployments:
+
+   ```bash
+   MCP_AUTH_TOKEN=$(openssl rand -hex 32)
+   ```
+
+3. **Secrets management** — Keep API tokens and auth tokens in an `env_file` (`.env`), not inline in `docker-compose.yml`.
+
+**Example with Traefik:**
+
+```yaml
+services:
+  fortianalyzer-mcp:
+    image: ghcr.io/rstierli/fortianalyzer-mcp:latest
+    container_name: fortianalyzer-mcp
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    env_file:
+      - .env
+    environment:
+      - MCP_SERVER_MODE=http
+      - MCP_SERVER_HOST=0.0.0.0
+      - MCP_SERVER_PORT=8001
+      - FORTIANALYZER_HOST=your-faz-hostname
+      - FORTIANALYZER_VERIFY_SSL=false
+      - MCP_ALLOWED_HOSTS=["mcp.example.com"]
+      - DEFAULT_ADOM=root
+      - FAZ_TOOL_MODE=full
+      - LOG_LEVEL=INFO
+    networks:
+      - frontend
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.faz-mcp-secure.entrypoints=https"
+      - "traefik.http.routers.faz-mcp-secure.rule=Host(`mcp.example.com`)"
+      - "traefik.http.routers.faz-mcp-secure.tls=true"
+      - "traefik.http.services.faz-mcp.loadbalancer.server.port=8001"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  frontend:
+    external: true
 ```
 
 ## Available Tools
