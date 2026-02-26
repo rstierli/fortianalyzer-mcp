@@ -221,10 +221,14 @@ class FortiAnalyzerClient:
         json_request = {
             "method": method,
             "params": params,
-            "session": fmg.sid,
             "id": fmg.req_id + 1,
             "jsonrpc": "2.0",
         }
+        # Only include session for username/password auth.
+        # For API key auth, the Bearer header is used instead.
+        # Including pyfmg's fake session ID causes FAZ to reject the request.
+        if not fmg.api_key_used:
+            json_request["session"] = fmg.sid
 
         # Debug logging - show what we're sending (with sensitive data masked)
         logger.debug(f"API Request: {method.upper()} {url}")
