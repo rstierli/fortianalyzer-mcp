@@ -52,14 +52,16 @@ async def test_get_logfiles_state(faz_client: FortiAnalyzerClient, test_adom: st
 async def test_search_traffic_logs(
     faz_client: FortiAnalyzerClient,
     test_adom: str,
+    test_device: str | None,
     time_range_last_hour: dict[str, str],
 ):
     """Test searching traffic logs from the last hour."""
-    # Start log search - use empty device list to search all devices
+    device_filter = [{"devname": test_device}] if test_device else []
+    # Start log search
     start_result = await faz_client.logsearch_start(
         adom=test_adom,
         logtype="traffic",
-        device=[],  # Search all devices
+        device=device_filter,
         time_range=time_range_last_hour,
         limit=10,
     )
@@ -87,14 +89,16 @@ async def test_search_traffic_logs(
 async def test_search_event_logs(
     faz_client: FortiAnalyzerClient,
     test_adom: str,
+    test_device: str | None,
     time_range_last_hour: dict[str, str],
 ):
     """Test searching event logs from the last hour."""
+    device_filter = [{"devname": test_device}] if test_device else []
     # Start log search
     start_result = await faz_client.logsearch_start(
         adom=test_adom,
         logtype="event",
-        device=[],  # Search all devices
+        device=device_filter,
         time_range=time_range_last_hour,
         limit=10,
     )
@@ -122,16 +126,18 @@ async def test_search_event_logs(
 async def test_search_logs_with_filter(
     faz_client: FortiAnalyzerClient,
     test_adom: str,
+    test_device: str | None,
     time_range_last_day: dict[str, str],
 ):
     """Test searching logs with a filter expression."""
+    device_filter = [{"devname": test_device}] if test_device else []
     # Start log search with filter
     start_result = await faz_client.logsearch_start(
         adom=test_adom,
         logtype="traffic",
-        device=[],
+        device=device_filter,
         time_range=time_range_last_day,
-        filter="action==accept",  # Filter for accepted traffic
+        filter="action==accept",
         limit=10,
     )
     assert start_result is not None
@@ -155,14 +161,16 @@ async def test_search_logs_with_filter(
 async def test_logsearch_count(
     faz_client: FortiAnalyzerClient,
     test_adom: str,
+    test_device: str | None,
     time_range_last_hour: dict[str, str],
 ):
     """Test getting log search count/progress."""
+    device_filter = [{"devname": test_device}] if test_device else []
     # Start log search
     start_result = await faz_client.logsearch_start(
         adom=test_adom,
         logtype="traffic",
-        device=[],
+        device=device_filter,
         time_range=time_range_last_hour,
         limit=10,
     )
@@ -185,14 +193,16 @@ async def test_logsearch_count(
 async def test_logsearch_cancel(
     faz_client: FortiAnalyzerClient,
     test_adom: str,
+    test_device: str | None,
     time_range_last_hour: dict[str, str],
 ):
     """Test cancelling a log search."""
+    device_filter = [{"devname": test_device}] if test_device else []
     # Start log search
     start_result = await faz_client.logsearch_start(
         adom=test_adom,
         logtype="traffic",
-        device=[],
+        device=device_filter,
         time_range=time_range_last_hour,
         limit=10,
     )

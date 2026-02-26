@@ -55,7 +55,10 @@ def test_adom() -> str:
 
 @pytest.fixture
 def test_device() -> str | None:
-    """Get test device name from environment."""
+    """Get test device name from environment.
+
+    Example: TEST_DEVICE=myfw01
+    """
     return os.getenv("TEST_DEVICE")
 
 

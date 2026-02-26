@@ -3,7 +3,7 @@
 [![CI](https://github.com/rstierli/fortianalyzer-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/rstierli/fortianalyzer-mcp/actions/workflows/ci.yml)
 [![Python Version](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.4.1--beta-green)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.0.0--beta-green)](CHANGELOG.md)
 [![FortiAnalyzer](https://img.shields.io/badge/FortiAnalyzer-7.0%20%7C%207.2%20%7C%207.4%20%7C%207.6-red)](README.md)
 
 A Model Context Protocol (MCP) server for FortiAnalyzer JSON-RPC API. This server enables AI assistants like Claude to interact with FortiAnalyzer for log analysis, reporting, security monitoring, and SOC operations.
@@ -116,6 +116,9 @@ DEFAULT_ADOM=root
 
 # Logging
 LOG_LEVEL=INFO  # DEBUG for troubleshooting
+
+# HTTP Authentication (optional, recommended for Docker/HTTP deployments)
+# MCP_AUTH_TOKEN=your-secret-token
 ```
 
 ### Generating an API Token
@@ -542,10 +545,32 @@ ruff format src/
 
 ## Security Considerations
 
+### HTTP Authentication
+
+When running in HTTP mode (Docker), you can secure the MCP endpoint with Bearer token authentication:
+
+```bash
+# Set in .env or environment
+MCP_AUTH_TOKEN=your-secret-token
+```
+
+When configured, all HTTP requests (except `/health`) must include the `Authorization: Bearer <token>` header. If not set, the server runs without authentication (backwards compatible).
+
+### Environment File Permissions
+
+Protect your `.env` files containing API tokens:
+
+```bash
+chmod 600 .env .env.*
+```
+
+### General Security
+
 - **API Tokens**: Store tokens securely, never commit to version control
 - **SSL Verification**: Enable SSL verification in production environments
 - **Least Privilege**: Use FortiAnalyzer accounts with minimal required permissions
 - **Network Security**: Restrict access to FortiAnalyzer management interface
+- **Credential Sanitization**: Device credentials are automatically stripped from API responses
 
 ## Contributing
 

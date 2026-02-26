@@ -1,3 +1,3 @@
 """FortiAnalyzer MCP Server - Model Context Protocol server for FortiAnalyzer API."""
 
-__version__ = "0.4.1-beta"
+__version__ = "1.0.0-beta"

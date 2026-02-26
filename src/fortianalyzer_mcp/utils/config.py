@@ -88,6 +88,13 @@ class Settings(BaseSettings):
         description="Server mode: 'http' for Docker/web, 'stdio' for Claude Desktop, 'auto' to detect",
     )
 
+    # MCP HTTP Auth
+    MCP_AUTH_TOKEN: str | None = Field(
+        default=None,
+        description="Bearer token for HTTP auth. If set, all HTTP requests (except /health) "
+        "must include Authorization: Bearer <token>",
+    )
+
     # Tool Loading Mode
     FAZ_TOOL_MODE: Literal["full", "dynamic"] = Field(
         default="full",

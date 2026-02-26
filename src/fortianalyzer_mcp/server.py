@@ -465,13 +465,54 @@ def run_stdio() -> None:
 
 def run_http() -> None:
     """Run MCP server in HTTP mode for Docker deployment."""
+    import json
     from contextlib import asynccontextmanager
 
     import uvicorn
     from starlette.applications import Starlette
+    from starlette.middleware import Middleware
     from starlette.requests import Request
-    from starlette.responses import JSONResponse
+    from starlette.responses import JSONResponse, Response
     from starlette.routing import Mount, Route
+    from starlette.types import ASGIApp, Receive, Scope, Send
+
+    class AuthMiddleware:
+        """ASGI middleware for Bearer token authentication."""
+
+        def __init__(self, app: ASGIApp) -> None:
+            self.app = app
+
+        async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+            if scope["type"] != "http":
+                await self.app(scope, receive, send)
+                return
+
+            # Skip auth if no token configured (backwards compatible)
+            if not settings.MCP_AUTH_TOKEN:
+                await self.app(scope, receive, send)
+                return
+
+            # Allow /health without auth
+            path = scope.get("path", "")
+            if path == "/health":
+                await self.app(scope, receive, send)
+                return
+
+            # Check Authorization header
+            headers = dict(scope.get("headers", []))
+            auth_value = headers.get(b"authorization", b"").decode()
+            expected = f"Bearer {settings.MCP_AUTH_TOKEN}"
+
+            if auth_value != expected:
+                response = Response(
+                    content=json.dumps({"error": "Unauthorized", "detail": "Invalid or missing Bearer token"}),
+                    status_code=401,
+                    media_type="application/json",
+                )
+                await response(scope, receive, send)
+                return
+
+            await self.app(scope, receive, send)
 
     # Health check endpoint
     async def health_endpoint(request: Request) -> JSONResponse:
@@ -511,6 +552,9 @@ def run_http() -> None:
                 if faz_client:
                     await faz_client.disconnect()
 
+    # Build middleware stack
+    middleware = [Middleware(AuthMiddleware)]
+
     # Create app with MCP mounted and proper lifespan
     app = Starlette(
         routes=[
@@ -518,6 +562,7 @@ def run_http() -> None:
             Mount("/", app=mcp.streamable_http_app()),
         ],
         lifespan=app_lifespan,
+        middleware=middleware,
     )
 
     # Run with uvicorn

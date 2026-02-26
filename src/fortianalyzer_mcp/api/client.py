@@ -520,7 +520,7 @@ class FortiAnalyzerClient:
         Args:
             adom: ADOM name
             logtype: Log type (traffic, event, attack, virus, webfilter, etc.)
-            device: Device filter list [{"devid": "FGT..."}, ...]
+            device: Device filter list [{"devname": "myfw01"}, ...]
             time_range: {"start": "2024-01-01 00:00:00", "end": "2024-01-02 00:00:00"}
             filter: Filter expression (e.g., "srcip==10.0.0.1")
             case_sensitive: Case sensitivity for filter
@@ -1102,7 +1102,7 @@ class FortiAnalyzerClient:
                 - Predefined: "last-n-hours", "last-n-days", "last-n-weeks", "last-n-months"
                   e.g., "last-1-hours", "last-7-days", "last-30-days", "last-4-weeks"
                 - "other" with custom start/end in device filter
-            device: Device filter list [{"devid": "FGT..."}, ...]
+            device: Device filter list [{"devname": "myfw01"}, ...]
         """
         # schedule parameter must be a string of the layout-id
         params: dict[str, Any] = {

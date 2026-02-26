@@ -203,9 +203,15 @@ async def add_device(
             flags=flags,
         )
 
+        # Sanitize device config to avoid leaking credentials
+        sensitive_keys = {"adm_pass", "adm_passwd"}
+        device_result = result.get("device", device_config)
+        if isinstance(device_result, dict):
+            device_result = {k: v for k, v in device_result.items() if k not in sensitive_keys}
+
         return {
             "status": "success",
-            "device": result.get("device", device_config),
+            "device": device_result,
             "task_id": result.get("taskid"),
         }
     except Exception as e:
@@ -310,9 +316,17 @@ async def add_devices_bulk(
             flags=flags,
         )
 
+        # Sanitize device configs to avoid leaking credentials
+        sensitive_keys = {"adm_pass", "adm_passwd"}
+        devices_safe = [
+            {k: v for k, v in d.items() if k not in sensitive_keys}
+            for d in devices
+        ]
+
         return {
             "status": "success",
             "added_count": len(devices),
+            "devices": devices_safe,
             "task_id": result.get("taskid"),
         }
     except Exception as e:
