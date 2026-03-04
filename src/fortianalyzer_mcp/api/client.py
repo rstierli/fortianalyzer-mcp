@@ -88,6 +88,7 @@ class FortiAnalyzerClient:
                     use_ssl=True,
                     verify_ssl=self.verify_ssl,
                     timeout=self.timeout,
+                    check_adom_workspace=False,
                 )
             elif self.username and self.password:
                 self._fmg = FortiManager(
