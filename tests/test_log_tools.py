@@ -4,6 +4,9 @@ Tests the client methods for log search and analysis operations.
 Follows the same pattern as test_system_tools.py to avoid server initialization.
 """
 
+import importlib
+from collections import Counter
+
 import pytest
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
@@ -62,6 +65,120 @@ class TestLogToolsHelpers:
         else:
             result = [{"devname": device}]
         assert result == [{"devid": "All_FortiGate"}]
+
+
+@pytest.fixture
+def log_tools_module(monkeypatch):
+    """Import log_tools with minimal settings for unit testing helper logic."""
+    monkeypatch.setenv("FORTIANALYZER_HOST", "test-faz.example.com")
+    monkeypatch.setenv("FORTIANALYZER_API_TOKEN", "test-token")
+    monkeypatch.setenv("FORTIANALYZER_VERIFY_SSL", "false")
+    return importlib.import_module("fortianalyzer_mcp.tools.log_tools")
+
+
+class TestExactPolicyUsageTools:
+    """Tests for exact policy usage helpers and result semantics."""
+
+    def test_build_protocol_range_filter(self, log_tools_module) -> None:
+        """Protocol filters should format single values and ranges correctly."""
+        assert log_tools_module._build_protocol_range_filter(1, 1) == "proto==1"
+        assert log_tools_module._build_protocol_range_filter(1, 17) == (
+            "proto>=1 and proto<=17"
+        )
+
+    async def test_get_exact_policy_port_usage_zero_hits(
+        self, monkeypatch, log_tools_module
+    ) -> None:
+        """Zero-hit policies should return an exact empty structure."""
+
+        async def fake_run_log_count_exact(**kwargs):
+            return 0
+
+        monkeypatch.setattr(log_tools_module, "_run_log_count_exact", fake_run_log_count_exact)
+
+        result = await log_tools_module.get_exact_policy_port_usage(
+            policy_id=42,
+            adom="root",
+            time_range="1-day",
+        )
+
+        assert result["status"] == "success"
+        assert result["is_exact"] is True
+        assert result["total_hits"] == 0
+        assert result["ports"] == []
+        assert result["protocols"] == []
+        assert result["portless_protocols"] == []
+        assert result["icmp"] == {"hits": 0, "ping_hits": 0, "other_icmp_hits": 0}
+
+    async def test_get_exact_policy_port_usage_reports_icmp_and_portless_protocols(
+        self, monkeypatch, log_tools_module
+    ) -> None:
+        """Exact results should surface protocol and ICMP detail explicitly."""
+
+        async def fake_run_log_count_exact(**kwargs):
+            filter_str = kwargs.get("filter_str") or ""
+            if filter_str == "policyid==42":
+                return 13
+            if "proto>=0 and proto<=255" in filter_str:
+                return 13
+            if "dstport>=1 and dstport<=65535" in filter_str:
+                return 10
+            if "dstport==443" in filter_str:
+                return 6
+            if "dstport==8443" in filter_str:
+                return 4
+            if "proto==1" in filter_str and "service==PING" in filter_str:
+                return 2
+            raise AssertionError(f"Unexpected filter in test: {filter_str}")
+
+        async def fake_discover_policy_candidates(**kwargs):
+            return {"dstport": Counter({"443": 10})}, {"errors": [], "slices_scanned": 1}
+
+        async def fake_enumerate_exact_protocols(**kwargs):
+            return [
+                {"proto": "6", "name": "TCP", "hits": 10},
+                {"proto": "1", "name": "ICMP", "hits": 3},
+            ]
+
+        async def fake_enumerate_exact_ports(**kwargs):
+            assert kwargs["low"] == 8443
+            assert kwargs["high"] == 8443
+            assert kwargs["known_hits"] == 4
+            return [{"port": "8443", "hits": 4}]
+
+        monkeypatch.setattr(log_tools_module, "_run_log_count_exact", fake_run_log_count_exact)
+        monkeypatch.setattr(
+            log_tools_module, "_discover_policy_candidates", fake_discover_policy_candidates
+        )
+        monkeypatch.setattr(
+            log_tools_module, "_enumerate_exact_protocols", fake_enumerate_exact_protocols
+        )
+        monkeypatch.setattr(log_tools_module, "_enumerate_exact_ports", fake_enumerate_exact_ports)
+        monkeypatch.setattr(
+            log_tools_module, "_build_residual_port_ranges", lambda ports: [(8443, 8443)]
+        )
+
+        result = await log_tools_module.get_exact_policy_port_usage(
+            policy_id=42,
+            adom="root",
+            time_range="1-day",
+        )
+
+        assert result["status"] == "success"
+        assert result["is_exact"] is True
+        assert result["numeric_port_hits"] == 10
+        assert result["covered_port_hits"] == 10
+        assert result["uncovered_port_hits"] == 0
+        assert result["portless_hits"] == 3
+        assert result["ports"] == [{"port": "443", "hits": 6}, {"port": "8443", "hits": 4}]
+        assert result["protocols"] == [
+            {"proto": "6", "name": "TCP", "hits": 10},
+            {"proto": "1", "name": "ICMP", "hits": 3},
+        ]
+        assert result["portless_protocols"] == [{"proto": "1", "name": "ICMP", "hits": 3}]
+        assert result["portless_protocol_hits"] == 3
+        assert result["portless_unclassified_hits"] == 0
+        assert result["icmp"] == {"hits": 3, "ping_hits": 2, "other_icmp_hits": 1}
 
 
 class TestLogSearchClient:
