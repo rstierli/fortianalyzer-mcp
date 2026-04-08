@@ -383,7 +383,7 @@ networks:
 | `get_device_info` | Get detailed device information |
 | `search_devices` | Search devices with filters |
 
-### Log Tools (12 tools)
+### Log Tools (16 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -398,6 +398,10 @@ networks:
 | `search_event_logs` | Search system event logs |
 | `get_logfiles_state` | Get log file state information |
 | `get_pcap_file` | Download PCAP file for an IPS event |
+| `get_policy_usage_profile` | Sample policy traffic and exact-count discovered ports, services, and applications |
+| `get_multi_policy_usage_profile` | Batch profile multiple policies in one call |
+| `get_exact_policy_port_usage` | Enumerate exact destination-port and protocol usage for one policy |
+| `get_exact_multi_policy_port_usage` | Enumerate exact destination-port and protocol usage for multiple policies |
 
 ### Report Tools (8 tools)
 
@@ -515,6 +519,58 @@ networks:
 "List all attacks that have PCAP files available"
 "Download all critical severity attack PCAPs from the last 24 hours"
 ```
+
+### Policy Usage Analysis
+
+```
+"Profile observed traffic for policy 42 over the last 30 days"
+"Show the top ports, services, and applications for policies 2, 7, 8, and 9"
+"Run exact port usage for policy 2 and tell me whether any traffic is ICMP"
+"Run exact multi-policy port usage for 2,7,8,9 and return only fully covered results"
+```
+
+### Sampled vs Exact Policy Usage
+
+Use the sampled tools when you want a fast approximation of commonly used ports, services, and applications:
+
+- `get_policy_usage_profile`
+- `get_multi_policy_usage_profile`
+
+These tools discover candidate values from sampled logs and then exact-count only those discovered candidates over the full time window. They are useful for fast reviews, but they can leave residual traffic in:
+
+- `port_residual_hits`
+- `service_residual_hits`
+- `application_residual_hits`
+
+Use the exact tools when you need fail-closed numeric port coverage and explicit visibility into non-port traffic:
+
+- `get_exact_policy_port_usage`
+- `get_exact_multi_policy_port_usage`
+
+The exact tools:
+
+- enumerate numeric destination ports exactly for the requested time window
+- verify whether numeric port coverage closed completely with `is_exact`
+- return `uncovered_port_hits` so incomplete runs are obvious
+- return protocol counts so non-TCP/UDP traffic does not stay implicit
+- classify portless traffic through `portless_protocols` and `icmp`
+
+Important exact result fields:
+
+| Field | Meaning |
+|------|---------|
+| `is_exact` | `true` only when numeric port coverage closed with `uncovered_port_hits == 0` |
+| `ports` | Exact destination-port counts for the fixed time window |
+| `protocols` | Exact protocol counts for the same policy and time window |
+| `portless_protocols` | Exact non-port-bearing protocols observed in the policy traffic |
+| `portless_hits` | Total hits without a numeric `dstport` field |
+| `icmp` | Exact ICMP summary with `hits`, `ping_hits`, and `other_icmp_hits` |
+| `query_stats` | Diagnostics for slice fallbacks and range-count workload |
+
+Performance note:
+
+- Exact tools can take minutes on busy policies or long windows because they use recursive exact counting and slice fallbacks against the FortiAnalyzer log backend.
+- Sampled tools are much faster and are a better first pass when you only need dominant ports or applications.
 
 ### System Information
 
