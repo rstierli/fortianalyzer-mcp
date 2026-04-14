@@ -37,10 +37,14 @@ jobs:
           uv run ruff check src/
 
       - name: Run tests
+        env:
+          FORTIANALYZER_HOST: "ci-dummy.local"
         run: |
           uv run pytest tests/ -v --tb=short
 
       - name: Run tests with coverage
+        env:
+          FORTIANALYZER_HOST: "ci-dummy.local"
         run: |
           uv run pytest tests/ --cov=src/fortianalyzer_mcp --cov-report=xml
 
