@@ -5,6 +5,7 @@ Based on FNDN FortiAnalyzer 7.6.4 API specifications.
 Tool modules:
 - system_tools: System status, ADOM management, device listing, task management
 - log_tools: Log search and analysis (LogView API with TID-based workflow)
+- traffic_tools: Policy traffic analysis (profiling, port enumeration, protocol summary)
 - dvm_tools: Device management (add/delete devices, device groups)
 - event_tools: Alert management and SOC operations
 - fortiview_tools: FortiView analytics (TID-based workflow)
@@ -25,11 +26,13 @@ from . import (
     pcap_tools,
     report_tools,
     system_tools,
+    traffic_tools,
 )
 
 __all__ = [
     "system_tools",
     "log_tools",
+    "traffic_tools",
     "dvm_tools",
     "event_tools",
     "fortiview_tools",

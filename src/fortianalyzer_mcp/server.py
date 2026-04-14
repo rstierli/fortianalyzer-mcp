@@ -191,6 +191,11 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
                 ("get_ioc_rescan_history", "Get IOC rescan history"),
                 ("run_and_wait_ioc_rescan", "Run IOC rescan and wait"),
             ],
+            "traffic": [
+                ("get_policy_traffic_profile", "Get sampled traffic summary per policy"),
+                ("get_policy_port_analysis", "Get exact port/protocol enumeration per policy"),
+                ("get_policy_protocol_summary", "Get protocol breakdown per policy"),
+            ],
         }
 
         results = []
@@ -241,6 +246,7 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
             pcap_tools,
             report_tools,
             system_tools,
+            traffic_tools,
         )
 
         # Map tool names to functions
@@ -323,6 +329,10 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
             "download_pcap_by_url": pcap_tools.download_pcap_by_url,
             "search_and_download_pcaps": pcap_tools.search_and_download_pcaps,
             "list_available_pcaps": pcap_tools.list_available_pcaps,
+            # Traffic analysis tools
+            "get_policy_traffic_profile": traffic_tools.get_policy_traffic_profile,
+            "get_policy_port_analysis": traffic_tools.get_policy_port_analysis,
+            "get_policy_protocol_summary": traffic_tools.get_policy_protocol_summary,
         }
 
         if tool_name not in tool_map:
@@ -381,8 +391,12 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
                     "description": "IPS log search and PCAP download for forensics",
                     "tool_count": 5,
                 },
+                "traffic": {
+                    "description": "Policy traffic analysis, port enumeration, protocol summary",
+                    "tool_count": 3,
+                },
             },
-            "total_tools": 69,
+            "total_tools": 72,
             "note": "Use find_fortianalyzer_tool() to search, execute_advanced_tool() to run",
         }
 
@@ -408,6 +422,7 @@ else:
         pcap_tools,
         report_tools,
         system_tools,
+        traffic_tools,
     )
 
 

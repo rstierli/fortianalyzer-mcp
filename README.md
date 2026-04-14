@@ -3,7 +3,7 @@
 [![CI](https://github.com/rstierli/fortianalyzer-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/rstierli/fortianalyzer-mcp/actions/workflows/ci.yml)
 [![Python Version](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.0--beta-green)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.1.0--beta-green)](CHANGELOG.md)
 [![FortiAnalyzer](https://img.shields.io/badge/FortiAnalyzer-7.0%20%7C%207.2%20%7C%207.4%20%7C%207.6-red)](README.md)
 
 A Model Context Protocol (MCP) server for FortiAnalyzer JSON-RPC API. This server enables AI assistants like Claude to interact with FortiAnalyzer for log analysis, reporting, security monitoring, and SOC operations.
@@ -462,6 +462,14 @@ networks:
 | `get_ioc_rescan_history` | Get rescan history |
 | `run_and_wait_ioc_rescan` | Run rescan and wait for completion |
 
+### Traffic Analysis Tools (3 tools)
+
+| Tool | Description |
+|------|-------------|
+| `get_policy_traffic_profile` | Get sampled traffic summary per policy (top ports, services, apps) |
+| `get_policy_port_analysis` | Get exact port/protocol enumeration per policy with `is_exact` semantics |
+| `get_policy_protocol_summary` | Get lightweight protocol breakdown (TCP/UDP/ICMP/other) per policy |
+
 ### PCAP Tools (5 tools)
 
 | Tool | Description |
@@ -558,7 +566,8 @@ fortianalyzer-mcp/
 │   │   ├── log_tools.py       # Log query tools
 │   │   ├── pcap_tools.py      # PCAP download tools
 │   │   ├── report_tools.py    # Report generation tools
-│   │   └── system_tools.py    # System and ADOM tools
+│   │   ├── system_tools.py    # System and ADOM tools
+│   │   └── traffic_tools.py   # Policy traffic analysis tools
 │   ├── utils/
 │   │   ├── config.py          # Configuration management
 │   │   ├── errors.py          # Error handling
