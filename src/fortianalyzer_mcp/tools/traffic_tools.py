@@ -687,7 +687,9 @@ async def get_policy_traffic_profile(
         start = time.monotonic()
 
         # Run FortiView estimate concurrently with bounded log queries
-        estimate_task = _estimate_policy_hits_best_effort(adom, device, policy_ids, time_range, action)
+        estimate_task = _estimate_policy_hits_best_effort(
+            adom, device, policy_ids, time_range, action
+        )
         query_tasks = [
             _query_policy_logs_bounded(
                 adom,
@@ -802,7 +804,9 @@ async def get_policy_port_analysis(
         start = time.monotonic()
 
         # Run FortiView estimate concurrently with bounded log queries
-        estimate_task = _estimate_policy_hits_best_effort(adom, device, policy_ids, time_range, action)
+        estimate_task = _estimate_policy_hits_best_effort(
+            adom, device, policy_ids, time_range, action
+        )
         query_tasks = [
             _query_policy_logs_bounded(
                 adom,
@@ -908,7 +912,9 @@ async def get_policy_protocol_summary(
         start = time.monotonic()
 
         # Run FortiView estimate concurrently with bounded log queries
-        estimate_task = _estimate_policy_hits_best_effort(adom, device, policy_ids, time_range, action)
+        estimate_task = _estimate_policy_hits_best_effort(
+            adom, device, policy_ids, time_range, action
+        )
         query_tasks = [
             _query_policy_logs_bounded(
                 adom,
