@@ -16,6 +16,7 @@ from fortianalyzer_mcp.tools.traffic_tools import (
     _aggregate_traffic_profile,
     _build_bounded_time_slices,
     _build_policy_filter,
+    _extract_policy_hit_count,
     _plan_policy_slice_count,
     sanitize_filter_value,
     validate_action,
@@ -305,27 +306,20 @@ class TestAggregatePortAnalysis:
     """Tests for port analysis aggregation."""
 
     def test_empty_logs(self) -> None:
-        """Empty logs should return zero counts with is_exact=True."""
+        """Empty logs should return zero counts."""
         result = _aggregate_port_analysis([])
         assert result["total_hits"] == 0
-        assert result["is_exact"] is True
+        assert "is_exact" not in result  # Exactness set by _bounded_metadata
         assert result["ports"] == []
         assert result["protocols"] == []
         assert result["uncovered_port_hits"] == 0
 
-    def test_is_exact_false_when_at_limit(self) -> None:
-        """is_exact should be False when log count equals the limit."""
+    def test_aggregation_does_not_include_is_exact(self) -> None:
+        """_aggregate_port_analysis should not set is_exact (caller's responsibility)."""
         logs = [{"dstport": 80, "proto": "6"} for _ in range(100)]
-        result = _aggregate_port_analysis(logs, limit=100)
-        assert result["is_exact"] is False
+        result = _aggregate_port_analysis(logs)
+        assert "is_exact" not in result
         assert result["total_hits"] == 100
-
-    def test_is_exact_true_when_below_limit(self) -> None:
-        """is_exact should be True when log count is below the limit."""
-        logs = [{"dstport": 80, "proto": "6"} for _ in range(50)]
-        result = _aggregate_port_analysis(logs, limit=100)
-        assert result["is_exact"] is True
-        assert result["total_hits"] == 50
 
     def test_basic_port_enumeration(self) -> None:
         """Basic port/protocol enumeration."""
@@ -336,7 +330,6 @@ class TestAggregatePortAnalysis:
         ]
         result = _aggregate_port_analysis(logs)
         assert result["total_hits"] == 3
-        assert result["is_exact"] is True
         assert len(result["ports"]) == 3
         assert result["uncovered_port_hits"] == 0
 
@@ -546,3 +539,133 @@ class TestAggregateProtocolSummary:
         assert result["protocols"][0]["hits"] == 3
         assert result["protocols"][1]["protocol"] == "UDP"
         assert result["protocols"][1]["hits"] == 2
+
+
+# =============================================================================
+# FortiView hit count extraction
+# =============================================================================
+
+
+class TestExtractPolicyHitCount:
+    """Tests for _extract_policy_hit_count edge cases."""
+
+    def test_default_counts_key(self) -> None:
+        """No action filter should use 'counts' key."""
+        assert _extract_policy_hit_count({"counts": 500}, None) == 500
+
+    def test_accept_uses_count_pass(self) -> None:
+        """Action 'accept' should prefer 'count_pass'."""
+        assert _extract_policy_hit_count({"count_pass": 300, "counts": 500}, "accept") == 300
+
+    def test_deny_uses_count_block(self) -> None:
+        """Action 'deny' should prefer 'count_block'."""
+        assert _extract_policy_hit_count({"count_block": 100, "counts": 500}, "deny") == 100
+
+    def test_drop_uses_count_block(self) -> None:
+        """Action 'drop' should also use 'count_block'."""
+        assert _extract_policy_hit_count({"count_block": 42}, "drop") == 42
+
+    def test_fallback_to_counts(self) -> None:
+        """When action-specific key is missing, fall back to 'counts'."""
+        assert _extract_policy_hit_count({"counts": 200}, "accept") == 200
+
+    def test_none_value_returns_none(self) -> None:
+        """Missing key should return None."""
+        assert _extract_policy_hit_count({}, None) is None
+
+    def test_non_numeric_returns_none(self) -> None:
+        """Non-numeric value should return None."""
+        assert _extract_policy_hit_count({"counts": "invalid"}, None) is None
+
+    def test_negative_clamped_to_zero(self) -> None:
+        """Negative values should be clamped to 0."""
+        assert _extract_policy_hit_count({"counts": -5}, None) == 0
+
+    def test_string_numeric_parsed(self) -> None:
+        """String numbers should be parsed to int."""
+        assert _extract_policy_hit_count({"counts": "12345"}, None) == 12345
+
+
+# =============================================================================
+# Tool behavior: bounded traffic profile
+# =============================================================================
+
+
+class TestPolicyTrafficProfileToolBounded:
+    """Tests for bounded traffic profile tool behavior."""
+
+    async def test_large_request_returns_bounded_result(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Large windows should return bounded observations with metadata."""
+
+        async def fake_estimate(*_args: object, **_kwargs: object) -> dict[int, int]:
+            return {2: 100000}
+
+        async def fake_slice(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
+            return [{"dstport": 443, "proto": "6", "service": "HTTPS", "app": "SSL"}]
+
+        monkeypatch.setattr(traffic_tools, "_estimate_policy_hits_best_effort", fake_estimate)
+        monkeypatch.setattr(traffic_tools, "_query_policy_log_slice", fake_slice)
+
+        result = await traffic_tools.get_policy_traffic_profile(
+            adom="root",
+            device="FGT70FTK22019321",
+            policy_ids=[2],
+            time_range="2024-01-01 00:00:00|2024-01-31 00:00:00",
+        )
+
+        assert result["status"] == "success"
+        profile = result["results"][0]
+        assert profile["policy_id"] == 2
+        assert profile["is_exact"] is True
+        assert profile["analysis_mode"] == "complete"
+        assert profile["slices_scanned"] == 4
+        assert profile["estimated_total_hits"] == 100000
+        assert len(profile["top_ports"]) == 1
+
+
+# =============================================================================
+# Tool behavior: bounded protocol summary
+# =============================================================================
+
+
+class TestPolicyProtocolSummaryToolBounded:
+    """Tests for bounded protocol summary tool behavior."""
+
+    async def test_bounded_result_with_truncation(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Truncated slices should produce bounded_sample metadata."""
+        call_count = 0
+
+        async def fake_estimate(*_args: object, **_kwargs: object) -> dict[int, int]:
+            return {}
+
+        async def fake_slice(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return [{"proto": "6"} for _ in range(LOG_FETCH_LIMIT)]
+            return [{"proto": "17"}]
+
+        monkeypatch.setattr(traffic_tools, "_estimate_policy_hits_best_effort", fake_estimate)
+        monkeypatch.setattr(traffic_tools, "_query_policy_log_slice", fake_slice)
+
+        result = await traffic_tools.get_policy_protocol_summary(
+            adom="root",
+            device="FGT70FTK22019321",
+            policy_ids=[5],
+            time_range="2024-01-01 00:00:00|2024-01-31 00:00:00",
+        )
+
+        assert result["status"] == "success"
+        summary = result["results"][0]
+        assert summary["policy_id"] == 5
+        assert summary["is_exact"] is False
+        assert summary["analysis_mode"] == "bounded_sample"
+        assert summary["truncated_slices"] == 1
+        assert summary["estimate_available"] is False
+        assert "recommendation" in summary

@@ -536,11 +536,11 @@ def _aggregate_traffic_profile(logs: list[dict[str, Any]], top_n: int) -> dict[s
     }
 
 
-def _aggregate_port_analysis(logs: list[dict[str, Any]], limit: int = LOG_FETCH_LIMIT) -> dict[str, Any]:
+def _aggregate_port_analysis(logs: list[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate logs into port/protocol enumeration.
 
-    Returns complete port list, protocol breakdown, ICMP summary,
-    and is_exact indicator.
+    Returns complete port list, protocol breakdown, and ICMP summary.
+    Exactness metadata is added by the caller via _bounded_metadata().
     """
     port_counter: Counter[str] = Counter()
     protocol_counter: Counter[str] = Counter()
@@ -584,7 +584,6 @@ def _aggregate_port_analysis(logs: list[dict[str, Any]], limit: int = LOG_FETCH_
 
     return {
         "total_hits": total,
-        "is_exact": len(logs) < limit,
         "ports": [{"port": p, "hits": c} for p, c in port_counter.most_common()],
         "protocols": [{"protocol": p, "hits": c} for p, c in protocol_counter.most_common()],
         "portless_protocols": sorted(portless_protocols),
@@ -686,10 +685,10 @@ async def get_policy_traffic_profile(
             top_n = DEFAULT_TOP_N
 
         start = time.monotonic()
-        estimates = await _estimate_policy_hits_best_effort(adom, device, policy_ids, time_range, action)
 
-        # Query all policies concurrently
-        tasks = [
+        # Run FortiView estimate concurrently with bounded log queries
+        estimate_task = _estimate_policy_hits_best_effort(adom, device, policy_ids, time_range, action)
+        query_tasks = [
             _query_policy_logs_bounded(
                 adom,
                 device,
@@ -700,7 +699,9 @@ async def get_policy_traffic_profile(
             )
             for pid in policy_ids
         ]
-        results_list = await asyncio.gather(*tasks, return_exceptions=True)
+        all_results = await asyncio.gather(estimate_task, *query_tasks, return_exceptions=True)
+        estimates = all_results[0] if isinstance(all_results[0], dict) else {}
+        results_list = all_results[1:]
 
         per_policy = []
         for pid, result in zip(policy_ids, results_list, strict=True):
@@ -799,9 +800,10 @@ async def get_policy_port_analysis(
         action = validate_action(action)
 
         start = time.monotonic()
-        estimates = await _estimate_policy_hits_best_effort(adom, device, policy_ids, time_range, action)
 
-        tasks = [
+        # Run FortiView estimate concurrently with bounded log queries
+        estimate_task = _estimate_policy_hits_best_effort(adom, device, policy_ids, time_range, action)
+        query_tasks = [
             _query_policy_logs_bounded(
                 adom,
                 device,
@@ -812,7 +814,9 @@ async def get_policy_port_analysis(
             )
             for pid in policy_ids
         ]
-        results_list = await asyncio.gather(*tasks, return_exceptions=True)
+        all_results = await asyncio.gather(estimate_task, *query_tasks, return_exceptions=True)
+        estimates = all_results[0] if isinstance(all_results[0], dict) else {}
+        results_list = all_results[1:]
 
         per_policy = []
         for pid, result in zip(policy_ids, results_list, strict=True):
@@ -826,7 +830,7 @@ async def get_policy_port_analysis(
             else:
                 policy_result = cast(dict[str, Any], result)
                 logs = policy_result["logs"]
-                analysis = _aggregate_port_analysis(logs, limit=LOG_FETCH_LIMIT)
+                analysis = _aggregate_port_analysis(logs)
                 analysis.update(
                     _bounded_metadata(
                         observed_hits=len(logs),
@@ -902,9 +906,10 @@ async def get_policy_protocol_summary(
         action = validate_action(action)
 
         start = time.monotonic()
-        estimates = await _estimate_policy_hits_best_effort(adom, device, policy_ids, time_range, action)
 
-        tasks = [
+        # Run FortiView estimate concurrently with bounded log queries
+        estimate_task = _estimate_policy_hits_best_effort(adom, device, policy_ids, time_range, action)
+        query_tasks = [
             _query_policy_logs_bounded(
                 adom,
                 device,
@@ -915,7 +920,9 @@ async def get_policy_protocol_summary(
             )
             for pid in policy_ids
         ]
-        results_list = await asyncio.gather(*tasks, return_exceptions=True)
+        all_results = await asyncio.gather(estimate_task, *query_tasks, return_exceptions=True)
+        estimates = all_results[0] if isinstance(all_results[0], dict) else {}
+        results_list = all_results[1:]
 
         per_policy = []
         for pid, result in zip(policy_ids, results_list, strict=True):

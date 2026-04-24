@@ -5,6 +5,22 @@ All notable changes to FortiAnalyzer MCP Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0-beta] - 2026-04-24
+
+### Changed
+- **Policy traffic analysis is now bounded for large windows** — traffic analysis tools scan a fixed number of log slices per request, return observed results instead of attempting unbounded raw-log reconstruction, and only set `is_exact=true` when every queried slice is below the log fetch limit
+- **Port analysis metadata expanded** — policy results now include bounded-analysis metadata such as `analysis_mode`, `observed_hits`, `slices_scanned`, `truncated_slices`, `log_limit_per_slice`, and optional FortiView `estimated_total_hits`
+- **`is_exact` ownership moved to `_bounded_metadata`** — `_aggregate_port_analysis` no longer computes `is_exact`; the caller sets it based on slice truncation, which is more accurate for multi-slice queries
+- **FortiView estimates run concurrently** with bounded log queries instead of sequentially, reducing wall-clock time on slow FortiAnalyzer instances
+
+### Added
+- Best-effort FortiView `policy-hits` estimates as optional metadata (non-fatal if unavailable)
+- Tests for `_extract_policy_hit_count` edge cases
+- Tool-level bounded tests for `get_policy_traffic_profile` and `get_policy_protocol_summary`
+
+### Credits
+- Bounded slicing approach contributed by [@nzkller](https://github.com/nzkller) (PR [#11](https://github.com/rstierli/fortianalyzer-mcp/pull/11))
+
 ## [1.1.2-beta] - 2026-04-23
 
 ### Fixed
@@ -13,16 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Usage disclaimer** in README for independent community project notice
 
-## [Unreleased]
-
-### Changed
-- **Policy traffic analysis is now bounded for large windows** — traffic analysis tools scan a fixed number of log slices per request, return observed results instead of attempting unbounded raw-log reconstruction, and only set `is_exact=true` when every queried slice is below the log fetch limit.
-- **Port analysis metadata expanded** — policy results now include bounded-analysis metadata such as `analysis_mode`, `observed_hits`, `slices_scanned`, `truncated_slices`, `log_limit_per_slice`, and optional FortiView `estimated_total_hits`.
+## [1.1.1-beta] - 2026-04-15
 
 ### Added
 - **Policy Traffic Analysis Tools** (3 tools) - Analyze traffic patterns per firewall policy for policy hardening
   - `get_policy_traffic_profile`: Sampled traffic summary with top ports, services, and applications
-  - `get_policy_port_analysis`: Bounded port/protocol enumeration with conservative `is_exact` semantics
+  - `get_policy_port_analysis`: Port/protocol enumeration with `is_exact` semantics
   - `get_policy_protocol_summary`: Lightweight protocol breakdown (TCP/UDP/ICMP/other)
 - Input validation for filter values (`sanitize_filter_value`) and action parameters (`validate_action`)
 - Concurrent policy query support with semaphore-bounded parallelism (`asyncio.Semaphore(5)`)
@@ -32,7 +44,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Total tools increased from 74 to 77 (3 new traffic analysis tools)
-- Version bumped to 1.1.0-beta
 
 ## [0.4.0-beta] - 2026-01-17
 
