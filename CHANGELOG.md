@@ -15,10 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Policy traffic analysis is now bounded for large windows** — traffic analysis tools scan a fixed number of log slices per request, return observed results instead of attempting unbounded raw-log reconstruction, and only set `is_exact=true` when every queried slice is below the log fetch limit.
+- **Port analysis metadata expanded** — policy results now include bounded-analysis metadata such as `analysis_mode`, `observed_hits`, `slices_scanned`, `truncated_slices`, `log_limit_per_slice`, and optional FortiView `estimated_total_hits`.
+
 ### Added
 - **Policy Traffic Analysis Tools** (3 tools) - Analyze traffic patterns per firewall policy for policy hardening
   - `get_policy_traffic_profile`: Sampled traffic summary with top ports, services, and applications
-  - `get_policy_port_analysis`: Exact port/protocol enumeration with `is_exact` semantics
+  - `get_policy_port_analysis`: Bounded port/protocol enumeration with conservative `is_exact` semantics
   - `get_policy_protocol_summary`: Lightweight protocol breakdown (TCP/UDP/ICMP/other)
 - Input validation for filter values (`sanitize_filter_value`) and action parameters (`validate_action`)
 - Concurrent policy query support with semaphore-bounded parallelism (`asyncio.Semaphore(5)`)
