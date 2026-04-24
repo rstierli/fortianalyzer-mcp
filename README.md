@@ -469,8 +469,14 @@ networks:
 | Tool | Description |
 |------|-------------|
 | `get_policy_traffic_profile` | Get sampled traffic summary per policy (top ports, services, apps) |
-| `get_policy_port_analysis` | Get exact port/protocol enumeration per policy with `is_exact` semantics |
+| `get_policy_port_analysis` | Get bounded port/protocol enumeration per policy with conservative `is_exact` semantics |
 | `get_policy_protocol_summary` | Get lightweight protocol breakdown (TCP/UDP/ICMP/other) per policy |
+
+Traffic analysis tools keep large windows practical by scanning a fixed, bounded
+number of log slices per request. A result is marked `is_exact=true` only when
+every queried slice returns below the per-slice log limit. If any slice reaches
+the limit, the tool returns observed results with `analysis_mode=bounded_sample`,
+truncation metadata, and a recommendation to narrow the time window for exact proof.
 
 ### PCAP Tools (5 tools)
 

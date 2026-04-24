@@ -193,7 +193,7 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
             ],
             "traffic": [
                 ("get_policy_traffic_profile", "Get sampled traffic summary per policy"),
-                ("get_policy_port_analysis", "Get exact port/protocol enumeration per policy"),
+                ("get_policy_port_analysis", "Get bounded port/protocol enumeration per policy"),
                 ("get_policy_protocol_summary", "Get protocol breakdown per policy"),
             ],
         }

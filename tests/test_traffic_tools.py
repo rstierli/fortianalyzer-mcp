@@ -6,12 +6,17 @@ without triggering server initialization.
 
 import pytest
 
+import fortianalyzer_mcp.tools.traffic_tools as traffic_tools
 from fortianalyzer_mcp.tools.traffic_tools import (
+    ANALYSIS_QUERY_BUDGET,
+    LOG_FETCH_LIMIT,
     VALID_ACTIONS,
     _aggregate_port_analysis,
     _aggregate_protocol_summary,
     _aggregate_traffic_profile,
+    _build_bounded_time_slices,
     _build_policy_filter,
+    _plan_policy_slice_count,
     sanitize_filter_value,
     validate_action,
     validate_policy_ids,
@@ -97,15 +102,62 @@ class TestValidatePolicyIds:
             validate_policy_ids([-1])
 
     def test_too_many_ids(self) -> None:
-        """More than 25 IDs should be rejected."""
-        ids = list(range(1, 27))  # 26 IDs
+        """More than the query budget should be rejected."""
+        ids = list(range(1, ANALYSIS_QUERY_BUDGET + 2))
         with pytest.raises(ValidationError, match="Too many policy IDs"):
             validate_policy_ids(ids)
 
     def test_max_ids_allowed(self) -> None:
-        """Exactly 25 IDs should be accepted."""
-        ids = list(range(1, 26))  # 25 IDs
+        """Exactly the query budget should be accepted."""
+        ids = list(range(1, ANALYSIS_QUERY_BUDGET + 1))
         assert validate_policy_ids(ids) == ids
+
+
+# =============================================================================
+# Bounded analysis planning
+# =============================================================================
+
+
+class TestBoundedAnalysisPlanning:
+    """Tests for fixed bounded query planning."""
+
+    def test_24_hour_window_uses_one_slice(self) -> None:
+        """Windows up to 24 hours should use one slice per policy."""
+        time_range = {
+            "start": "2024-01-01 00:00:00",
+            "end": "2024-01-02 00:00:00",
+        }
+        assert _plan_policy_slice_count(time_range, policy_count=1) == 1
+
+    def test_30_day_single_policy_uses_four_slices(self) -> None:
+        """Large single-policy windows should use the maximum four slices."""
+        time_range = {
+            "start": "2024-01-01 00:00:00",
+            "end": "2024-01-31 00:00:00",
+        }
+        assert _plan_policy_slice_count(time_range, policy_count=1) == 4
+
+    def test_30_day_many_policies_stays_within_query_budget(self) -> None:
+        """Many-policy large windows should stay within the logsearch query budget."""
+        time_range = {
+            "start": "2024-01-01 00:00:00",
+            "end": "2024-01-31 00:00:00",
+        }
+        policy_count = 12
+        slices = _plan_policy_slice_count(time_range, policy_count=policy_count)
+        assert slices == 2
+        assert slices * policy_count <= ANALYSIS_QUERY_BUDGET
+
+    def test_bounded_slices_cover_window(self) -> None:
+        """Fixed slices should preserve the requested first and last timestamps."""
+        time_range = {
+            "start": "2024-01-01 00:00:00",
+            "end": "2024-01-31 00:00:00",
+        }
+        slices = _build_bounded_time_slices(time_range, 4)
+        assert len(slices) == 4
+        assert slices[0]["start"] == time_range["start"]
+        assert slices[-1]["end"] == time_range["end"]
 
 
 # =============================================================================
@@ -327,6 +379,116 @@ class TestAggregatePortAnalysis:
         ]
         result = _aggregate_port_analysis(logs)
         assert result["uncovered_port_hits"] == 1
+
+
+# =============================================================================
+# Tool behavior: bounded policy analysis
+# =============================================================================
+
+
+class TestPolicyPortAnalysisToolBounded:
+    """Tests for bounded tool behavior without live FortiAnalyzer access."""
+
+    async def test_large_request_returns_bounded_result(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Large windows should return bounded observations instead of failing."""
+        call_count = 0
+
+        async def fake_estimate(*_args: object, **_kwargs: object) -> dict[int, int]:
+            return {2: 448566}
+
+        async def fake_slice(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return [{"dstport": 443, "proto": "6"} for _ in range(LOG_FETCH_LIMIT)]
+            return [{"dstport": 80, "proto": "6"}]
+
+        monkeypatch.setattr(traffic_tools, "_estimate_policy_hits_best_effort", fake_estimate)
+        monkeypatch.setattr(traffic_tools, "_query_policy_log_slice", fake_slice)
+
+        result = await traffic_tools.get_policy_port_analysis(
+            adom="root",
+            device="FGT70FTK22019321",
+            policy_ids=[2],
+            time_range="2024-01-01 00:00:00|2024-01-31 00:00:00",
+        )
+
+        assert result["status"] == "success"
+        analysis = result["results"][0]
+        assert call_count == 4
+        assert analysis["policy_id"] == 2
+        assert analysis["is_exact"] is False
+        assert analysis["analysis_mode"] == "bounded_sample"
+        assert analysis["observed_hits"] == LOG_FETCH_LIMIT + 3
+        assert analysis["slices_scanned"] == 4
+        assert analysis["truncated_slices"] == 1
+        assert analysis["log_limit_per_slice"] == LOG_FETCH_LIMIT
+        assert analysis["estimated_total_hits"] == 448566
+        assert "recommendation" in analysis
+
+    async def test_fortiview_estimate_failure_does_not_fail_tool(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """FortiView estimate failures should be metadata-only."""
+
+        async def fake_estimate(*_args: object, **_kwargs: object) -> dict[int, int]:
+            raise RuntimeError("FortiView unavailable")
+
+        async def fake_slice(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
+            return [{"dstport": 443, "proto": "6"}]
+
+        monkeypatch.setattr(traffic_tools, "_estimate_policy_hits", fake_estimate)
+        monkeypatch.setattr(traffic_tools, "_query_policy_log_slice", fake_slice)
+
+        result = await traffic_tools.get_policy_port_analysis(
+            adom="root",
+            device="FGT70FTK22019321",
+            policy_ids=[2],
+            time_range="24-hour",
+        )
+
+        assert result["status"] == "success"
+        analysis = result["results"][0]
+        assert analysis["is_exact"] is True
+        assert analysis["estimate_available"] is False
+
+    async def test_per_policy_exceptions_are_isolated(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """One policy failure should not hide successful peer-policy results."""
+
+        async def fake_estimate(*_args: object, **_kwargs: object) -> dict[int, int]:
+            return {}
+
+        async def fake_slice(
+            *_args: object,
+            policy_id: int,
+            **_kwargs: object,
+        ) -> list[dict[str, object]]:
+            if policy_id == 1:
+                raise RuntimeError("policy failed")
+            return [{"dstport": 53, "proto": "17"}]
+
+        monkeypatch.setattr(traffic_tools, "_estimate_policy_hits_best_effort", fake_estimate)
+        monkeypatch.setattr(traffic_tools, "_query_policy_log_slice", fake_slice)
+
+        result = await traffic_tools.get_policy_port_analysis(
+            adom="root",
+            device="FGT70FTK22019321",
+            policy_ids=[1, 2],
+            time_range="24-hour",
+        )
+
+        assert result["status"] == "success"
+        assert result["results"][0]["policy_id"] == 1
+        assert result["results"][0]["error"] == "policy failed"
+        assert result["results"][1]["policy_id"] == 2
+        assert result["results"][1]["observed_hits"] == 1
 
 
 # =============================================================================

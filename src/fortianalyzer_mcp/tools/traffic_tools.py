@@ -14,7 +14,8 @@ import logging
 import re
 import time
 from collections import Counter
-from typing import Any
+from datetime import datetime, timedelta
+from typing import Any, cast
 
 from fortianalyzer_mcp.server import get_faz_client, mcp
 from fortianalyzer_mcp.utils.validation import (
@@ -31,7 +32,10 @@ _QUERY_SEMAPHORE = asyncio.Semaphore(5)
 # Default and max search parameters
 DEFAULT_SEARCH_TIMEOUT = 120
 POLL_INTERVAL = 1.0
-MAX_POLICY_IDS = 25
+LOG_FETCH_LIMIT = 1000
+ANALYSIS_QUERY_BUDGET = 24
+MAX_SLICES_PER_POLICY = 4
+MAX_POLICY_IDS = ANALYSIS_QUERY_BUDGET
 DEFAULT_TOP_N = 10
 
 # Valid action values for FortiGate traffic logs
@@ -124,7 +128,7 @@ def sanitize_filter_value(value: str) -> str:
 # =============================================================================
 
 
-def _get_client():
+def _get_client() -> Any:
     """Get the FortiAnalyzer client instance."""
     client = get_faz_client()
     if not client:
@@ -153,13 +157,11 @@ def _parse_time_range(time_range: str) -> dict[str, str]:
 
     Reuses the same format as log_tools._parse_time_range.
     """
-    from datetime import datetime, timedelta
-
     now = datetime.now()
     fmt = "%Y-%m-%d %H:%M:%S"
 
     if "|" in time_range:
-        parts = time_range.split("|")
+        parts = time_range.split("|", maxsplit=1)
         return {"start": parts[0].strip(), "end": parts[1].strip()}
 
     range_map = {
@@ -178,6 +180,50 @@ def _parse_time_range(time_range: str) -> dict[str, str]:
     return {"start": start.strftime(fmt), "end": now.strftime(fmt)}
 
 
+def _parse_time_range_bounds(time_range: dict[str, str]) -> tuple[datetime, datetime]:
+    """Parse a FortiAnalyzer time range dict into datetime bounds."""
+    fmt = "%Y-%m-%d %H:%M:%S"
+    return datetime.strptime(time_range["start"], fmt), datetime.strptime(time_range["end"], fmt)
+
+
+def _format_time_range(start: datetime, end: datetime) -> dict[str, str]:
+    """Format datetime bounds for FortiAnalyzer APIs."""
+    fmt = "%Y-%m-%d %H:%M:%S"
+    return {"start": start.strftime(fmt), "end": end.strftime(fmt)}
+
+
+def _plan_policy_slice_count(
+    time_range: dict[str, str],
+    policy_count: int,
+) -> int:
+    """Plan a fixed bounded slice count per policy for a tool call."""
+    start, end = _parse_time_range_bounds(time_range)
+    if end - start <= timedelta(hours=24):
+        return 1
+    return min(MAX_SLICES_PER_POLICY, max(1, ANALYSIS_QUERY_BUDGET // max(policy_count, 1)))
+
+
+def _build_bounded_time_slices(
+    time_range: dict[str, str],
+    slice_count: int,
+) -> list[dict[str, str]]:
+    """Split a time range into a fixed number of non-overlapping slices."""
+    start, end = _parse_time_range_bounds(time_range)
+    if slice_count <= 1 or end <= start:
+        return [time_range]
+
+    total_seconds = max(1, int((end - start).total_seconds()) + 1)
+    effective_count = min(max(slice_count, 1), total_seconds)
+    slices = []
+
+    for index in range(effective_count):
+        slice_start = start + timedelta(seconds=(total_seconds * index) // effective_count)
+        slice_end = start + timedelta(seconds=(total_seconds * (index + 1)) // effective_count - 1)
+        slices.append(_format_time_range(slice_start, min(slice_end, end)))
+
+    return slices
+
+
 def _build_device_filter(device: str | None) -> list[dict[str, str]]:
     """Build device filter for API. Mirrors log_tools._build_device_filter."""
     if not device:
@@ -189,13 +235,68 @@ def _build_device_filter(device: str | None) -> list[dict[str, str]]:
     return [{"devname": device}]
 
 
+async def _query_policy_log_slice(
+    adom: str,
+    device_filter: list[dict[str, str]],
+    policy_id: int,
+    time_range: dict[str, str],
+    action: str | None,
+    limit: int = LOG_FETCH_LIMIT,
+    timeout: int = DEFAULT_SEARCH_TIMEOUT,
+) -> list[dict[str, Any]]:
+    """Query traffic logs for a single policy/time slice."""
+    client = _get_client()
+    filter_str = _build_policy_filter(policy_id, action)
+
+    start_result = await client.logsearch_start(
+        adom=adom,
+        logtype="traffic",
+        device=device_filter,
+        time_range=time_range,
+        filter=filter_str,
+        limit=limit,
+    )
+
+    tid = start_result.get("tid")
+    if not tid:
+        logger.warning(f"No TID returned for policy {policy_id}: {start_result}")
+        return []
+
+    start_time = time.monotonic()
+    while True:
+        elapsed = time.monotonic() - start_time
+        if elapsed > timeout:
+            try:
+                await client.logsearch_cancel(adom, tid)
+            except (OSError, RuntimeError):
+                pass
+            logger.warning(f"Search timed out for policy {policy_id}")
+            return []
+
+        fetch_result = await client.logsearch_fetch(
+            adom=adom,
+            tid=tid,
+            limit=limit,
+            offset=0,
+        )
+
+        percentage = fetch_result.get("percentage", 0)
+        if percentage >= 100:
+            logs = fetch_result.get("data", [])
+            if not isinstance(logs, list):
+                logs = [logs] if logs else []
+            return [log for log in logs if isinstance(log, dict)]
+
+        await asyncio.sleep(POLL_INTERVAL)
+
+
 async def _query_policy_logs(
     adom: str,
     device: str | None,
     policy_id: int,
     time_range: str,
     action: str | None,
-    limit: int = 1000,
+    limit: int = LOG_FETCH_LIMIT,
     timeout: int = DEFAULT_SEARCH_TIMEOUT,
 ) -> list[dict[str, Any]]:
     """Query traffic logs for a single policy ID.
@@ -215,51 +316,176 @@ async def _query_policy_logs(
         List of log entries.
     """
     async with _QUERY_SEMAPHORE:
-        client = _get_client()
         time_range_dict = _parse_time_range(time_range)
         device_filter = _build_device_filter(device)
-        filter_str = _build_policy_filter(policy_id, action)
-
-        start_result = await client.logsearch_start(
+        return await _query_policy_log_slice(
             adom=adom,
-            logtype="traffic",
-            device=device_filter,
+            device_filter=device_filter,
+            policy_id=policy_id,
             time_range=time_range_dict,
-            filter=filter_str,
             limit=limit,
+            action=action,
+            timeout=timeout,
         )
 
-        tid = start_result.get("tid")
-        if not tid:
-            logger.warning(f"No TID returned for policy {policy_id}: {start_result}")
-            return []
 
-        start_time = time.monotonic()
-        while True:
-            elapsed = time.monotonic() - start_time
-            if elapsed > timeout:
-                try:
-                    await client.logsearch_cancel(adom, tid)
-                except (OSError, RuntimeError):
-                    pass
-                logger.warning(f"Search timed out for policy {policy_id}")
-                return []
+async def _query_policy_logs_bounded(
+    adom: str,
+    device: str | None,
+    policy_id: int,
+    time_range: str,
+    action: str | None,
+    policy_count: int,
+    limit: int = LOG_FETCH_LIMIT,
+    timeout: int = DEFAULT_SEARCH_TIMEOUT,
+) -> dict[str, Any]:
+    """Query fixed bounded slices for one policy and report truncation metadata."""
+    async with _QUERY_SEMAPHORE:
+        full_time_range = _parse_time_range(time_range)
+        device_filter = _build_device_filter(device)
+        slice_count = _plan_policy_slice_count(full_time_range, policy_count)
+        time_slices = _build_bounded_time_slices(full_time_range, slice_count)
+        logs: list[dict[str, Any]] = []
+        truncated_slices = 0
 
-            fetch_result = await client.logsearch_fetch(
+        for time_slice in time_slices:
+            slice_logs = await _query_policy_log_slice(
                 adom=adom,
-                tid=tid,
+                device_filter=device_filter,
+                policy_id=policy_id,
+                time_range=time_slice,
+                action=action,
                 limit=limit,
-                offset=0,
+                timeout=timeout,
             )
+            logs.extend(slice_logs)
+            if len(slice_logs) >= limit:
+                truncated_slices += 1
 
-            percentage = fetch_result.get("percentage", 0)
-            if percentage >= 100:
-                logs = fetch_result.get("data", [])
-                if not isinstance(logs, list):
-                    logs = [logs] if logs else []
-                return logs
+        return {
+            "logs": logs,
+            "slices_scanned": len(time_slices),
+            "truncated_slices": truncated_slices,
+        }
 
-            await asyncio.sleep(POLL_INTERVAL)
+
+def _extract_policy_hit_count(row: dict[str, Any], action: str | None) -> int | None:
+    """Extract a best-effort hit count from a FortiView policy-hits row."""
+    key = "counts"
+    if action == "accept":
+        key = "count_pass"
+    elif action in {"deny", "drop"}:
+        key = "count_block"
+
+    value = row.get(key)
+    if value is None and key != "counts":
+        value = row.get("counts")
+    if value is None:
+        return None
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _estimate_policy_hits(
+    adom: str,
+    device: str | None,
+    policy_ids: list[int],
+    time_range: str,
+    action: str | None,
+    timeout: int = 30,
+) -> dict[int, int]:
+    """Fetch one bounded FortiView policy-hits page as optional metadata."""
+    client = _get_client()
+    device_filter = _build_device_filter(device)
+    time_range_dict = _parse_time_range(time_range)
+
+    run_result = await client.fortiview_run(
+        adom=adom,
+        view_name="policy-hits",
+        device=device_filter,
+        time_range=time_range_dict,
+        limit=1000,
+        sort_by=[{"field": "counts", "order": "desc"}],
+    )
+    tid = run_result.get("tid")
+    if not tid:
+        return {}
+
+    start_time = time.monotonic()
+    while True:
+        if time.monotonic() - start_time > timeout:
+            return {}
+
+        result = await client.fortiview_fetch(
+            adom=adom,
+            view_name="policy-hits",
+            tid=tid,
+        )
+        rows = result.get("data", [])
+        if not isinstance(rows, list):
+            rows = [rows] if rows else []
+
+        if result.get("percentage", 100) >= 100 or rows:
+            wanted = set(policy_ids)
+            estimates: dict[int, int] = {}
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                raw_policy_id = row.get("agg_policyid", row.get("policyid"))
+                if raw_policy_id is None or not str(raw_policy_id).isdigit():
+                    continue
+                policy_id = int(raw_policy_id)
+                if policy_id not in wanted:
+                    continue
+                hits = _extract_policy_hit_count(row, action)
+                if hits is not None:
+                    estimates[policy_id] = hits
+            return estimates
+
+        await asyncio.sleep(POLL_INTERVAL)
+
+
+async def _estimate_policy_hits_best_effort(
+    adom: str,
+    device: str | None,
+    policy_ids: list[int],
+    time_range: str,
+    action: str | None,
+) -> dict[int, int]:
+    """Return FortiView estimates when available without failing the caller."""
+    try:
+        return await _estimate_policy_hits(adom, device, policy_ids, time_range, action)
+    except Exception as exc:
+        logger.info(f"FortiView policy-hit estimate unavailable: {exc}")
+        return {}
+
+
+def _bounded_metadata(
+    observed_hits: int,
+    slices_scanned: int,
+    truncated_slices: int,
+    estimated_total_hits: int | None = None,
+) -> dict[str, Any]:
+    """Build common bounded-analysis response metadata."""
+    is_exact = truncated_slices == 0
+    metadata: dict[str, Any] = {
+        "is_exact": is_exact,
+        "analysis_mode": "complete" if is_exact else "bounded_sample",
+        "observed_hits": observed_hits,
+        "slices_scanned": slices_scanned,
+        "truncated_slices": truncated_slices,
+        "log_limit_per_slice": LOG_FETCH_LIMIT,
+        "estimate_available": estimated_total_hits is not None,
+    }
+    if estimated_total_hits is not None:
+        metadata["estimated_total_hits"] = estimated_total_hits
+    if not is_exact:
+        metadata["recommendation"] = (
+            "Narrow the request to 24-hour, 6-hour, or a custom shorter window for exact proof."
+        )
+    return metadata
 
 
 # =============================================================================
@@ -310,8 +536,8 @@ def _aggregate_traffic_profile(logs: list[dict[str, Any]], top_n: int) -> dict[s
     }
 
 
-def _aggregate_port_analysis(logs: list[dict[str, Any]], limit: int = 1000) -> dict[str, Any]:
-    """Aggregate logs into exact port/protocol enumeration.
+def _aggregate_port_analysis(logs: list[dict[str, Any]], limit: int = LOG_FETCH_LIMIT) -> dict[str, Any]:
+    """Aggregate logs into port/protocol enumeration.
 
     Returns complete port list, protocol breakdown, ICMP summary,
     and is_exact indicator.
@@ -426,7 +652,7 @@ async def get_policy_traffic_profile(
         adom: ADOM name (default: from config DEFAULT_ADOM)
         device: Device filter (serial number like "FG100FTK19001333" or name).
             Default: All FortiGate devices.
-        policy_ids: List of firewall policy IDs to analyze (1-25 IDs, each > 0).
+        policy_ids: List of firewall policy IDs to analyze (1-24 IDs, each > 0).
         time_range: Time range for log query. Options:
             - "1-hour", "6-hour", "12-hour", "24-hour" (default)
             - "7-day", "30-day"
@@ -460,9 +686,20 @@ async def get_policy_traffic_profile(
             top_n = DEFAULT_TOP_N
 
         start = time.monotonic()
+        estimates = await _estimate_policy_hits_best_effort(adom, device, policy_ids, time_range, action)
 
         # Query all policies concurrently
-        tasks = [_query_policy_logs(adom, device, pid, time_range, action) for pid in policy_ids]
+        tasks = [
+            _query_policy_logs_bounded(
+                adom,
+                device,
+                pid,
+                time_range,
+                action,
+                policy_count=len(policy_ids),
+            )
+            for pid in policy_ids
+        ]
         results_list = await asyncio.gather(*tasks, return_exceptions=True)
 
         per_policy = []
@@ -475,7 +712,17 @@ async def get_policy_traffic_profile(
                     }
                 )
             else:
-                profile = _aggregate_traffic_profile(result, top_n)
+                policy_result = cast(dict[str, Any], result)
+                logs = policy_result["logs"]
+                profile = _aggregate_traffic_profile(logs, top_n)
+                profile.update(
+                    _bounded_metadata(
+                        observed_hits=len(logs),
+                        slices_scanned=policy_result["slices_scanned"],
+                        truncated_slices=policy_result["truncated_slices"],
+                        estimated_total_hits=estimates.get(pid),
+                    )
+                )
                 profile["policy_id"] = pid
                 per_policy.append(profile)
 
@@ -504,18 +751,18 @@ async def get_policy_port_analysis(
     time_range: str = "24-hour",
     action: str | None = None,
 ) -> dict[str, Any]:
-    """Get exact port/protocol enumeration per firewall policy.
+    """Get bounded port/protocol enumeration per firewall policy.
 
-    Enumerates all destination ports and protocols observed in traffic logs
-    for each policy. Returns complete lists (not sampled) with an is_exact
-    indicator. Useful for identifying exactly which ports are in use for
-    policy tightening.
+    Enumerates destination ports and protocols observed in fixed bounded traffic
+    log slices for each policy. The result is exact only when no queried slice
+    reaches the log fetch limit; otherwise it returns observed values with
+    limitation metadata and a recommendation to narrow the time window.
 
     Args:
         adom: ADOM name (default: from config DEFAULT_ADOM)
         device: Device filter (serial number like "FG100FTK19001333" or name).
             Default: All FortiGate devices.
-        policy_ids: List of firewall policy IDs to analyze (1-25 IDs, each > 0).
+        policy_ids: List of firewall policy IDs to analyze (1-24 IDs, each > 0).
         time_range: Time range for log query. Options:
             - "1-hour", "6-hour", "12-hour", "24-hour" (default)
             - "7-day", "30-day"
@@ -527,7 +774,9 @@ async def get_policy_port_analysis(
         dict with keys:
             - status: "success" or "error"
             - results: Per-policy port analysis with:
-                - is_exact: Whether the port list is complete
+                - is_exact: Whether the port list is complete for queried window
+                - analysis_mode: "complete" or "bounded_sample"
+                - observed_hits: Number of log rows aggregated
                 - ports: List of port/protocol pairs with hit counts
                 - protocols: Protocol breakdown
                 - portless_protocols: Protocols without ports (ICMP, GRE, etc.)
@@ -550,8 +799,19 @@ async def get_policy_port_analysis(
         action = validate_action(action)
 
         start = time.monotonic()
+        estimates = await _estimate_policy_hits_best_effort(adom, device, policy_ids, time_range, action)
 
-        tasks = [_query_policy_logs(adom, device, pid, time_range, action) for pid in policy_ids]
+        tasks = [
+            _query_policy_logs_bounded(
+                adom,
+                device,
+                pid,
+                time_range,
+                action,
+                policy_count=len(policy_ids),
+            )
+            for pid in policy_ids
+        ]
         results_list = await asyncio.gather(*tasks, return_exceptions=True)
 
         per_policy = []
@@ -564,7 +824,17 @@ async def get_policy_port_analysis(
                     }
                 )
             else:
-                analysis = _aggregate_port_analysis(result, limit=1000)
+                policy_result = cast(dict[str, Any], result)
+                logs = policy_result["logs"]
+                analysis = _aggregate_port_analysis(logs, limit=LOG_FETCH_LIMIT)
+                analysis.update(
+                    _bounded_metadata(
+                        observed_hits=len(logs),
+                        slices_scanned=policy_result["slices_scanned"],
+                        truncated_slices=policy_result["truncated_slices"],
+                        estimated_total_hits=estimates.get(pid),
+                    )
+                )
                 analysis["policy_id"] = pid
                 per_policy.append(analysis)
 
@@ -603,7 +873,7 @@ async def get_policy_protocol_summary(
         adom: ADOM name (default: from config DEFAULT_ADOM)
         device: Device filter (serial number like "FG100FTK19001333" or name).
             Default: All FortiGate devices.
-        policy_ids: List of firewall policy IDs to analyze (1-25 IDs, each > 0).
+        policy_ids: List of firewall policy IDs to analyze (1-24 IDs, each > 0).
         time_range: Time range for log query. Options:
             - "1-hour", "6-hour", "12-hour", "24-hour" (default)
             - "7-day", "30-day"
@@ -632,8 +902,19 @@ async def get_policy_protocol_summary(
         action = validate_action(action)
 
         start = time.monotonic()
+        estimates = await _estimate_policy_hits_best_effort(adom, device, policy_ids, time_range, action)
 
-        tasks = [_query_policy_logs(adom, device, pid, time_range, action) for pid in policy_ids]
+        tasks = [
+            _query_policy_logs_bounded(
+                adom,
+                device,
+                pid,
+                time_range,
+                action,
+                policy_count=len(policy_ids),
+            )
+            for pid in policy_ids
+        ]
         results_list = await asyncio.gather(*tasks, return_exceptions=True)
 
         per_policy = []
@@ -646,7 +927,17 @@ async def get_policy_protocol_summary(
                     }
                 )
             else:
-                summary = _aggregate_protocol_summary(result)
+                policy_result = cast(dict[str, Any], result)
+                logs = policy_result["logs"]
+                summary = _aggregate_protocol_summary(logs)
+                summary.update(
+                    _bounded_metadata(
+                        observed_hits=len(logs),
+                        slices_scanned=policy_result["slices_scanned"],
+                        truncated_slices=policy_result["truncated_slices"],
+                        estimated_total_hits=estimates.get(pid),
+                    )
+                )
                 summary["policy_id"] = pid
                 per_policy.append(summary)
 
