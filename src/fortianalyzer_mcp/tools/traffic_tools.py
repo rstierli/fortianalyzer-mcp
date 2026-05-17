@@ -18,6 +18,10 @@ from datetime import datetime, timedelta
 from typing import Any, cast
 
 from fortianalyzer_mcp.server import get_faz_client, mcp
+from fortianalyzer_mcp.utils.time_range import (
+    parse_time_range,
+    parse_time_range_bounds,
+)
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
     get_default_adom,
@@ -152,38 +156,23 @@ def _build_policy_filter(policy_id: int, action: str | None = None) -> str:
     return " and ".join(parts)
 
 
-def _parse_time_range(time_range: str) -> dict[str, str]:
-    """Parse time range string to API format.
+async def _parse_time_range(time_range: str) -> dict[str, str]:
+    """Parse time range using FAZ system TZ for alignment.
 
-    Reuses the same format as log_tools._parse_time_range.
+    Custom absolute ranges (``"start|end"``) skip the TZ lookup since
+    the caller is already supplying explicit timestamps. Relative
+    presets pull the cached FAZ timezone off the client so naive
+    timestamps land in FAZ's local TZ.
     """
-    now = datetime.now()
-    fmt = "%Y-%m-%d %H:%M:%S"
-
     if "|" in time_range:
-        parts = time_range.split("|", maxsplit=1)
-        return {"start": parts[0].strip(), "end": parts[1].strip()}
-
-    range_map = {
-        "1-hour": timedelta(hours=1),
-        "6-hour": timedelta(hours=6),
-        "12-hour": timedelta(hours=12),
-        "24-hour": timedelta(hours=24),
-        "1-day": timedelta(days=1),
-        "7-day": timedelta(days=7),
-        "30-day": timedelta(days=30),
-    }
-
-    delta = range_map.get(time_range, timedelta(hours=1))
-    start = now - delta
-
-    return {"start": start.strftime(fmt), "end": now.strftime(fmt)}
+        return parse_time_range(time_range)
+    client = _get_client()
+    faz_tz = await client.get_system_timezone()
+    return parse_time_range(time_range, faz_tz=faz_tz)
 
 
-def _parse_time_range_bounds(time_range: dict[str, str]) -> tuple[datetime, datetime]:
-    """Parse a FortiAnalyzer time range dict into datetime bounds."""
-    fmt = "%Y-%m-%d %H:%M:%S"
-    return datetime.strptime(time_range["start"], fmt), datetime.strptime(time_range["end"], fmt)
+# parse_time_range_bounds is re-exported from utils.time_range above.
+_parse_time_range_bounds = parse_time_range_bounds
 
 
 def _format_time_range(start: datetime, end: datetime) -> dict[str, str]:
@@ -316,7 +305,7 @@ async def _query_policy_logs(
         List of log entries.
     """
     async with _QUERY_SEMAPHORE:
-        time_range_dict = _parse_time_range(time_range)
+        time_range_dict = await _parse_time_range(time_range)
         device_filter = _build_device_filter(device)
         return await _query_policy_log_slice(
             adom=adom,
@@ -341,7 +330,7 @@ async def _query_policy_logs_bounded(
 ) -> dict[str, Any]:
     """Query fixed bounded slices for one policy and report truncation metadata."""
     async with _QUERY_SEMAPHORE:
-        full_time_range = _parse_time_range(time_range)
+        full_time_range = await _parse_time_range(time_range)
         device_filter = _build_device_filter(device)
         slice_count = _plan_policy_slice_count(full_time_range, policy_count)
         time_slices = _build_bounded_time_slices(full_time_range, slice_count)
@@ -399,7 +388,7 @@ async def _estimate_policy_hits(
     """Fetch one bounded FortiView policy-hits page as optional metadata."""
     client = _get_client()
     device_filter = _build_device_filter(device)
-    time_range_dict = _parse_time_range(time_range)
+    time_range_dict = await _parse_time_range(time_range)
 
     run_result = await client.fortiview_run(
         adom=adom,
