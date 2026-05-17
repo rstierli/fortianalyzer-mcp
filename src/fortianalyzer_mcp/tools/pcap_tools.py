@@ -12,10 +12,11 @@ import io
 import logging
 import os
 import zipfile
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 from fortianalyzer_mcp.server import get_faz_client, mcp
+from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
     get_default_adom,
@@ -39,31 +40,19 @@ def _get_client():
     return client
 
 
-def _parse_time_range(time_range: str) -> dict[str, str]:
-    """Parse time range string to API format."""
-    now = datetime.now()
-    fmt = "%Y-%m-%d %H:%M:%S"
+async def _parse_time_range(time_range: str) -> dict[str, str]:
+    """Parse time range using FAZ system TZ for alignment.
 
+    Custom absolute ranges (``"start|end"``) skip the TZ lookup since
+    the caller is already supplying explicit timestamps. Relative
+    presets pull the cached FAZ timezone off the client so naive
+    timestamps land in FAZ's local TZ.
+    """
     if "|" in time_range:
-        parts = time_range.split("|")
-        return {"start": parts[0].strip(), "end": parts[1].strip()}
-
-    range_map = {
-        "5-min": timedelta(minutes=5),
-        "30-min": timedelta(minutes=30),
-        "1-hour": timedelta(hours=1),
-        "6-hour": timedelta(hours=6),
-        "12-hour": timedelta(hours=12),
-        "24-hour": timedelta(hours=24),
-        "1-day": timedelta(days=1),
-        "7-day": timedelta(days=7),
-        "30-day": timedelta(days=30),
-    }
-
-    delta = range_map.get(time_range, timedelta(hours=24))
-    start = now - delta
-
-    return {"start": start.strftime(fmt), "end": now.strftime(fmt)}
+        return parse_time_range(time_range)
+    client = _get_client()
+    faz_tz = await client.get_system_timezone()
+    return parse_time_range(time_range, faz_tz=faz_tz)
 
 
 def _build_ips_filter(
@@ -274,7 +263,7 @@ async def search_ips_logs(
         )
 
         # Parse time range
-        time_range_dict = _parse_time_range(time_range)
+        time_range_dict = await _parse_time_range(time_range)
 
         # Build device filter
         device_filter = [{"devid": device}] if device else [{"devid": "All_FortiGate"}]
@@ -409,7 +398,7 @@ async def get_pcap_by_session(
 
         # Build filter for specific session ID
         filter_str = f"sessionid=={session_id}"
-        time_range_dict = _parse_time_range(time_range)
+        time_range_dict = await _parse_time_range(time_range)
         device_filter = [{"devid": device}] if device else [{"devid": "All_FortiGate"}]
 
         logger.info(f"Searching for session {session_id} in ADOM {adom}")
@@ -789,7 +778,7 @@ async def search_and_download_pcaps(
             has_pcap=True,  # Only get entries with PCAP
         )
 
-        time_range_dict = _parse_time_range(time_range)
+        time_range_dict = await _parse_time_range(time_range)
         device_filter = [{"devid": device}] if device else [{"devid": "All_FortiGate"}]
 
         logger.info(f"Searching IPS logs for PCAP download: {filter_str}")

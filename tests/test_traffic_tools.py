@@ -441,7 +441,10 @@ class TestPolicyPortAnalysisToolBounded:
             adom="root",
             device="FGT70FTK22019321",
             policy_ids=[2],
-            time_range="24-hour",
+            # Custom range (same 24-hour window) avoids touching the FAZ
+            # client for TZ lookup, which isn't initialized in these
+            # unit tests.
+            time_range="2024-01-01 00:00:00|2024-01-02 00:00:00",
         )
 
         assert result["status"] == "success"
@@ -474,7 +477,8 @@ class TestPolicyPortAnalysisToolBounded:
             adom="root",
             device="FGT70FTK22019321",
             policy_ids=[1, 2],
-            time_range="24-hour",
+            # Custom range avoids the TZ client lookup in unit tests.
+            time_range="2024-01-01 00:00:00|2024-01-02 00:00:00",
         )
 
         assert result["status"] == "success"

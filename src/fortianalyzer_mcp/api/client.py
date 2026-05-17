@@ -6,6 +6,7 @@ Based on FNDN FortiAnalyzer 7.6.5 API specifications.
 import json
 import logging
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pyFMG.fortimgr import FortiManager
 
@@ -55,6 +56,7 @@ class FortiAnalyzerClient:
         self._fmg: FortiManager | None = None
         self._connected = False
         self._faz_version: tuple[int, int, int] | None = None  # (major, minor, patch)
+        self._faz_tz: ZoneInfo | None = None  # cached FAZ system timezone
 
         logger.info(f"Initialized FortiAnalyzer client for {self.host}")
 
@@ -182,6 +184,43 @@ class FortiAnalyzerClient:
             self._faz_version = (7, 0, 0)
 
         return self._faz_version
+
+    async def get_system_timezone(self) -> ZoneInfo | None:
+        """Detect and cache the FAZ system timezone as a ZoneInfo.
+
+        FAZ accepts naive ``YYYY-MM-DD HH:MM:SS`` timestamps and
+        interprets them in its own system TZ. When the MCP host is in
+        a different TZ than FAZ, relative time-range queries silently
+        miss real logs. Callers compute "now" in this TZ before
+        formatting so the bytes-on-wire always match FAZ's clock.
+
+        Falls back to ``None`` if FAZ doesn't report a parseable TZ
+        (older versions or unrecognized IANA names). In that case
+        callers degrade to naive ``datetime.now()`` (legacy behavior).
+
+        Returns:
+            ``ZoneInfo`` for the FAZ system TZ, or ``None`` if it
+            couldn't be determined.
+        """
+        if self._faz_tz is not None:
+            return self._faz_tz
+
+        try:
+            status = await self.get_system_status()
+            tz_name = status.get("TZ")
+            if isinstance(tz_name, str) and tz_name:
+                self._faz_tz = ZoneInfo(tz_name)
+                logger.info(f"Detected FAZ system timezone: {tz_name}")
+                return self._faz_tz
+            logger.warning(
+                f"FAZ system status missing TZ field; "
+                f"time-range queries may misalign. Got: {status.get('Time Zone')!r}"
+            )
+        except ZoneInfoNotFoundError as e:
+            logger.warning(f"FAZ reported unknown IANA timezone {e}; falling back to naive")
+        except Exception as e:
+            logger.warning(f"Failed to detect FAZ timezone: {e}; falling back to naive")
+        return None
 
     def _ensure_connected(self) -> FortiManager:
         """Ensure client is connected and return pyfmg instance."""

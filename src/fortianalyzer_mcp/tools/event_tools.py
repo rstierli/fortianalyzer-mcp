@@ -5,10 +5,10 @@ Provides alert management, event handling, and SOC operations.
 """
 
 import logging
-from datetime import datetime, timedelta
 from typing import Any
 
 from fortianalyzer_mcp.server import get_faz_client, mcp
+from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import get_default_adom
 
 logger = logging.getLogger(__name__)
@@ -22,29 +22,19 @@ def _get_client():
     return client
 
 
-def _parse_time_range(time_range: str) -> dict[str, str]:
-    """Parse time range string to API format."""
-    now = datetime.now()
-    fmt = "%Y-%m-%d %H:%M:%S"
+async def _parse_time_range(time_range: str) -> dict[str, str]:
+    """Parse time range using FAZ system TZ for alignment.
 
+    Custom absolute ranges (``"start|end"``) skip the TZ lookup since
+    the caller is already supplying explicit timestamps. Relative
+    presets pull the cached FAZ timezone off the client so naive
+    timestamps land in FAZ's local TZ.
+    """
     if "|" in time_range:
-        parts = time_range.split("|")
-        return {"start": parts[0].strip(), "end": parts[1].strip()}
-
-    range_map = {
-        "1-hour": timedelta(hours=1),
-        "6-hour": timedelta(hours=6),
-        "12-hour": timedelta(hours=12),
-        "24-hour": timedelta(hours=24),
-        "1-day": timedelta(days=1),
-        "7-day": timedelta(days=7),
-        "30-day": timedelta(days=30),
-    }
-
-    delta = range_map.get(time_range, timedelta(hours=24))
-    start = now - delta
-
-    return {"start": start.strftime(fmt), "end": now.strftime(fmt)}
+        return parse_time_range(time_range)
+    client = _get_client()
+    faz_tz = await client.get_system_timezone()
+    return parse_time_range(time_range, faz_tz=faz_tz)
 
 
 @mcp.tool()
@@ -79,7 +69,7 @@ async def get_alerts(
     try:
         adom = adom or get_default_adom()
         client = _get_client()
-        tr = _parse_time_range(time_range)
+        tr = await _parse_time_range(time_range)
 
         logger.info(f"Getting alerts from ADOM {adom} for {time_range}")
 
@@ -126,7 +116,7 @@ async def get_alert_count(
     try:
         adom = adom or get_default_adom()
         client = _get_client()
-        tr = _parse_time_range(time_range)
+        tr = await _parse_time_range(time_range)
 
         logger.info(f"Getting alert count from ADOM {adom}")
 
@@ -382,7 +372,7 @@ async def get_alert_incident_stats(
     try:
         adom = adom or get_default_adom()
         client = _get_client()
-        tr = _parse_time_range(time_range)
+        tr = await _parse_time_range(time_range)
 
         logger.info(f"Getting {stat_type} stats from ADOM {adom}")
 
