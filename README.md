@@ -405,10 +405,10 @@ networks:
 
 | Tool | Description |
 |------|-------------|
-| `query_logs` | Query logs with custom filters |
+| `query_logs` | Query logs; returns a page plus a reusable pagination handle, `total`, `has_more`, and FAZ timezone |
 | `get_log_search_progress` | Check log search progress |
-| `fetch_more_logs` | Fetch additional log results |
-| `cancel_log_search` | Cancel a running log search |
+| `fetch_more_logs` | Fetch another page for a `query_logs` handle (re-runs the query at a new offset) |
+| `cancel_log_search` | Release a pagination handle |
 | `get_log_stats` | Get log statistics |
 | `get_log_fields` | Get available log fields for a log type |
 | `search_traffic_logs` | Search traffic/firewall logs |
@@ -416,6 +416,14 @@ networks:
 | `search_event_logs` | Search system event logs |
 | `get_logfiles_state` | Get log file state information |
 | `get_pcap_file` | Download PCAP file for an IPS event |
+
+> **Paginating log results:** call `query_logs(..., limit=N)`, then page with
+> `fetch_more_logs(tid=<handle>, offset=..., limit=...)`. The returned `tid` is a
+> reusable pagination handle — FortiAnalyzer logsearch task ids are single-use,
+> so `fetch_more_logs` re-runs the same query at the new offset (results are
+> stably ordered for a fixed time window). Timestamps in `time_range` and the
+> returned logs are interpreted in the FAZ system timezone reported as
+> `timezone`. Call `cancel_log_search(tid=<handle>)` when finished.
 
 ### Report Tools (8 tools)
 

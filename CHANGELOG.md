@@ -5,6 +5,22 @@ All notable changes to FortiAnalyzer MCP Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **`fetch_more_logs` no longer fails with "Invalid tid".** A FortiAnalyzer logsearch task id is single-use — the first fetch delivers the requested `offset`/`limit` slice plus `total-count`, and the appliance then reaps the task, so any second fetch on the same tid returns `Invalid tid` regardless of ADOM (verified on a live FAZ 7.4.x appliance). `fetch_more_logs` now reconstructs and re-runs the original query (same ADOM, logtype, filter, device, and absolute time window) at the requested offset, which the appliance returns in a stable order, so paging is correct and consistent. An unknown/expired pagination handle returns a structured `error_type="tid_invalid_or_expired"` error with a recommendation to re-run `query_logs`.
+- **`total` is now accurate.** `query_logs` previously read a non-existent `total-lines` key (so `total` always equalled the page `count`); it now reads `total-count` from the fetch response and reports `total_known=false` when unavailable.
+- **FAZ timezone detection across builds.** `get_system_timezone()` now reads the IANA name from either the `TZ` or `Time Zone` field of `/sys/status`.
+
+### Added
+- **Reusable pagination handle + richer `query_logs` output.** `query_logs` returns `tid` (a reusable pagination handle), `has_more`, `total`, `total_known`, `timezone`, `time_basis`, the resolved `time_range`, and echoes `adom`/`logtype`/`filter`/`device`/`returned_offset`/`returned_limit` for auditability. `fetch_more_logs` returns the same self-describing shape.
+- **Automatic reconnect-once.** Log tools call `FortiAnalyzerClient.ensure_connected()` before issuing requests, so an idle-closed session is transparently revived instead of surfacing a raw "Not connected. Call connect() first." error.
+- **Bounded transient retry.** Client requests retry transient FAZ/network errors (internal error, task timeout, network) with exponential backoff; validation and invalid-tid errors are never retried.
+- **`cancel_log_search`** now releases the in-process pagination handle (the appliance task is usually already reaped, so the appliance-side cancel is best-effort).
+
+### Changed
+- A completed logsearch task discovered reaped mid-poll is re-issued (bounded) so a slow search that finishes between polls still returns its results instead of failing.
+
 ## [1.3.0] - 2026-05-29
 
 First stable release — graduated from beta.
