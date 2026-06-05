@@ -210,3 +210,241 @@ class TestFortiAnalyzerClientErrorHandling:
 
         with pytest.raises(APIError):
             client._handle_response(-1, {"status": {"message": "Error"}}, "test")
+
+
+async def _no_sleep(_seconds: float) -> None:
+    """Sleep replacement that records nothing and returns immediately."""
+    return None
+
+
+def _bare_client() -> FortiAnalyzerClient:
+    return FortiAnalyzerClient(
+        host="test-faz.example.com",
+        username="admin",
+        password="password",
+    )
+
+
+class TestEnsureConnected:
+    """Tests for the reconnect-once guard tools call before issuing requests."""
+
+    async def test_reconnects_once_when_dropped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A dropped session is revived by exactly one connect() call."""
+        client = _bare_client()  # _connected is False
+        reconnects: list[int] = []
+
+        async def fake_connect() -> None:
+            reconnects.append(1)
+            client._connected = True
+
+        monkeypatch.setattr(client, "connect", fake_connect)
+
+        await client.ensure_connected()
+
+        assert reconnects == [1]
+
+    async def test_noop_when_already_connected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An already-connected client is not reconnected."""
+        client = _bare_client()
+        client._connected = True
+        client._fmg = MagicMock()
+        reconnects: list[int] = []
+
+        async def fake_connect() -> None:
+            reconnects.append(1)
+
+        monkeypatch.setattr(client, "connect", fake_connect)
+
+        await client.ensure_connected()
+
+        assert reconnects == []
+
+
+class TestExecuteResilient:
+    """Tests for transient retry behavior (reconnect is handled separately)."""
+
+    async def test_transient_error_retried_then_succeeds(self) -> None:
+        """A transient FAZ error (code -1) is retried and can then succeed."""
+        from fortianalyzer_mcp.utils.errors import APIError
+
+        client = _bare_client()
+        calls: list[int] = []
+
+        async def factory() -> str:
+            calls.append(1)
+            if len(calls) == 1:
+                raise APIError("internal error", code=-1)
+            return "ok"
+
+        result = await client._execute_resilient(factory, sleep=_no_sleep)
+
+        assert result == "ok"
+        assert len(calls) == 2
+
+    async def test_transient_error_exhausts_retries(self) -> None:
+        """A persistent transient error is retried a bounded number of times."""
+        from fortianalyzer_mcp.utils.errors import APIError
+
+        client = _bare_client()
+        calls: list[int] = []
+
+        async def factory() -> str:
+            calls.append(1)
+            raise APIError("internal error", code=-1)
+
+        with pytest.raises(APIError):
+            await client._execute_resilient(factory, sleep=_no_sleep)
+
+        assert len(calls) == 1 + client._TRANSIENT_RETRIES
+
+    async def test_validation_error_not_retried(self) -> None:
+        """A validation error (code -5) is never retried."""
+        from fortianalyzer_mcp.utils.errors import ValidationError
+
+        client = _bare_client()
+        calls: list[int] = []
+
+        async def factory() -> str:
+            calls.append(1)
+            raise ValidationError("invalid param", code=-5)
+
+        with pytest.raises(ValidationError):
+            await client._execute_resilient(factory, sleep=_no_sleep)
+
+        assert len(calls) == 1
+
+    async def test_oserror_retried_then_succeeds(self) -> None:
+        """A network OSError is transient and retried."""
+        client = _bare_client()
+        calls: list[int] = []
+
+        async def factory() -> str:
+            calls.append(1)
+            if len(calls) == 1:
+                raise OSError("connection reset")
+            return "ok"
+
+        result = await client._execute_resilient(factory, sleep=_no_sleep)
+        assert result == "ok"
+        assert len(calls) == 2
+
+    async def test_invalid_tid_not_retried(self) -> None:
+        """An invalid-tid error is handled by the tool layer, not retried here,
+        even though it can carry a transient-looking code."""
+        from fortianalyzer_mcp.utils.errors import APIError
+
+        client = _bare_client()
+        calls: list[int] = []
+
+        async def factory() -> str:
+            calls.append(1)
+            raise APIError("Server error: Invalid tid 123 for fetching result.", code=-1)
+
+        with pytest.raises(APIError):
+            await client._execute_resilient(factory, sleep=_no_sleep)
+
+        assert len(calls) == 1  # not retried
+
+
+class TestSessionReconnect:
+    """Tests for reviving a server-dropped session mid-request."""
+
+    async def test_session_error_reconnects_once_then_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stale-session error triggers one forced reconnect, then retries."""
+        from fortianalyzer_mcp.utils.errors import AuthenticationError
+
+        client = _bare_client()
+        client._connected = True  # stale: server has dropped the session
+        client._fmg = MagicMock()
+        reconnects: list[int] = []
+
+        async def fake_connect() -> None:
+            reconnects.append(1)
+            client._connected = True
+
+        monkeypatch.setattr(client, "connect", fake_connect)
+
+        calls: list[int] = []
+
+        async def factory() -> str:
+            calls.append(1)
+            if len(calls) == 1:
+                raise AuthenticationError("Invalid session", code=-2)
+            return "ok"
+
+        result = await client._execute_resilient(factory, sleep=_no_sleep)
+
+        assert result == "ok"
+        assert len(calls) == 2
+        assert len(reconnects) == 1
+        # Forced reconnect cleared the stale connection state before reconnecting.
+
+    async def test_session_error_reconnects_at_most_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A persistent session error reconnects once, then surfaces."""
+        from fortianalyzer_mcp.utils.errors import AuthenticationError
+
+        client = _bare_client()
+        client._connected = True
+        client._fmg = MagicMock()
+        reconnects: list[int] = []
+
+        async def fake_connect() -> None:
+            reconnects.append(1)
+            client._connected = True
+
+        monkeypatch.setattr(client, "connect", fake_connect)
+
+        calls: list[int] = []
+
+        async def factory() -> str:
+            calls.append(1)
+            raise AuthenticationError("Invalid session", code=-2)
+
+        with pytest.raises(AuthenticationError):
+            await client._execute_resilient(factory, sleep=_no_sleep)
+
+        assert len(reconnects) == 1
+        assert len(calls) == 2
+
+
+class TestSystemTimezoneDetection:
+    """Tests for FAZ system timezone field detection."""
+
+    async def test_reads_tz_field(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The IANA name in the 'TZ' field is used when present."""
+        client = _bare_client()
+
+        async def fake_status() -> dict[str, str]:
+            return {"TZ": "UTC"}
+
+        monkeypatch.setattr(client, "get_system_status", fake_status)
+        tz = await client.get_system_timezone()
+        assert tz is not None
+        assert str(tz) == "UTC"
+
+    async def test_falls_back_to_time_zone_field(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When 'TZ' is absent, the 'Time Zone' field is used."""
+        client = _bare_client()
+
+        async def fake_status() -> dict[str, str]:
+            return {"Time Zone": "America/New_York"}
+
+        monkeypatch.setattr(client, "get_system_status", fake_status)
+        tz = await client.get_system_timezone()
+        assert tz is not None
+        assert str(tz) == "America/New_York"
+
+    async def test_unknown_tz_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A non-IANA timezone label degrades to None (naive fallback)."""
+        client = _bare_client()
+
+        async def fake_status() -> dict[str, str]:
+            return {"Time Zone": "(GMT-08:00) Pacific Time"}
+
+        monkeypatch.setattr(client, "get_system_status", fake_status)
+        tz = await client.get_system_timezone()
+        assert tz is None
