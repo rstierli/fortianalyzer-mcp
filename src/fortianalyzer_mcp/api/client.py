@@ -3,8 +3,10 @@
 Based on FNDN FortiAnalyzer 7.6.5 API specifications.
 """
 
+import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -33,6 +35,15 @@ class FortiAnalyzerClient:
 
     Based on FNDN FortiAnalyzer 7.6.4 specifications.
     """
+
+    # Resilience: bounded transient retry with exponential backoff. Reconnect
+    # is handled separately by ensure_connected() (tools call it upfront).
+    _TRANSIENT_RETRIES = 2
+    _TRANSIENT_BACKOFF_BASE = 0.5  # seconds; doubled each retry
+    # FAZ error codes worth a retry: internal error, task timeout.
+    _TRANSIENT_ERROR_CODES = frozenset({-1, -11})
+    # FAZ error codes that mean the server session is gone (revive once).
+    _RECONNECTABLE_ERROR_CODES = frozenset({-2, -20, -21})
 
     def __init__(
         self,
@@ -207,14 +218,15 @@ class FortiAnalyzerClient:
 
         try:
             status = await self.get_system_status()
-            tz_name = status.get("TZ")
+            # /sys/status reports the IANA name under "TZ" on some builds and
+            # "Time Zone" on others; accept either.
+            tz_name = status.get("TZ") or status.get("Time Zone")
             if isinstance(tz_name, str) and tz_name:
                 self._faz_tz = ZoneInfo(tz_name)
                 logger.info(f"Detected FAZ system timezone: {tz_name}")
                 return self._faz_tz
             logger.warning(
-                f"FAZ system status missing TZ field; "
-                f"time-range queries may misalign. Got: {status.get('Time Zone')!r}"
+                "FAZ system status missing TZ/Time Zone field; time-range queries may misalign."
             )
         except ZoneInfoNotFoundError as e:
             logger.warning(f"FAZ reported unknown IANA timezone {e}; falling back to naive")
@@ -227,6 +239,95 @@ class FortiAnalyzerClient:
         if not self._connected or not self._fmg:
             raise ConnectionError("Not connected. Call connect() first.")
         return self._fmg
+
+    async def ensure_connected(self) -> None:
+        """Reconnect once if the session has dropped.
+
+        Tools call this before issuing requests so an idle-closed session is
+        transparently revived. FortiAnalyzer can report not-connected after a
+        streamable HTTP session closes; a fresh request should reconnect rather
+        than surface a raw "Not connected" error. Raises ConnectionError if the
+        single reconnect attempt fails.
+        """
+        if self.is_connected:
+            return
+        logger.warning("FortiAnalyzer session not connected; reconnecting once")
+        await self.connect()
+
+    def _is_transient_error(self, exc: Exception) -> bool:
+        """Classify whether an error is worth a bounded retry.
+
+        Network errors and a small set of FAZ task errors (internal error,
+        task timeout) are transient. Validation, permission, not-found, and
+        invalid-tid errors are not retried — invalid-tid in particular is owned
+        by the log tools (which re-run the search), so retrying it here would
+        only waste backoff before the tool re-issues.
+        """
+        msg = str(exc).lower()
+        if "tid" in msg and "invalid" in msg:
+            return False
+        if isinstance(exc, OSError):
+            return True
+        code = getattr(exc, "code", None)
+        return code in self._TRANSIENT_ERROR_CODES
+
+    def _is_session_error(self, exc: Exception) -> bool:
+        """Classify whether an error means the server session is gone.
+
+        A stale/expired session (e.g. the appliance closed an idle session)
+        surfaces as an auth error while the local client still believes it is
+        connected. These are recoverable by re-logging in once.
+        """
+        if isinstance(exc, AuthenticationError):
+            return True
+        return getattr(exc, "code", None) in self._RECONNECTABLE_ERROR_CODES
+
+    async def _force_reconnect(self) -> None:
+        """Drop stale connection state and reconnect (re-login)."""
+        self._connected = False
+        self._fmg = None
+        await self.connect()
+
+    async def _execute_resilient(
+        self,
+        factory: Callable[[], Awaitable[Any]],
+        *,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
+    ) -> Any:
+        """Run an async request factory with reconnect-once + transient retry.
+
+        A stale-session error triggers exactly one forced reconnect (re-login)
+        and a retry — this revives a session the appliance dropped while the
+        local client still believed it was connected. Transient FAZ/network
+        errors are then retried up to ``_TRANSIENT_RETRIES`` with exponential
+        backoff. Validation, invalid-tid, and not-connected errors are surfaced
+        immediately so callers can handle them.
+        """
+        sleeper = sleep or asyncio.sleep
+        retries_left = self._TRANSIENT_RETRIES
+        reconnect_left = 1
+        attempt = 0
+        while True:
+            try:
+                return await factory()
+            except Exception as exc:
+                if reconnect_left > 0 and self._is_session_error(exc):
+                    reconnect_left -= 1
+                    logger.warning("FortiAnalyzer session invalid; reconnecting once and retrying")
+                    await self._force_reconnect()
+                    continue
+                if retries_left <= 0 or not self._is_transient_error(exc):
+                    # Record transient retries performed so tools can surface
+                    # retry_count. Paths that bypass this raise (force-reconnect
+                    # failure, ensure_connected, invalid-tid reissue) carry no
+                    # attribute and read back as 0 via getattr.
+                    exc.retries_attempted = attempt  # type: ignore[attr-defined]
+                    raise
+                retries_left -= 1
+                delay = self._TRANSIENT_BACKOFF_BASE * (2**attempt)
+                attempt += 1
+                logger.warning(f"Transient FortiAnalyzer error; retrying in {delay:.1f}s: {exc}")
+                await sleeper(delay)
 
     def _handle_response(self, code: int, response: Any, operation: str = "operation") -> Any:
         """Handle pyfmg response and raise appropriate exceptions."""
@@ -245,6 +346,14 @@ class FortiAnalyzerClient:
     # =========================================================================
 
     async def _raw_request(self, method: str, url: str, **kwargs: Any) -> Any:
+        """Execute a raw LogView JSON-RPC request with transient-retry resilience."""
+
+        async def _factory() -> Any:
+            return await self._raw_request_once(method, url, **kwargs)
+
+        return await self._execute_resilient(_factory)
+
+    async def _raw_request_once(self, method: str, url: str, **kwargs: Any) -> Any:
         """Execute raw JSON-RPC request for APIs with non-standard response format.
 
         LogView API returns responses in format: {"result": {"data": [...]}}
@@ -350,41 +459,40 @@ class FortiAnalyzerClient:
     # Generic Operations
     # =========================================================================
 
+    async def _generic_request(self, verb: str, url: str, **kwargs: Any) -> Any:
+        """Run a standard pyfmg verb with bounded transient-retry resilience."""
+
+        async def _factory() -> Any:
+            fmg = self._ensure_connected()
+            method = getattr(fmg, verb)
+            code, response = method(url, **kwargs)
+            return self._handle_response(code, response, f"{verb.upper()} {url}")
+
+        return await self._execute_resilient(_factory)
+
     async def get(self, url: str, **kwargs: Any) -> Any:
         """Execute GET request."""
-        fmg = self._ensure_connected()
-        code, response = fmg.get(url, **kwargs)
-        return self._handle_response(code, response, f"GET {url}")
+        return await self._generic_request("get", url, **kwargs)
 
     async def add(self, url: str, **kwargs: Any) -> Any:
         """Execute ADD request."""
-        fmg = self._ensure_connected()
-        code, response = fmg.add(url, **kwargs)
-        return self._handle_response(code, response, f"ADD {url}")
+        return await self._generic_request("add", url, **kwargs)
 
     async def set(self, url: str, **kwargs: Any) -> Any:
         """Execute SET request."""
-        fmg = self._ensure_connected()
-        code, response = fmg.set(url, **kwargs)
-        return self._handle_response(code, response, f"SET {url}")
+        return await self._generic_request("set", url, **kwargs)
 
     async def update(self, url: str, **kwargs: Any) -> Any:
         """Execute UPDATE request."""
-        fmg = self._ensure_connected()
-        code, response = fmg.update(url, **kwargs)
-        return self._handle_response(code, response, f"UPDATE {url}")
+        return await self._generic_request("update", url, **kwargs)
 
     async def delete(self, url: str, **kwargs: Any) -> Any:
         """Execute DELETE request."""
-        fmg = self._ensure_connected()
-        code, response = fmg.delete(url, **kwargs)
-        return self._handle_response(code, response, f"DELETE {url}")
+        return await self._generic_request("delete", url, **kwargs)
 
     async def execute(self, url: str, **kwargs: Any) -> Any:
         """Execute EXEC request."""
-        fmg = self._ensure_connected()
-        code, response = fmg.execute(url, **kwargs)
-        return self._handle_response(code, response, f"EXEC {url}")
+        return await self._generic_request("execute", url, **kwargs)
 
     # =========================================================================
     # DVMDB - Device Manager Database (from dvmdb.json)

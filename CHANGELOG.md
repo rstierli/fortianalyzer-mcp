@@ -5,6 +5,34 @@ All notable changes to FortiAnalyzer MCP Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **`fetch_more_logs` no longer fails with "Invalid tid".** A FortiAnalyzer logsearch task id is single-use — the first fetch delivers the requested `offset`/`limit` slice plus `total-count`, and the appliance then reaps the task, so any second fetch on the same tid returns `Invalid tid` regardless of ADOM (verified on a live FAZ 7.4.x appliance). `fetch_more_logs` now reconstructs and re-runs the original query (same ADOM, logtype, filter, device, and absolute time window) at the requested offset, which the appliance returns in a stable order, so paging is correct and consistent. An unknown/expired pagination handle returns a structured `error="tid_invalid_or_expired"` error with a recommendation to re-run `query_logs`.
+- **`total` is now accurate.** `query_logs` previously read a non-existent `total-lines` key (so `total` always equalled the page `count`); it now reads `total-count` from the fetch response and reports `total_is_known=false` when unavailable.
+- **FAZ timezone detection across builds.** `get_system_timezone()` now reads the IANA name from either the `TZ` or `Time Zone` field of `/sys/status`.
+- **Reliable bounded policy queries on slow searches.** The policy traffic tools now re-issue a fresh search per slice instead of re-fetching a single-use FortiAnalyzer `tid` (the same single-use-tid model as `query_logs`). Previously, if a slice — or the new whole-window total-count, most likely on large 7/30-day windows — returned incomplete on the first fetch, the next poll hit a reaped tid and failed that policy with `policy_query_failed`. Re-issues are bounded by the existing wall-clock timeout.
+
+### Added
+- **Reusable pagination handle + richer `query_logs` output.** `query_logs` returns `tid` (a reusable pagination handle), `has_more`, `next_offset`, `total`, `total_is_known`, `warnings`, `timezone`, `time_basis`, the resolved `time_range`, and echoes `adom`/`logtype`/`filter`/`device`/`offset`/`limit` for auditability. `fetch_more_logs` returns the same self-describing shape.
+- **Automatic reconnect-once.** Log tools call `FortiAnalyzerClient.ensure_connected()` before issuing requests, so an idle-closed session is transparently revived instead of surfacing a raw "Not connected. Call connect() first." error.
+- **Bounded transient retry.** Client requests retry transient FAZ/network errors (internal error, task timeout, network) with exponential backoff; validation and invalid-tid errors are never retried.
+- **`cancel_log_search`** now releases the in-process pagination handle (the appliance task is usually already reaped, so the appliance-side cancel is best-effort).
+- **One structured error envelope.** Every tool error path returns `{status:"error", error:<machine code>, message, operation, retry_count}` (plus `adom`/`logtype`/`tid` where relevant). Codes: `validation_error`, `invalid_time_range`, `invalid_tid`, `tid_invalid_or_expired`, `search_timeout`, `network_error`, `faz_operation_failed`; `retry_count` is the number of transient request retries the client performed.
+- **`warnings` + `next_offset` on log queries.** `query_logs`/`fetch_more_logs` include a `warnings` list (clamped `limit`, unknown `total`, undetected timezone, or a high-volume result set that points to the bounded policy tools) and a `next_offset` to drive the next page.
+- **Policy-tool audit metadata.** `get_policy_traffic_profile`/`get_policy_port_analysis`/`get_policy_protocol_summary` now return top-level `adom`, resolved `time_range`, and `timezone`, plus a per-policy `filter`; the analysis window is resolved once and shared by the bounded slices and the whole-window total-count query.
+- **Authoritative policy `total_hits`.** The three policy tools now report `total_hits` from a whole-window FortiAnalyzer log-search `total-count` for the same policy/action/device/time filter, with `total_hits_is_known` and `total_hit_source` (`"logsearch_total-count"` when authoritative, `"observed_rows"` when it fell back to fetched rows). The port/protocol/service/application breakdowns and residuals still describe observed rows only. The total-count is best-effort: if it fails, the per-policy observations are still returned with `total_hit_source="observed_rows"`.
+- **Custom time-range validation.** A custom `"start|end"` range is validated for `YYYY-MM-DD HH:MM:SS` format and `start <= end`, returning a clear `invalid_time_range` error instead of failing deep in slicing.
+
+### Changed
+- A completed logsearch task discovered reaped mid-poll is re-issued (bounded) so a slow search that finishes between polls still returns its results instead of failing.
+- Response fields were finalized before release: `total_known` → `total_is_known`, `returned_offset`/`returned_limit` → `offset`/`limit`, and the error key `error_type` → `error` (a stable machine code). These only ever existed in pre-release builds.
+- **Policy `estimated_total_hits`/`estimate_available` removed.** The optional best-effort FortiView `policy-hits` estimate (shipped through 1.3.0) is replaced by the authoritative whole-window `total_hits` above. Consumers that read `estimated_total_hits`/`estimate_available` should switch to `total_hits` + `total_hits_is_known` + `total_hit_source`.
+- **`is_exact`/`analysis_mode` honest about partial breakdowns.** A policy result is `is_exact=true`/`"complete"` only when no slice was truncated **and** `total_hits == observed_hits`; when the authoritative total exceeds the observed rows the result is `"bounded_sample"` with the narrow-the-window recommendation, so a partial breakdown is never labelled complete.
+
+### Security
+- **Secret redaction in errors and logs.** Tool error messages and the logged search filter pass through a redaction-then-truncation helper, so tokens/session ids are masked and oversized internal errors are bounded before reaching a response or log. The raw `filter=` argument on `query_logs` is documented as a caller-controlled expert escape hatch (the `search_*` helpers remain validated/sanitized).
+
 ## [1.3.0] - 2026-05-29
 
 First stable release — graduated from beta.

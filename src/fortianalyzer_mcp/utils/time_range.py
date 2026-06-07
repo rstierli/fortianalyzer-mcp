@@ -79,6 +79,15 @@ def parse_time_range(
             raise ValueError(
                 f"Custom time_range must be 'start|end' with non-empty parts, got {time_range!r}"
             )
+        try:
+            start_dt = datetime.strptime(start, _TIMESTAMP_FMT)
+            end_dt = datetime.strptime(end, _TIMESTAMP_FMT)
+        except ValueError as exc:
+            raise ValueError(
+                f"Custom time_range timestamps must be 'YYYY-MM-DD HH:MM:SS', got {time_range!r}"
+            ) from exc
+        if start_dt > end_dt:
+            raise ValueError(f"Custom time_range start must be <= end, got {time_range!r}")
         return {"start": start, "end": end}
 
     delta = _RANGE_MAP.get(time_range)

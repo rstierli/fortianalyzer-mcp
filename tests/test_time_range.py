@@ -86,6 +86,14 @@ class TestParseTimeRangeCustom:
         with pytest.raises(ValueError, match="non-empty parts"):
             parse_time_range("2024-01-01 00:00:00|")
 
+    def test_custom_range_malformed_timestamp_raises(self) -> None:
+        with pytest.raises(ValueError, match="timestamps must be"):
+            parse_time_range("not-a-date|2024-01-02 00:00:00")
+
+    def test_custom_range_start_after_end_raises(self) -> None:
+        with pytest.raises(ValueError, match="start must be <= end"):
+            parse_time_range("2024-01-02 00:00:00|2024-01-01 00:00:00")
+
 
 class TestParseTimeRangeTimezone:
     """Bug B regression: timestamps must align with FAZ TZ when provided."""
