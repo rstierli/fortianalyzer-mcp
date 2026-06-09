@@ -5,7 +5,9 @@ All notable changes to FortiAnalyzer MCP Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.0.0] - 2026-06-09
+
+Breaking change: policy `estimated_total_hits` / `estimate_available` removed in favor of authoritative `total_hits` + `total_hits_is_known` + `total_hit_source`. See **Changed** section. PR [#17](https://github.com/rstierli/fortianalyzer-mcp/pull/17) by [@inxbit](https://github.com/inxbit).
 
 ### Fixed
 - **`fetch_more_logs` no longer fails with "Invalid tid".** A FortiAnalyzer logsearch task id is single-use — the first fetch delivers the requested `offset`/`limit` slice plus `total-count`, and the appliance then reaps the task, so any second fetch on the same tid returns `Invalid tid` regardless of ADOM (verified on a live FAZ 7.4.x appliance). `fetch_more_logs` now reconstructs and re-runs the original query (same ADOM, logtype, filter, device, and absolute time window) at the requested offset, which the appliance returns in a stable order, so paging is correct and consistent. An unknown/expired pagination handle returns a structured `error="tid_invalid_or_expired"` error with a recommendation to re-run `query_logs`.
