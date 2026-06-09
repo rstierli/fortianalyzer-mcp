@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 import fortianalyzer_mcp.tools.log_tools as log_tools
+from fortianalyzer_mcp.utils.errors import ResourceNotFoundError
 
 CUSTOM_RANGE = "2024-01-01 00:00:00|2024-01-02 00:00:00"
 _PACIFIC = ZoneInfo("US/Pacific")
@@ -21,7 +22,12 @@ def _rows(n: int) -> list[dict[str, object]]:
 
 
 class ContractFaz:
-    """Minimal log-search fake with a controllable total and forced errors."""
+    """Minimal log-search fake with a controllable total and forced errors.
+
+    Honors poll-before-fetch: ``logsearch_count`` reports the scan complete (a
+    cheap GET that does not reap), so the runner polls once and then fetches the
+    page exactly once.
+    """
 
     def __init__(
         self,
@@ -38,6 +44,8 @@ class ContractFaz:
         self.connected = True
         self.reconnects = 0
         self.start_calls: list[dict[str, object]] = []
+        self.count_calls: list[int] = []
+        self._complete_tids: set[int] = set()
         self._tid = 500
 
     @property
@@ -69,9 +77,27 @@ class ContractFaz:
         self._tid += 1
         return {"tid": self._tid}
 
+    async def logsearch_count(self, adom: str, tid: int) -> dict[str, object]:
+        """Report the scan complete (does not reap the tid)."""
+        self.count_calls.append(tid)
+        self._complete_tids.add(tid)
+        rows = len(self.page)
+        total = self.total if self.total is not None else rows
+        return {
+            "progress-percent": 100,
+            "matched-logs": rows,
+            "scanned-logs": total,
+            "total-logs": total,
+        }
+
     async def logsearch_fetch(
         self, adom: str, tid: int, limit: int = 50, offset: int = 0
     ) -> dict[str, object]:
+        # Poll-before-fetch: a fetch before this tid's count has reported
+        # complete is an invalid-tid error (the live appliance reaps an
+        # un-ready single-use tid on a premature fetch).
+        if tid not in self._complete_tids:
+            raise ResourceNotFoundError(f"Invalid tid {tid}: not complete.", code=-1)
         result: dict[str, object] = {
             "percentage": 100,
             "data": list(self.page),
@@ -84,6 +110,13 @@ class ContractFaz:
 
     async def logsearch_cancel(self, adom: str, tid: int) -> dict[str, object]:
         return {"status": {"code": 0, "message": "ok"}}
+
+
+@pytest.fixture(autouse=True)
+def _fast_polls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop the poll cadence to zero so start->poll->fetch is fast."""
+    monkeypatch.setattr(log_tools, "_INITIAL_POLL_DELAY", 0)
+    monkeypatch.setattr(log_tools, "POLL_INTERVAL", 0)
 
 
 @pytest.fixture(autouse=True)
@@ -109,10 +142,27 @@ class TestQueryLogsContractFields:
         assert r["limit"] == 10
         assert r["next_offset"] == 10  # offset + count, has_more
         assert r["warnings"] == []
+        # Poll-before-fetch: the count probe ran before the fetch (the fetch now
+        # raises invalid-tid if called before its count reports complete, so a
+        # successful page proves count was polled first).
+        assert len(fake.count_calls) >= 1
         # Old names are gone.
         assert "total_known" not in r
         assert "returned_offset" not in r
         assert "returned_limit" not in r
+
+    async def test_time_basis_fields_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """query_logs surfaces the time-basis source and clock skew."""
+        fake = ContractFaz(page=_rows(3), total=3)
+        _install(monkeypatch, fake)
+
+        r = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=10)
+
+        # A custom absolute range carries explicit bounds -> "custom" basis.
+        assert r["time_basis_source"] == "custom"
+        assert r["clock_skew_seconds"] is None
+        # The FAZ tz is still reported for label purposes.
+        assert r["timezone"] == "US/Pacific"
 
     async def test_clean_query_has_empty_warnings(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake = ContractFaz(page=_rows(3), total=3)

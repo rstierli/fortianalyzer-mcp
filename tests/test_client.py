@@ -439,6 +439,95 @@ class TestSessionReconnect:
         assert len(calls) == 2
 
 
+class TestNotConnectedReconnect:
+    """A dropped session surfaces a local 'Not connected' error mid-request.
+
+    It should be revived once -- but only if the client was ever connected; a
+    never-connected client must still surface the raw error rather than silently
+    attempt a first login on an arbitrary API call.
+    """
+
+    async def test_local_not_connected_reconnects_once_then_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = _bare_client()
+        client._connected = True
+        client._fmg = MagicMock()
+        client._ever_connected = True  # was connected before; session then dropped
+        reconnects: list[int] = []
+
+        async def fake_connect() -> None:
+            reconnects.append(1)
+            client._connected = True
+
+        monkeypatch.setattr(client, "connect", fake_connect)
+
+        calls: list[int] = []
+
+        async def factory() -> str:
+            calls.append(1)
+            if len(calls) == 1:
+                raise ConnectionError("Not connected. Call connect() first.")
+            return "ok"
+
+        result = await client._execute_resilient(factory, sleep=_no_sleep)
+
+        assert result == "ok"
+        assert len(calls) == 2
+        assert len(reconnects) == 1
+
+    async def test_never_connected_does_not_reconnect(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = _bare_client()  # _ever_connected is False
+        reconnects: list[int] = []
+
+        async def fake_connect() -> None:
+            reconnects.append(1)
+
+        monkeypatch.setattr(client, "connect", fake_connect)
+
+        calls: list[int] = []
+
+        async def factory() -> str:
+            calls.append(1)
+            raise ConnectionError("Not connected. Call connect() first.")
+
+        with pytest.raises(ConnectionError, match="Not connected"):
+            await client._execute_resilient(factory, sleep=_no_sleep)
+
+        assert len(calls) == 1
+        assert reconnects == []
+
+
+class TestConcurrentReconnect:
+    """The reconnect lock + generation counter serialize concurrent reconnects."""
+
+    async def test_concurrent_force_reconnect_logs_in_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import asyncio
+
+        client = _bare_client()
+        client._connected = True
+        client._fmg = MagicMock()
+        connects: list[int] = []
+
+        async def fake_connect() -> None:
+            # Yield so the second waiter blocks on the lock before we finish.
+            await asyncio.sleep(0)
+            connects.append(1)
+            client._connected = True
+
+        monkeypatch.setattr(client, "connect", fake_connect)
+
+        await asyncio.gather(client._force_reconnect(), client._force_reconnect())
+
+        # Only the first caller re-logs in; the second sees the bumped generation.
+        assert len(connects) == 1
+        assert client._reconnect_generation == 1
+
+
 class TestSystemTimezoneDetection:
     """Tests for FAZ system timezone field detection."""
 

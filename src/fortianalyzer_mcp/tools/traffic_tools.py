@@ -19,7 +19,10 @@ from datetime import datetime, timedelta
 from typing import Any, cast
 
 from fortianalyzer_mcp.server import get_faz_client, mcp
-from fortianalyzer_mcp.tools.log_tools import _is_invalid_tid_error
+from fortianalyzer_mcp.tools.log_tools import (
+    _run_logsearch_page,
+)
+from fortianalyzer_mcp.utils.log_clock import resolve_time_window
 from fortianalyzer_mcp.utils.responses import error_response
 from fortianalyzer_mcp.utils.time_range import (
     parse_time_range,
@@ -27,6 +30,7 @@ from fortianalyzer_mcp.utils.time_range import (
 )
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
+    build_device_filter,
     get_default_adom,
     validate_adom,
 )
@@ -38,7 +42,6 @@ _QUERY_SEMAPHORE = asyncio.Semaphore(5)
 
 # Default and max search parameters
 DEFAULT_SEARCH_TIMEOUT = 120
-POLL_INTERVAL = 1.0
 LOG_FETCH_LIMIT = 1000
 ANALYSIS_QUERY_BUDGET = 24
 MAX_SLICES_PER_POLICY = 4
@@ -174,24 +177,6 @@ async def _parse_time_range(time_range: str) -> dict[str, str]:
     return parse_time_range(time_range, faz_tz=faz_tz)
 
 
-async def _resolve_window(time_range: str) -> tuple[dict[str, str], str]:
-    """Resolve the query window once and report the FAZ timezone name.
-
-    Custom absolute ranges (``"start|end"``) skip the TZ client lookup -- the
-    caller already supplied explicit timestamps -- and report timezone
-    ``"unknown"``. Relative presets pull the FAZ system timezone so the naive
-    bounds land in FAZ-local time. Resolving here once keeps the reported
-    ``time_range`` and the bounded slices on a single window (no seconds-level
-    drift from re-parsing relative ranges).
-    """
-    if "|" in time_range:
-        return parse_time_range(time_range), "unknown"
-    client = _get_client()
-    faz_tz = await client.get_system_timezone()
-    tz_name = str(faz_tz) if faz_tz else "unknown"
-    return parse_time_range(time_range, faz_tz=faz_tz), tz_name
-
-
 # parse_time_range_bounds is re-exported from utils.time_range above.
 _parse_time_range_bounds = parse_time_range_bounds
 
@@ -234,26 +219,8 @@ def _build_bounded_time_slices(
     return slices
 
 
-def _build_device_filter(device: str | None) -> list[dict[str, str]]:
-    """Build device filter for API. Mirrors log_tools._build_device_filter."""
-    if not device:
-        return [{"devid": "All_FortiGate"}]
-    if device.startswith(("FG", "FM", "FW", "FA", "FS", "FD", "FP", "FC")):
-        return [{"devid": device}]
-    if device.startswith("All_"):
-        return [{"devid": device}]
-    return [{"devname": device}]
-
-
-def _coerce_log_total(value: Any) -> int | None:
-    """Coerce a FAZ logsearch total-count value to int."""
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str) and value.isdigit():
-        return int(value)
-    return None
+# Shared device-filter construction (see utils.validation.build_device_filter).
+_build_device_filter = build_device_filter
 
 
 async def _query_policy_log_slice(
@@ -267,64 +234,49 @@ async def _query_policy_log_slice(
 ) -> dict[str, Any]:
     """Query traffic logs and total-count for a single policy/time slice.
 
-    Each attempt is its own search because a FortiAnalyzer logsearch ``tid`` is
-    single-use: the first fetch delivers the slice plus ``total-count`` and the
-    task is reaped. The fetch usually returns ``percentage>=100`` on the first
-    try; if it comes back incomplete, or the task was already reaped before our
-    fetch (an invalid-tid error), the search is re-issued from scratch rather
-    than re-fetching the reaped tid. Re-issues are bounded by the wall-clock
-    ``timeout``; on expiry an empty result with an unknown total is returned.
+    Delegates to the shared :func:`_run_logsearch_page` runner, which polls
+    ``logsearch_count`` (a cheap GET that does not reap the single-use ``tid``)
+    until the scan is complete and then fetches exactly once -- so we never fetch
+    a still-running search. The runner owns connection revival, limit/timeout
+    clamping, the global concurrency guard, and all bounded re-issue/cancel
+    recovery (invalid-tid races and 7.6.7 premature-100% empty pages). On a
+    timed-out page an empty result with an unknown total is returned.
     """
     client = _get_client()
     filter_str = _build_policy_filter(policy_id, action)
-    loop = asyncio.get_event_loop()
-    deadline = loop.time() + timeout
 
-    while True:
-        start_result = await client.logsearch_start(
+    try:
+        page = await _run_logsearch_page(
+            client,
             adom=adom,
             logtype="traffic",
-            device=device_filter,
+            device_filter=device_filter,
             time_range=time_range,
             filter=filter_str,
+            offset=0,
             limit=limit,
+            timeout=timeout,
         )
-        tid = start_result.get("tid")
-        if not tid:
-            logger.warning(f"No TID returned for policy {policy_id}: {start_result}")
-            return {"logs": [], "total_hits": None, "total_hits_is_known": False}
+    except RuntimeError as exc:
+        # An abnormal start with no TID would abort the whole policy fan-out;
+        # for one slice, degrade to an empty/unknown result (as the prior
+        # fetch-first slice did) so other slices/policies still report.
+        if "no TID returned" not in str(exc):
+            raise
+        logger.warning(f"No TID returned for policy {policy_id}: {exc}")
+        return {"logs": [], "total_hits": None, "total_hits_is_known": False}
 
-        fetch_result: dict[str, Any] | None
-        try:
-            fetch_result = await client.logsearch_fetch(adom=adom, tid=tid, limit=limit, offset=0)
-        except Exception as exc:
-            # Task reaped before our fetch -> re-issue (bounded by deadline).
-            if not _is_invalid_tid_error(exc):
-                raise
-            fetch_result = None
+    if page["timed_out"]:
+        logger.warning(f"Search timed out for policy {policy_id}")
+        return {"logs": [], "total_hits": None, "total_hits_is_known": False}
 
-        if fetch_result is not None and fetch_result.get("percentage", 0) >= 100:
-            logs = fetch_result.get("data", [])
-            if not isinstance(logs, list):
-                logs = [logs] if logs else []
-            total_hits = _coerce_log_total(fetch_result.get("total-count"))
-            return {
-                "logs": [log for log in logs if isinstance(log, dict)],
-                "total_hits": total_hits,
-                "total_hits_is_known": total_hits is not None,
-            }
-
-        # Incomplete (the single-use task is now reaped) or reaped before fetch:
-        # re-issue a fresh search until the timeout budget is exhausted.
-        remaining = deadline - loop.time()
-        if remaining <= 0:
-            try:
-                await client.logsearch_cancel(adom, tid)
-            except (OSError, RuntimeError):
-                pass
-            logger.warning(f"Search timed out for policy {policy_id}")
-            return {"logs": [], "total_hits": None, "total_hits_is_known": False}
-        await asyncio.sleep(min(POLL_INTERVAL, remaining))
+    logs = [log for log in page["logs"] if isinstance(log, dict)]
+    total_hits = page["total"]
+    return {
+        "logs": logs,
+        "total_hits": total_hits,
+        "total_hits_is_known": total_hits is not None,
+    }
 
 
 async def _query_policy_total_count(
@@ -669,7 +621,9 @@ async def _run_bounded_policy_analysis(
         await _get_client().ensure_connected()
 
         try:
-            window, tz_name = await _resolve_window(time_range)
+            resolved = await resolve_time_window(
+                _get_client(), adom_value, time_range, device, faz_tz_for_custom=False
+            )
         except ValueError as e:
             return error_response(
                 error="invalid_time_range",
@@ -677,6 +631,8 @@ async def _run_bounded_policy_analysis(
                 operation=operation,
                 adom=adom_value,
             )
+        window = resolved.time_range
+        tz_name = resolved.timezone
 
         start = time.monotonic()
         query_tasks = [
@@ -722,6 +678,8 @@ async def _run_bounded_policy_analysis(
             "adom": adom_value,
             "time_range": window,
             "timezone": tz_name,
+            "time_basis_source": resolved.time_basis_source,
+            "clock_skew_seconds": resolved.clock_skew_seconds,
             "results": per_policy,
             "query_time_seconds": round(elapsed, 2),
         }

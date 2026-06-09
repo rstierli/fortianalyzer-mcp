@@ -6,13 +6,16 @@ Implements the two-step TID-based log search workflow.
 
 import asyncio
 import logging
+import math
 from typing import Any
 
 from fortianalyzer_mcp.server import get_faz_client, mcp
+from fortianalyzer_mcp.utils.log_clock import resolve_time_window
 from fortianalyzer_mcp.utils.responses import build_warnings, error_response, redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
+    build_device_filter,
     get_default_adom,
     sanitize_filter_value,
     validate_adom,
@@ -30,10 +33,34 @@ logger = logging.getLogger(__name__)
 
 # Default search timeout in seconds
 DEFAULT_SEARCH_TIMEOUT = 60
-# Poll interval for search progress
+# Hard upper bound on a single search's wall-clock budget. Because a search now
+# *holds* a concurrency slot for its whole budget (poll-before-fetch), a caller
+# passing a huge timeout must not be able to monopolize the slot pool.
+MAX_SEARCH_TIMEOUT = 300
+# Poll cadence: the first logsearch_count check is immediate, then the delay
+# backs off from _INITIAL_POLL_DELAY doubling up to POLL_INTERVAL. logsearch_count
+# is a cheap GET that does not reap the tid or consume a search slot, so an
+# immediate first check returns sub-second searches without a fixed 1s floor.
 POLL_INTERVAL = 1.0
+_INITIAL_POLL_DELAY = 0.25
 # Appliance maximum for the logsearch fetch limit (rejects > 1000).
 LOG_FETCH_LIMIT_MAX = 1000
+# Shared recovery budget for ALL re-issue causes within one page (invalid-tid
+# during count, invalid-tid race during fetch, and the 7.6.7 "premature 100%"
+# empty page). Contract: at most 1 initial start + MAX_SEARCH_REISSUES recovery
+# starts per page, and no new start/fetch past the deadline -- so a reaping
+# appliance can never spin logsearch_start and re-create slot exhaustion.
+MAX_SEARCH_REISSUES = 3
+# Bound concurrent in-flight appliance searches across every call site in this
+# process (query_logs, fetch_more_logs, policy fan-out, PCAP). Poll-before-fetch
+# holds a search slot until readiness, so the appliance-slot guard lives here at
+# the shared page runner rather than only in the policy fan-out.
+LOGSEARCH_CONCURRENCY_LIMIT = 4
+_LOGSEARCH_SEMAPHORE = asyncio.Semaphore(LOGSEARCH_CONCURRENCY_LIMIT)
+# Bounded best-effort cleanup-cancel budget (seconds). Kept short so a
+# non-delivered exit cannot meaningfully extend the concurrency-slot hold past
+# the search's own timeout budget.
+_CLEANUP_CANCEL_TIMEOUT = 2.0
 
 
 # In-process registry of log-search context, keyed by a pagination handle.
@@ -145,7 +172,101 @@ def _coerce_total(value: Any) -> int | None:
     return None
 
 
-async def _run_search_page(
+def _normalize_logs(data: Any) -> list[Any]:
+    """Normalize a logsearch ``data`` field to a list."""
+    if isinstance(data, list):
+        return data
+    return [data] if data else []
+
+
+def _clamp_timeout(timeout: int) -> int:
+    """Clamp a caller-supplied search timeout to ``[1, MAX_SEARCH_TIMEOUT]``.
+
+    Non-int/non-positive values fall back to the default. The upper bound keeps a
+    single search from holding a concurrency slot indefinitely.
+    """
+    if not isinstance(timeout, int) or isinstance(timeout, bool):
+        return DEFAULT_SEARCH_TIMEOUT
+    return max(1, min(timeout, MAX_SEARCH_TIMEOUT))
+
+
+def _coerce_num(value: Any) -> float | None:
+    """Coerce a FAZ count/progress field to a finite number for readiness checks.
+
+    Accepts ``int``/``float`` and numeric strings (``"100"``, ``"100.0"``);
+    rejects ``bool``, non-numeric, and non-finite (``inf``/``nan``) values.
+    Returns ``None`` when the field is absent or unusable. Used only for
+    readiness, never for the reported total.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        num = float(value)
+    elif isinstance(value, str):
+        try:
+            num = float(value.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    return num if math.isfinite(num) else None
+
+
+def _search_complete(count: dict[str, Any]) -> bool:
+    """Decide whether a logsearch scan has finished (safe to fetch).
+
+    Readiness only -- never the match total; unknown fields are ignored. Complete
+    iff ``progress-percent >= 100`` OR (``total-logs > 0`` and
+    ``scanned-logs >= total-logs``). ``matched-logs`` is deliberately NOT a
+    readiness signal (it proves matches exist, not that scanning is done), and
+    ``estimated-remain-sec`` is not used (live 7.6.7 does not return it). A
+    just-started ``0 >= 0`` scan is not complete; a real zero-result search
+    completes via ``progress-percent >= 100``.
+    """
+    progress = _coerce_num(count.get("progress-percent"))
+    if progress is not None and progress >= 100:
+        return True
+    total_logs = _coerce_num(count.get("total-logs"))
+    scanned = _coerce_num(count.get("scanned-logs"))
+    return (
+        total_logs is not None and total_logs > 0 and scanned is not None and scanned >= total_logs
+    )
+
+
+def _is_unsupported_count_endpoint(exc: Exception) -> bool:
+    """Detect an older build whose ``logsearch/count`` endpoint is absent.
+
+    Only matches a clear missing/unsupported-URL error -- never an invalid-tid,
+    timeout, or generic error (those must NOT trigger the direct-fetch fallback).
+    """
+    msg = str(exc).lower()
+    if "tid" in msg:  # invalid-tid is a different, non-fallback condition
+        return False
+    return any(
+        marker in msg
+        for marker in ("unknown url", "unsupported url", "invalid url", "endpoint not found")
+    )
+
+
+def _page_is_final(logs: list[Any], total: int | None, offset: int) -> bool:
+    """Decide whether a ``percentage>=100`` fetch is genuinely complete.
+
+    FortiAnalyzer 7.6.7 can report ``percentage:100`` with an *empty* ``data``
+    page even though ``total-count`` says matching rows exist at/after the
+    requested offset. That is not a real completion -- treating it as one returns
+    a misleading zero-result success. Such a page is reported as non-final so the
+    caller re-issues a fresh search (bounded). A page is final when it carries
+    rows, or when the total is unknown, or when the total does not claim rows
+    beyond this offset (a genuine empty result).
+    """
+    if logs:
+        return True
+    if total is not None and total > offset:
+        return False
+    return True
+
+
+async def _run_logsearch_page(
     client: Any,
     *,
     adom: str,
@@ -157,24 +278,74 @@ async def _run_search_page(
     limit: int,
     timeout: int,
 ) -> dict[str, Any]:
-    """Run one self-contained search page: start, fetch, return the page.
+    """Run one self-contained search page under the global concurrency guard.
 
-    Each page is its own search because a FAZ logsearch tid is single-use: the
-    first fetch delivers the slice plus ``total-count`` and the task is reaped.
-    The fetch blocks server-side until the search completes, so it usually
-    returns ``percentage>=100`` on the first try. If it returns incomplete, or
-    the task was reaped before our fetch, the search is re-issued from scratch.
-    Re-issues are bounded by the wall-clock ``timeout`` (not a fixed attempt
-    count), so the caller's timeout budget is honored; on expiry the page is
-    returned as ``timed_out`` rather than raising a raw appliance error.
-
-    Returns ``{"timed_out": bool, "tid": int, "logs": list, "total": int|None}``.
+    Acquires ``_LOGSEARCH_SEMAPHORE`` around the whole start -> poll -> fetch
+    lifecycle so total in-flight appliance searches across every call site stay
+    bounded, then delegates to :func:`_run_logsearch_page_unlocked`.
     """
+    async with _LOGSEARCH_SEMAPHORE:
+        return await _run_logsearch_page_unlocked(
+            client,
+            adom=adom,
+            logtype=logtype,
+            device_filter=device_filter,
+            time_range=time_range,
+            filter=filter,
+            offset=offset,
+            limit=limit,
+            timeout=timeout,
+        )
+
+
+# Backward-compatible alias for the previous fetch-first page-runner name.
+_run_search_page = _run_logsearch_page
+
+
+async def _run_logsearch_page_unlocked(
+    client: Any,
+    *,
+    adom: str,
+    logtype: str,
+    device_filter: list[dict[str, str]],
+    time_range: dict[str, str],
+    filter: str | None,
+    offset: int,
+    limit: int,
+    timeout: int,
+) -> dict[str, Any]:
+    """Run one search page: start -> poll ``logsearch_count`` -> fetch once.
+
+    A FAZ logsearch tid is single-use (the first ``fetch`` reaps it), and the
+    async search needs a moment to finish, so we must NOT fetch before it is
+    ready: doing so returns an incomplete page AND reaps the tid, forcing a
+    re-issue. Instead we poll ``logsearch_count`` (a cheap GET that does not reap)
+    until :func:`_search_complete`, then fetch exactly once. The reported
+    ``total`` comes from the fetch's ``total-count`` (authoritative for this
+    page); count fields are readiness only.
+
+    Recovery (invalid-tid during count, invalid-tid race during fetch, premature
+    100%) shares one budget of ``MAX_SEARCH_REISSUES`` and is also bounded by the
+    wall-clock ``deadline``; no new start or fetch is issued past the deadline,
+    and every ``count``/``fetch`` await is bounded by the remaining budget. On a
+    non-delivered exit the started tid is best-effort (shielded, bounded)
+    cancelled so a search is never leaked.
+
+    Returns ``{"timed_out": bool, "tid": int|None, "logs": list, "total": int|None}``.
+    """
+    await client.ensure_connected()
     loop = asyncio.get_event_loop()
+    timeout = _clamp_timeout(timeout)
+    limit = _clamp_limit(limit)
     deadline = loop.time() + timeout
-    tid: int | None = None
+    reissues_left = MAX_SEARCH_REISSUES
+    count_unsupported = bool(getattr(client, "_logsearch_count_unsupported", False))
 
     while True:
+        # No new start once the budget is spent.
+        if loop.time() >= deadline:
+            return {"timed_out": True, "tid": None, "logs": [], "total": None}
+
         start_result = await client.logsearch_start(
             adom=adom,
             logtype=logtype,
@@ -188,38 +359,100 @@ async def _run_search_page(
         if not tid:
             raise RuntimeError(f"Failed to start search: no TID returned. Response: {start_result}")
 
-        fetch_result: dict[str, Any] | None
+        delivered = False  # True once a fetch result is in hand (tid self-reaped)
         try:
-            fetch_result = await client.logsearch_fetch(
-                adom=adom, tid=tid, limit=limit, offset=offset
-            )
-        except Exception as exc:
-            # Task reaped before our fetch -> re-issue (bounded by deadline).
-            if not _is_invalid_tid_error(exc):
-                raise
-            fetch_result = None
+            reissue = False
+            # ---- Poll readiness via logsearch_count (does NOT reap the tid) ----
+            if not count_unsupported:
+                poll_delay = _INITIAL_POLL_DELAY
+                while True:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        return {"timed_out": True, "tid": tid, "logs": [], "total": None}
+                    try:
+                        count_result = await asyncio.wait_for(
+                            client.logsearch_count(adom, tid), timeout=remaining
+                        )
+                    except TimeoutError:
+                        return {"timed_out": True, "tid": tid, "logs": [], "total": None}
+                    except Exception as exc:
+                        if _is_invalid_tid_error(exc):
+                            reissue = True  # appliance reaped the tid -> recover
+                            break
+                        if _is_unsupported_count_endpoint(exc):
+                            # Older build with no count endpoint: cache and fall
+                            # through to a single direct fetch on this same tid.
+                            client._logsearch_count_unsupported = True
+                            count_unsupported = True
+                            break
+                        raise
+                    if _search_complete(count_result):
+                        break
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        return {"timed_out": True, "tid": tid, "logs": [], "total": None}
+                    await asyncio.sleep(min(poll_delay, remaining))
+                    poll_delay = min(poll_delay * 2, POLL_INTERVAL)
 
-        if fetch_result is not None and fetch_result.get("percentage", 0) >= 100:
-            logs = fetch_result.get("data", [])
-            if not isinstance(logs, list):
-                logs = [logs] if logs else []
-            return {
-                "timed_out": False,
-                "tid": tid,
-                "logs": logs,
-                "total": _coerce_total(fetch_result.get("total-count")),
-            }
+            if reissue:
+                if reissues_left <= 0:
+                    return {"timed_out": True, "tid": tid, "logs": [], "total": None}
+                reissues_left -= 1
+                continue
 
-        # Incomplete (the single-use task is now reaped) or reaped before fetch:
-        # re-issue a fresh search until the timeout budget is exhausted.
-        remaining = deadline - loop.time()
-        if remaining <= 0:
+            # ---- Re-check the deadline: count may complete after it expired ----
+            if loop.time() >= deadline:
+                return {"timed_out": True, "tid": tid, "logs": [], "total": None}
+
+            # ---- Fetch once (reaps tid; returns the page + total-count) ----
+            remaining = deadline - loop.time()
             try:
-                await client.logsearch_cancel(adom, tid)
-            except Exception:
-                pass
-            return {"timed_out": True, "tid": tid, "logs": [], "total": None}
-        await asyncio.sleep(min(POLL_INTERVAL, remaining))
+                fetch_result = await asyncio.wait_for(
+                    client.logsearch_fetch(adom=adom, tid=tid, limit=limit, offset=offset),
+                    timeout=remaining,
+                )
+            except TimeoutError:
+                return {"timed_out": True, "tid": tid, "logs": [], "total": None}
+            except Exception as exc:
+                if _is_invalid_tid_error(exc):
+                    # Race: tid reaped between count-complete and our fetch.
+                    if reissues_left <= 0:
+                        return {"timed_out": True, "tid": tid, "logs": [], "total": None}
+                    reissues_left -= 1
+                    continue
+                raise
+            delivered = True
+
+            logs = _normalize_logs(fetch_result.get("data"))
+            total = _coerce_total(fetch_result.get("total-count"))
+            if _page_is_final(logs, total, offset):
+                return {"timed_out": False, "tid": tid, "logs": logs, "total": total}
+            # Premature 100%: empty page while total claims rows here -> recover.
+            if reissues_left <= 0:
+                return {"timed_out": False, "tid": tid, "logs": logs, "total": total}
+            reissues_left -= 1
+            continue
+        finally:
+            # Any exit without a delivered fetch (generic count/fetch error,
+            # cancellation, or deadline) may leave the started search running:
+            # best-effort cancel it. The cancel is shielded so it is dispatched
+            # even while this task is being cancelled, and bounded by a short
+            # budget so it cannot meaningfully extend the slot hold past the
+            # search budget. Non-cancel exceptions are swallowed; on a real
+            # CancelledError the shielded cancel is dispatched and the
+            # CancelledError then propagates (it is a BaseException, not caught
+            # by ``except Exception``) -- if even the dispatch cannot run, the
+            # appliance reaps the single-use task on its own.
+            if not delivered and tid:
+                try:
+                    await asyncio.shield(
+                        asyncio.wait_for(
+                            client.logsearch_cancel(adom, tid),
+                            timeout=_CLEANUP_CANCEL_TIMEOUT,
+                        )
+                    )
+                except Exception:  # noqa: BLE001 - cleanup must not mask the real exit
+                    pass
 
 
 def _get_client():
@@ -245,37 +478,10 @@ async def _parse_time_range(time_range: str) -> dict[str, str]:
     return parse_time_range(time_range, faz_tz=faz_tz)
 
 
-def _build_device_filter(device: str | None) -> list[dict[str, str]]:
-    """Build device filter for API.
-
-    Args:
-        device: Device serial number, name, or None for all FortiGate devices.
-                - Serial number format: FGxxxxxxxxxxxxxx (e.g., FG100FTK19001333)
-                - Device name format: device-name or device-name[vdom]
-                - None: Uses All_FortiGate to search all FortiGate devices
-
-    Returns:
-        Device filter list for API.
-
-    Note:
-        The FAZ API requires a device filter. Without one, searches return 0 results.
-        Use the device serial number for best results. Device names may not work
-        if they don't match exactly in the FAZ database.
-    """
-    if not device:
-        # Default to all FortiGate devices - empty list returns 0 results
-        return [{"devid": "All_FortiGate"}]
-
-    # Check if it looks like a serial number (starts with FG, FM, etc.)
-    if device.startswith(("FG", "FM", "FW", "FA", "FS", "FD", "FP", "FC")):
-        return [{"devid": device}]
-
-    # Check for special "All_*" device types
-    if device.startswith("All_"):
-        return [{"devid": device}]
-
-    # Otherwise, try as device name (devname)
-    return [{"devname": device}]
+# Device filter construction is shared across the log, traffic, and pcap tools;
+# the single implementation lives in utils.validation. Kept as a module alias so
+# existing call sites (and any callers importing this name) keep working.
+_build_device_filter = build_device_filter
 
 
 @mcp.tool()
@@ -372,13 +578,14 @@ async def query_logs(
         client = _get_client()
         await client.ensure_connected()
 
-        # Resolve the FAZ system timezone once: used both to align relative
-        # time ranges and to label the returned timestamps (FAZ interprets the
-        # naive bounds in its own local TZ).
-        faz_tz = await client.get_system_timezone()
-        tz_name = str(faz_tz) if faz_tz else "unknown"
+        # Resolve the query window. Relative presets are anchored on the detected
+        # LogView ingest clock (so a post-upgrade clock skew does not miss recent
+        # logs); custom ranges pass through verbatim. tz_name labels the returned
+        # timestamps (FAZ interprets the naive bounds in its own local TZ).
         try:
-            time_range_dict = parse_time_range(time_range, faz_tz=faz_tz)
+            window = await resolve_time_window(
+                client, adom, time_range, device, faz_tz_for_custom=True
+            )
         except ValueError as e:
             return error_response(
                 error="invalid_time_range",
@@ -387,6 +594,10 @@ async def query_logs(
                 adom=adom,
                 logtype=logtype,
             )
+        time_range_dict = window.time_range
+        tz_name = window.timezone
+        time_basis_source = window.time_basis_source
+        clock_skew_seconds = window.clock_skew_seconds
 
         # Build device filter
         device_filter = _build_device_filter(device)
@@ -394,13 +605,14 @@ async def query_logs(
         requested_limit = limit
         limit = _clamp_limit(limit)
         offset = max(0, offset)
+        timeout = _clamp_timeout(timeout)
 
         # Run this page as a self-contained search (FAZ tids are single-use).
         logger.info(
             f"Starting log search: adom={adom}, logtype={logtype}, "
             f"filter={redact(str(filter))[:200]}"
         )
-        page = await _run_search_page(
+        page = await _run_logsearch_page(
             client,
             adom=adom,
             logtype=logtype,
@@ -457,6 +669,8 @@ async def query_logs(
                 "device": device,
                 "time_range": time_range_dict,
                 "timezone": tz_name,
+                "time_basis_source": time_basis_source,
+                "clock_skew_seconds": clock_skew_seconds,
             },
         )
 
@@ -479,6 +693,8 @@ async def query_logs(
             "time_basis": (
                 f"time_range and log timestamps are interpreted in FAZ local time ({tz_name})"
             ),
+            "time_basis_source": time_basis_source,
+            "clock_skew_seconds": clock_skew_seconds,
             "offset": offset,
             "limit": limit,
             "warnings": warnings,
@@ -557,6 +773,7 @@ async def fetch_more_logs(
     tid: int = 0,
     limit: int = 100,
     offset: int = 0,
+    timeout: int = DEFAULT_SEARCH_TIMEOUT,
 ) -> dict[str, Any]:
     """Fetch another page of a previous query_logs search using its handle.
 
@@ -572,6 +789,8 @@ async def fetch_more_logs(
         tid: Reusable pagination handle from a previous query_logs call
         limit: Maximum logs to return (default: 100)
         offset: Offset for pagination (default: 0)
+        timeout: Search timeout in seconds (default: 60) -- raise it to page over
+            large windows (e.g. 30-day) that take longer than the default to scan
 
     Returns:
         dict: Additional log results with keys:
@@ -619,11 +838,12 @@ async def fetch_more_logs(
         requested_limit = limit
         limit = _clamp_limit(limit)
         offset = max(0, offset)
+        timeout = _clamp_timeout(timeout)
 
         client = _get_client()
         await client.ensure_connected()
 
-        page = await _run_search_page(
+        page = await _run_logsearch_page(
             client,
             adom=adom,
             logtype=context["logtype"],
@@ -632,13 +852,13 @@ async def fetch_more_logs(
             filter=context.get("filter"),
             offset=offset,
             limit=limit,
-            timeout=DEFAULT_SEARCH_TIMEOUT,
+            timeout=timeout,
         )
 
         if page["timed_out"]:
             return error_response(
                 error="search_timeout",
-                message=f"Search timed out after {DEFAULT_SEARCH_TIMEOUT} seconds",
+                message=f"Search timed out after {timeout} seconds",
                 operation="fetch_more_logs",
                 adom=adom,
                 logtype=context.get("logtype"),
@@ -652,6 +872,8 @@ async def fetch_more_logs(
         has_more = _compute_has_more(offset, count, limit, total)
         next_offset = offset + count if has_more else None
         timezone = context.get("timezone", "unknown")
+        time_basis_source = context.get("time_basis_source", "unknown")
+        clock_skew_seconds = context.get("clock_skew_seconds")
 
         warnings = build_warnings(
             requested_limit=requested_limit,
@@ -685,6 +907,8 @@ async def fetch_more_logs(
             "limit": limit,
             "timezone": timezone,
             "time_basis": f"log timestamps are interpreted in FAZ local time ({timezone})",
+            "time_basis_source": time_basis_source,
+            "clock_skew_seconds": clock_skew_seconds,
             "warnings": warnings,
         }
     except ValidationError as e:

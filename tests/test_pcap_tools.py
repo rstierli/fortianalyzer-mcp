@@ -6,7 +6,12 @@ Follows the same pattern as test_system_tools.py to avoid server initialization.
 
 import pytest
 
+import fortianalyzer_mcp.tools.log_tools as log_tools
+import fortianalyzer_mcp.tools.pcap_tools as pcap_tools
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
+from fortianalyzer_mcp.utils.errors import ResourceNotFoundError
+
+_CUSTOM_RANGE = "2024-01-01 00:00:00|2024-01-02 00:00:00"
 
 
 class TestPCAPHelpers:
@@ -259,12 +264,234 @@ class TestPCAPSearchWorkflow:
         max_downloads = min(max_downloads, 50)
         assert max_downloads == 10
 
-    def test_poll_interval_value(self) -> None:
-        """Test poll interval constant."""
-        POLL_INTERVAL = 1.0
-        assert POLL_INTERVAL == 1.0
-
     def test_default_search_timeout(self) -> None:
-        """Test default search timeout."""
-        DEFAULT_SEARCH_TIMEOUT = 60
-        assert DEFAULT_SEARCH_TIMEOUT == 60
+        """The module's default search timeout is 60 seconds."""
+        assert pcap_tools.DEFAULT_SEARCH_TIMEOUT == 60
+
+
+class _PollFetchFaz:
+    """PCAP-search fake enforcing poll-before-fetch.
+
+    logsearch_count climbs to 100% over two polls (a non-reaping GET);
+    logsearch_fetch raises invalid-tid if called before the scan completes, and
+    otherwise returns the IPS rows once. The runner must poll then fetch once.
+    """
+
+    def __init__(self, dataset: list[dict[str, object]]) -> None:
+        self.dataset = dataset
+        self.starts = 0
+        self.counts = 0
+        self.fetches = 0
+        self._polls: dict[int, int] = {}
+        self._next_tid = 900
+
+    async def ensure_connected(self) -> None:
+        return None
+
+    async def logsearch_start(self, **_kw: object) -> dict[str, int]:
+        self.starts += 1
+        self._next_tid += 1
+        self._polls[self._next_tid] = 0
+        return {"tid": self._next_tid}
+
+    async def logsearch_count(self, adom: str, tid: int) -> dict[str, object]:
+        self.counts += 1
+        self._polls[tid] += 1
+        done = self._polls[tid] >= 2
+        total = len(self.dataset)
+        return {
+            "progress-percent": 100 if done else 40,
+            "scanned-logs": total if done else 0,
+            "total-logs": total,
+        }
+
+    async def logsearch_fetch(self, *, adom: str, tid: int, limit: int, offset: int) -> dict:
+        self.fetches += 1
+        if self._polls.get(tid, 0) < 2:
+            raise ResourceNotFoundError(f"Invalid tid {tid}: not complete.", code=-1)
+        return {
+            "percentage": 100,
+            "data": self.dataset[offset : offset + limit],
+            "total-count": len(self.dataset),
+        }
+
+    async def logsearch_cancel(self, adom: str, tid: int) -> dict[str, object]:
+        return {}
+
+
+class TestPCAPSearchPollPath:
+    """PCAP IPS searches route through the shared poll-before-fetch runner."""
+
+    @pytest.fixture(autouse=True)
+    def _fast_polls(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(log_tools, "_INITIAL_POLL_DELAY", 0)
+        monkeypatch.setattr(log_tools, "POLL_INTERVAL", 0)
+
+    async def test_search_ips_logs_returns_rows_via_poll_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rows = [
+            {"sessionid": 1, "attack": "Test.Attack", "severity": "critical", "pcapurl": "u1"},
+            {"sessionid": 2, "attack": "Other.Attack", "severity": "high"},
+        ]
+        fake = _PollFetchFaz(rows)
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await pcap_tools.search_ips_logs(
+            adom="root",
+            severity=["critical", "high"],
+            time_range=_CUSTOM_RANGE,
+            limit=50,
+        )
+
+        assert result["status"] == "success"
+        assert result["count"] == 2
+        assert result["total"] == 2
+        assert result["pcap_available_count"] == 1
+        assert result["logs"] == rows
+        # Poll-before-fetch contract: one start, >=1 count, exactly one fetch.
+        assert fake.starts == 1
+        assert fake.counts >= 1
+        assert fake.fetches == 1
+
+    async def test_search_ips_logs_empty_result_via_poll_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An empty IPS search completes cleanly through the poll path: one
+        start, one fetch, zero rows -- not a raw invalid-tid string."""
+        fake = _PollFetchFaz([])
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await pcap_tools.search_ips_logs(
+            adom="root",
+            severity=["critical"],
+            time_range=_CUSTOM_RANGE,
+        )
+
+        assert result["status"] == "success"
+        assert result["count"] == 0
+        assert result["logs"] == []
+        assert fake.starts == 1
+        assert fake.fetches == 1
+
+    async def test_get_pcap_by_session_found_via_poll_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """get_pcap_by_session routes its session lookup through the poll path:
+        a matching row (without a pcapurl) returns the 'no_pcap' result after
+        exactly one start, >=1 count, and one fetch -- never a fetch-before-
+        complete invalid-tid string."""
+        monkeypatch.setenv("FAZ_ALLOWED_OUTPUT_DIRS", str(tmp_path))
+        rows = [
+            {
+                "sessionid": 906654,
+                "attack": "Test.Attack",
+                "severity": "critical",
+                "action": "blocked",
+                "srcip": "10.0.0.1",
+                "dstip": "10.0.0.2",
+            }
+        ]
+        fake = _PollFetchFaz(rows)
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await pcap_tools.get_pcap_by_session(
+            session_id=906654,
+            adom="root",
+            time_range=_CUSTOM_RANGE,
+            output_dir=str(tmp_path),
+        )
+
+        # Row found, but no pcapurl -> the normal 'no_pcap' return.
+        assert result["status"] == "no_pcap"
+        assert result["session_id"] == 906654
+        assert result["attack_info"]["attack"] == "Test.Attack"
+        # Poll-before-fetch contract: one start, >=1 count, exactly one fetch.
+        assert fake.starts == 1
+        assert fake.counts >= 1
+        assert fake.fetches == 1
+
+    async def test_get_pcap_by_session_empty_via_poll_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """An empty session lookup completes through the poll path and returns
+        the 'No IPS log found' message -- not a raw invalid-tid string."""
+        monkeypatch.setenv("FAZ_ALLOWED_OUTPUT_DIRS", str(tmp_path))
+        fake = _PollFetchFaz([])
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await pcap_tools.get_pcap_by_session(
+            session_id=906654,
+            adom="root",
+            time_range=_CUSTOM_RANGE,
+            output_dir=str(tmp_path),
+        )
+
+        assert result["status"] == "error"
+        assert "No IPS log found" in result["message"]
+        assert fake.starts == 1
+        assert fake.fetches == 1
+
+    async def test_search_and_download_pcaps_proceeds_via_poll_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """search_and_download_pcaps routes its search through the poll path:
+        with pcap-bearing rows it proceeds past the search into the download
+        loop after exactly one start, >=1 count, and one fetch. (The download
+        itself is stubbed to return no data, so it 'proceeds' but reports a
+        failed download -- the search contract is what we assert here.)"""
+        monkeypatch.setenv("FAZ_ALLOWED_OUTPUT_DIRS", str(tmp_path))
+
+        class _PollFetchWithPcap(_PollFetchFaz):
+            async def get_pcapfile(self, *, key_data: str, key_type: str) -> dict[str, object]:
+                # Proceeds into the download loop; no data -> graceful failure.
+                return {}
+
+        rows = [
+            {"sessionid": 1, "attack": "A", "severity": "critical", "pcapurl": "u1"},
+            {"sessionid": 2, "attack": "B", "severity": "critical", "pcapurl": "u2"},
+        ]
+        fake = _PollFetchWithPcap(rows)
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await pcap_tools.search_and_download_pcaps(
+            adom="root",
+            severity=["critical"],
+            time_range=_CUSTOM_RANGE,
+            output_dir=str(tmp_path),
+            max_downloads=5,
+        )
+
+        assert result["status"] == "success"
+        assert result["search_results"] == 2
+        assert result["pcap_available"] == 2  # proceeded past the search
+        # Poll-before-fetch contract: one start, >=1 count, exactly one fetch.
+        assert fake.starts == 1
+        assert fake.counts >= 1
+        assert fake.fetches == 1
+
+    async def test_search_and_download_pcaps_empty_via_poll_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """With no pcap-bearing rows, search_and_download_pcaps completes the
+        poll path and returns its empty result -- not a raw invalid-tid string."""
+        monkeypatch.setenv("FAZ_ALLOWED_OUTPUT_DIRS", str(tmp_path))
+        rows = [
+            {"sessionid": 1, "attack": "A", "severity": "critical"},  # no pcapurl
+        ]
+        fake = _PollFetchFaz(rows)
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await pcap_tools.search_and_download_pcaps(
+            adom="root",
+            severity=["critical"],
+            time_range=_CUSTOM_RANGE,
+            output_dir=str(tmp_path),
+        )
+
+        assert result["status"] == "success"
+        assert result["pcap_available"] == 0
+        assert result["downloaded"] == 0
+        assert result["message"] == "No IPS events found with PCAP available"
+        assert fake.starts == 1
+        assert fake.fetches == 1

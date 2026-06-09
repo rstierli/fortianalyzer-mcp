@@ -95,6 +95,36 @@ class TestParseTimeRangeCustom:
             parse_time_range("2024-01-02 00:00:00|2024-01-01 00:00:00")
 
 
+class TestParseTimeRangeAnchor:
+    """Explicit anchor support for LogView-clock alignment."""
+
+    def test_relative_window_ends_on_anchor(self) -> None:
+        anchor = datetime(2026, 6, 1, 12, 0, 0)
+        result = parse_time_range("1-hour", anchor=anchor)
+        assert result == {
+            "start": "2026-06-01 11:00:00",
+            "end": "2026-06-01 12:00:00",
+        }
+
+    def test_anchor_takes_precedence_over_faz_tz(self) -> None:
+        anchor = datetime(2026, 6, 1, 12, 0, 0)
+        # faz_tz is supplied but the explicit anchor must win.
+        result = parse_time_range("7-day", faz_tz=ZoneInfo("Europe/Zurich"), anchor=anchor)
+        assert result["end"] == "2026-06-01 12:00:00"
+        assert result["start"] == "2026-05-25 12:00:00"
+
+    def test_tz_aware_anchor_is_stripped_to_naive(self) -> None:
+        anchor = datetime(2026, 6, 1, 12, 0, 0, tzinfo=ZoneInfo("Europe/Zurich"))
+        result = parse_time_range("1-hour", anchor=anchor)
+        # Wall-clock components preserved; tzinfo stripped (naive FAZ-local).
+        assert result["end"] == "2026-06-01 12:00:00"
+
+    def test_anchor_ignored_for_custom_range(self) -> None:
+        anchor = datetime(2026, 6, 1, 12, 0, 0)
+        result = parse_time_range("2024-01-01 00:00:00|2024-01-02 00:00:00", anchor=anchor)
+        assert result == {"start": "2024-01-01 00:00:00", "end": "2024-01-02 00:00:00"}
+
+
 class TestParseTimeRangeTimezone:
     """Bug B regression: timestamps must align with FAZ TZ when provided."""
 

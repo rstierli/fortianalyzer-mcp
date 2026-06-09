@@ -6,7 +6,9 @@ without triggering server initialization.
 
 import pytest
 
+import fortianalyzer_mcp.tools.log_tools as log_tools
 import fortianalyzer_mcp.tools.traffic_tools as traffic_tools
+from fortianalyzer_mcp.tools.log_tools import _coerce_total as _coerce_log_total
 from fortianalyzer_mcp.tools.traffic_tools import (
     ANALYSIS_QUERY_BUDGET,
     LOG_FETCH_LIMIT,
@@ -17,7 +19,6 @@ from fortianalyzer_mcp.tools.traffic_tools import (
     _bounded_metadata,
     _build_bounded_time_slices,
     _build_policy_filter,
-    _coerce_log_total,
     _plan_policy_slice_count,
     _query_policy_log_slice,
     _query_policy_total_count,
@@ -26,10 +27,6 @@ from fortianalyzer_mcp.tools.traffic_tools import (
     validate_policy_ids,
 )
 from fortianalyzer_mcp.utils.validation import ValidationError
-
-
-async def _noop_sleep(_seconds: float) -> None:
-    """Async no-op to skip real polling delays in slice-reliability tests."""
 
 
 @pytest.fixture(autouse=True)
@@ -419,8 +416,14 @@ class TestPolicyPortAnalysisToolBounded:
         """Slice fetches should preserve FAZ total-count for the same filter/window."""
 
         class FakeClient:
+            async def ensure_connected(self) -> None:
+                return None
+
             async def logsearch_start(self, **_kwargs: object) -> dict[str, int]:
                 return {"tid": 123}
+
+            async def logsearch_count(self, adom: str, tid: int) -> dict[str, object]:
+                return {"progress-percent": 100, "total-logs": 25, "scanned-logs": 25}
 
             async def logsearch_fetch(self, **_kwargs: object) -> dict[str, object]:
                 return {
@@ -670,6 +673,8 @@ class TestPolicyToolAuditMetadata:
         }
         # Custom absolute range skips the TZ client lookup in unit tests.
         assert result["timezone"] == "unknown"
+        assert result["time_basis_source"] == "custom"
+        assert result["clock_skew_seconds"] is None
         assert result["results"][0]["filter"] == "policyid==2 and action==accept"
 
 
@@ -876,27 +881,42 @@ class TestCoerceLogTotal:
 
 
 class TestQueryPolicySliceReliability:
-    """A bounded slice query must re-issue a fresh search rather than re-fetch a
-    single-use (reaped) FortiAnalyzer tid, matching log_tools._run_search_page."""
+    """A bounded slice query routes through log_tools._run_logsearch_page, so it
+    polls logsearch_count (a non-reaping GET) until the scan is complete and then
+    fetches exactly once, re-issuing a fresh search instead of re-fetching a
+    single-use (reaped) FortiAnalyzer tid."""
 
     _WINDOW = {"start": "2024-01-01 00:00:00", "end": "2024-01-01 01:00:00"}
     _DEVICE = [{"devid": "All_FortiGate"}]
 
-    async def test_reissues_a_fresh_search_on_incomplete_fetch(
+    @pytest.fixture(autouse=True)
+    def _fast_polls(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(log_tools, "_INITIAL_POLL_DELAY", 0)
+        monkeypatch.setattr(log_tools, "POLL_INTERVAL", 0)
+
+    async def test_reissues_a_fresh_search_on_invalid_tid_during_count(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """An invalid-tid during count (appliance reaped the search mid-poll)
+        re-issues a fresh search rather than fetching a reaped tid."""
         starts: list[dict[str, object]] = []
-        fetches = {"n": 0}
+        counts = {"n": 0}
 
         class FakeClient:
+            async def ensure_connected(self) -> None:
+                return None
+
             async def logsearch_start(self, **kwargs: object) -> dict[str, int]:
                 starts.append(kwargs)
                 return {"tid": 100 + len(starts)}
 
+            async def logsearch_count(self, adom: str, tid: int) -> dict[str, object]:
+                counts["n"] += 1
+                if counts["n"] == 1:
+                    raise RuntimeError("Invalid tid reaped mid-poll.")
+                return {"progress-percent": 100, "total-logs": 7, "scanned-logs": 7}
+
             async def logsearch_fetch(self, **_kwargs: object) -> dict[str, object]:
-                fetches["n"] += 1
-                if fetches["n"] == 1:
-                    return {"percentage": 40, "data": []}  # incomplete -> task reaped
                 return {
                     "percentage": 100,
                     "total-count": "7",
@@ -906,7 +926,6 @@ class TestQueryPolicySliceReliability:
             async def logsearch_cancel(self, *_a: object, **_k: object) -> dict[str, object]:
                 return {}
 
-        monkeypatch.setattr(traffic_tools.asyncio, "sleep", _noop_sleep)
         monkeypatch.setattr(traffic_tools, "_get_client", lambda: FakeClient())
 
         result = await _query_policy_log_slice(
@@ -925,13 +944,21 @@ class TestQueryPolicySliceReliability:
     async def test_reissues_a_fresh_search_on_invalid_tid_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """An invalid-tid race during fetch (reaped between count-complete and
+        the fetch) re-issues a fresh search and still completes."""
         starts: list[dict[str, object]] = []
         fetches = {"n": 0}
 
         class FakeClient:
+            async def ensure_connected(self) -> None:
+                return None
+
             async def logsearch_start(self, **kwargs: object) -> dict[str, int]:
                 starts.append(kwargs)
                 return {"tid": 200 + len(starts)}
+
+            async def logsearch_count(self, adom: str, tid: int) -> dict[str, object]:
+                return {"progress-percent": 100, "total-logs": 3, "scanned-logs": 3}
 
             async def logsearch_fetch(self, **_kwargs: object) -> dict[str, object]:
                 fetches["n"] += 1
@@ -946,7 +973,6 @@ class TestQueryPolicySliceReliability:
             async def logsearch_cancel(self, *_a: object, **_k: object) -> dict[str, object]:
                 return {}
 
-        monkeypatch.setattr(traffic_tools.asyncio, "sleep", _noop_sleep)
         monkeypatch.setattr(traffic_tools, "_get_client", lambda: FakeClient())
 
         result = await _query_policy_log_slice(
@@ -965,8 +991,14 @@ class TestQueryPolicySliceReliability:
         """A genuine error (not invalid-tid) must NOT be silently retried away."""
 
         class FakeClient:
+            async def ensure_connected(self) -> None:
+                return None
+
             async def logsearch_start(self, **_kwargs: object) -> dict[str, int]:
                 return {"tid": 1}
+
+            async def logsearch_count(self, adom: str, tid: int) -> dict[str, object]:
+                return {"progress-percent": 100, "total-logs": 1, "scanned-logs": 1}
 
             async def logsearch_fetch(self, **_kwargs: object) -> dict[str, object]:
                 raise RuntimeError("connection reset by peer")
@@ -974,7 +1006,6 @@ class TestQueryPolicySliceReliability:
             async def logsearch_cancel(self, *_a: object, **_k: object) -> dict[str, object]:
                 return {}
 
-        monkeypatch.setattr(traffic_tools.asyncio, "sleep", _noop_sleep)
         monkeypatch.setattr(traffic_tools, "_get_client", lambda: FakeClient())
 
         with pytest.raises(RuntimeError, match="connection reset"):
@@ -986,10 +1017,20 @@ class TestQueryPolicySliceReliability:
                 action=None,
             )
 
-    async def test_no_tid_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_no_tid_degrades_to_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A start that returns no tid degrades one slice to empty/unknown (the
+        runner raises, but the policy slice swallows it) so the rest of the
+        policy fan-out still reports rather than the whole policy aborting."""
+
         class FakeClient:
+            async def ensure_connected(self) -> None:
+                return None
+
             async def logsearch_start(self, **_kwargs: object) -> dict[str, object]:
                 return {}
+
+            async def logsearch_count(self, adom: str, tid: int) -> dict[str, object]:
+                raise AssertionError("must not count without a tid")
 
             async def logsearch_fetch(self, **_kwargs: object) -> dict[str, object]:
                 raise AssertionError("must not fetch without a tid")
@@ -997,7 +1038,6 @@ class TestQueryPolicySliceReliability:
             async def logsearch_cancel(self, *_a: object, **_k: object) -> dict[str, object]:
                 return {}
 
-        monkeypatch.setattr(traffic_tools.asyncio, "sleep", _noop_sleep)
         monkeypatch.setattr(traffic_tools, "_get_client", lambda: FakeClient())
 
         result = await _query_policy_log_slice(
@@ -1007,24 +1047,32 @@ class TestQueryPolicySliceReliability:
             time_range=self._WINDOW,
             action=None,
         )
-
         assert result == {"logs": [], "total_hits": None, "total_hits_is_known": False}
 
     async def test_timeout_returns_empty_and_cancels(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A scan that never completes is bounded by the deadline; the slice
+        returns an empty/unknown result and the live tid is cancelled."""
         cancels: list[int] = []
 
         class FakeClient:
+            async def ensure_connected(self) -> None:
+                return None
+
             async def logsearch_start(self, **_kwargs: object) -> dict[str, int]:
                 return {"tid": 5}
 
+            async def logsearch_count(self, adom: str, tid: int) -> dict[str, object]:
+                return {"progress-percent": 10, "total-logs": 9, "scanned-logs": 0}
+
             async def logsearch_fetch(self, **_kwargs: object) -> dict[str, object]:
-                return {"percentage": 10, "data": []}  # never completes
+                raise AssertionError("must not fetch a still-running search")
 
             async def logsearch_cancel(self, adom: str, tid: int) -> dict[str, object]:
                 cancels.append(tid)
                 return {}
 
-        monkeypatch.setattr(traffic_tools.asyncio, "sleep", _noop_sleep)
+        monkeypatch.setattr(log_tools, "POLL_INTERVAL", 0.005)
+        monkeypatch.setattr(log_tools, "_INITIAL_POLL_DELAY", 0.005)
         monkeypatch.setattr(traffic_tools, "_get_client", lambda: FakeClient())
 
         result = await _query_policy_log_slice(
@@ -1033,7 +1081,7 @@ class TestQueryPolicySliceReliability:
             policy_id=2,
             time_range=self._WINDOW,
             action=None,
-            timeout=0,
+            timeout=1,
         )
 
         assert result == {"logs": [], "total_hits": None, "total_hits_is_known": False}
@@ -1174,6 +1222,10 @@ class TestPolicyPathEnsuresConnection:
                 events.append("start")
                 return {"tid": 1}
 
+            async def logsearch_count(self, adom: str, tid: int) -> dict[str, object]:
+                events.append("count")
+                return {"progress-percent": 100, "total-logs": 3, "scanned-logs": 3}
+
             async def logsearch_fetch(self, **_kwargs: object) -> dict[str, object]:
                 return {
                     "percentage": 100,
@@ -1186,7 +1238,8 @@ class TestPolicyPathEnsuresConnection:
 
         fake = FakeClient()
         monkeypatch.setattr(traffic_tools, "_get_client", lambda: fake)
-        monkeypatch.setattr(traffic_tools.asyncio, "sleep", _noop_sleep)
+        monkeypatch.setattr(log_tools, "_INITIAL_POLL_DELAY", 0)
+        monkeypatch.setattr(log_tools, "POLL_INTERVAL", 0)
 
         result = await traffic_tools.get_policy_port_analysis(
             adom="root",

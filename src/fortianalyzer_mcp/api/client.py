@@ -66,8 +66,18 @@ class FortiAnalyzerClient:
 
         self._fmg: FortiManager | None = None
         self._connected = False
+        # True once a login has succeeded at least once. Distinguishes a session
+        # that dropped after being connected (revive it) from a client that was
+        # never connected (a direct API call should still raise "Not connected").
+        self._ever_connected = False
         self._faz_version: tuple[int, int, int] | None = None  # (major, minor, patch)
         self._faz_tz: ZoneInfo | None = None  # cached FAZ system timezone
+        # Serialize forced reconnects so concurrent requests that all hit a
+        # dropped session perform a single re-login instead of racing to clear
+        # and rebuild ``_fmg`` underneath one another. The generation counter
+        # lets a waiter detect that a peer already reconnected while it blocked.
+        self._reconnect_lock = asyncio.Lock()
+        self._reconnect_generation = 0
 
         logger.info(f"Initialized FortiAnalyzer client for {self.host}")
 
@@ -125,6 +135,7 @@ class FortiAnalyzerClient:
                 raise AuthenticationError(f"FortiAnalyzer login failed: {error_msg}")
 
             self._connected = True
+            self._ever_connected = True
             logger.info("Successfully connected to FortiAnalyzer")
 
         except AuthenticationError:
@@ -276,17 +287,46 @@ class FortiAnalyzerClient:
 
         A stale/expired session (e.g. the appliance closed an idle session)
         surfaces as an auth error while the local client still believes it is
-        connected. These are recoverable by re-logging in once.
+        connected. A raw ``ConnectionError("Not connected. ...")`` from
+        :meth:`_ensure_connected` means the local client lost its session
+        mid-request (e.g. another path disconnected it). Both are recoverable by
+        re-logging in once. Invalid-tid errors are deliberately excluded (the
+        not-connected message carries no ``tid``) — those are owned by the log
+        tools, which re-issue the search.
         """
         if isinstance(exc, AuthenticationError):
+            return True
+        # A local not-connected error means the session dropped mid-request --
+        # but only revive it if we were genuinely connected before. A client that
+        # never connected must still surface "Not connected" rather than silently
+        # attempting a first login on an arbitrary API call.
+        if (
+            self._ever_connected
+            and isinstance(exc, ConnectionError)
+            and "not connected" in str(exc).lower()
+        ):
             return True
         return getattr(exc, "code", None) in self._RECONNECTABLE_ERROR_CODES
 
     async def _force_reconnect(self) -> None:
-        """Drop stale connection state and reconnect (re-login)."""
-        self._connected = False
-        self._fmg = None
-        await self.connect()
+        """Drop stale connection state and reconnect (re-login), serialized.
+
+        The lock ensures that when several concurrent requests all hit a dropped
+        session, only the first re-logs in; the others observe the bumped
+        generation and return without tearing the revived connection back down.
+        (A stale session still reports ``is_connected`` locally, so the
+        generation counter -- not ``is_connected`` -- is what detects a peer's
+        reconnect.)
+        """
+        observed = self._reconnect_generation
+        async with self._reconnect_lock:
+            if self._reconnect_generation != observed:
+                # A concurrent caller already reconnected while we waited.
+                return
+            self._connected = False
+            self._fmg = None
+            await self.connect()
+            self._reconnect_generation += 1
 
     async def _execute_resilient(
         self,

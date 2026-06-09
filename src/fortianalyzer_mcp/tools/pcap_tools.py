@@ -16,10 +16,12 @@ from datetime import datetime
 from typing import Any
 
 from fortianalyzer_mcp.server import get_faz_client, mcp
+from fortianalyzer_mcp.tools.log_tools import _clamp_timeout, _run_logsearch_page
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
     assert_within_directory,
+    build_device_filter,
     get_default_adom,
     sanitize_filter_value,
     validate_adom,
@@ -37,7 +39,6 @@ logger = logging.getLogger(__name__)
 
 # Constants
 DEFAULT_SEARCH_TIMEOUT = 60
-POLL_INTERVAL = 1.0
 MAX_PCAP_SIZE = 50 * 1024 * 1024  # 50MB per PCAP file
 
 
@@ -244,7 +245,7 @@ async def search_ips_logs(
                 - pcapurl: PCAP URL (if available, use for download)
                 - date, time: Event timestamp
             - filter_applied: Filter string used
-            - tid: Task ID for pagination
+            - tid: Reaped appliance task id (vestigial echo, not a pagination handle)
             - message: Error message if failed
 
     Example:
@@ -292,76 +293,49 @@ async def search_ips_logs(
         time_range_dict = await _parse_time_range(time_range)
 
         # Build device filter
-        device_filter = [{"devid": device}] if device else [{"devid": "All_FortiGate"}]
+        device_filter = build_device_filter(device)
 
         logger.info(f"Searching IPS logs: adom={adom}, filter={filter_str}")
 
-        # Start search - use logtype "attack" for IPS logs
-        start_result = await client.logsearch_start(
+        # Clamp here so the timed_out message reflects the effective budget.
+        timeout = _clamp_timeout(timeout)
+        # Run one search page (start -> poll logsearch_count -> fetch once).
+        # logtype "attack" for IPS logs.
+        page = await _run_logsearch_page(
+            client,
             adom=adom,
             logtype="attack",
-            device=device_filter,
+            device_filter=device_filter,
             time_range=time_range_dict,
             filter=filter_str,
-            limit=limit,
             offset=0,
+            limit=limit,
+            timeout=timeout,
         )
 
-        tid = start_result.get("tid")
-        if not tid:
+        if page["timed_out"]:
             return {
                 "status": "error",
-                "message": f"Failed to start search: no TID returned. Response: {start_result}",
+                "message": f"Search timed out after {timeout} seconds",
+                "tid": page["tid"],
             }
 
-        logger.info(f"IPS search started with TID: {tid}")
+        logs = page["logs"]
+        total = page["total"]
 
-        # Poll for results
-        start_time = asyncio.get_event_loop().time()
-        while True:
-            elapsed = asyncio.get_event_loop().time() - start_time
-            if elapsed > timeout:
-                try:
-                    await client.logsearch_cancel(adom, tid)
-                except Exception:
-                    pass
-                return {
-                    "status": "error",
-                    "message": f"Search timed out after {timeout} seconds",
-                    "tid": tid,
-                }
+        # Count how many have PCAP available
+        pcap_available = sum(1 for log in logs if log.get("pcapurl"))
 
-            # Fetch results
-            fetch_result = await client.logsearch_fetch(
-                adom=adom,
-                tid=tid,
-                limit=limit,
-                offset=0,
-            )
-
-            percentage = fetch_result.get("percentage", 0)
-            logger.debug(f"Search progress: {percentage}%")
-
-            if percentage >= 100:
-                logs = fetch_result.get("data", [])
-                if not isinstance(logs, list):
-                    logs = [logs] if logs else []
-
-                # Count how many have PCAP available
-                pcap_available = sum(1 for log in logs if log.get("pcapurl"))
-
-                return {
-                    "status": "success",
-                    "count": len(logs),
-                    "pcap_available_count": pcap_available,
-                    "total": fetch_result.get("total-lines", len(logs)),
-                    "logs": logs,
-                    "filter_applied": filter_str or "none",
-                    "tid": tid,
-                    "time_range": time_range_dict,
-                }
-
-            await asyncio.sleep(POLL_INTERVAL)
+        return {
+            "status": "success",
+            "count": len(logs),
+            "pcap_available_count": pcap_available,
+            "total": total if total is not None else len(logs),
+            "logs": logs,
+            "filter_applied": filter_str or "none",
+            "tid": page["tid"],
+            "time_range": time_range_dict,
+        }
 
     except ValidationError as e:
         return {"status": "error", "message": f"Validation error: {e}"}
@@ -423,53 +397,34 @@ async def get_pcap_by_session(
         # Build filter for specific session ID
         filter_str = f"sessionid=={session_id}"
         time_range_dict = await _parse_time_range(time_range)
-        device_filter = [{"devid": device}] if device else [{"devid": "All_FortiGate"}]
+        device_filter = build_device_filter(device)
 
         logger.info(f"Searching for session {session_id} in ADOM {adom}")
 
-        # Start search
-        start_result = await client.logsearch_start(
+        # Clamp here so the timed_out message reflects the effective budget.
+        timeout = _clamp_timeout(timeout)
+        # Run one search page (start -> poll logsearch_count -> fetch once).
+        page = await _run_logsearch_page(
+            client,
             adom=adom,
             logtype="attack",
-            device=device_filter,
+            device_filter=device_filter,
             time_range=time_range_dict,
             filter=filter_str,
-            limit=10,
             offset=0,
+            limit=10,
+            timeout=timeout,
         )
 
-        tid = start_result.get("tid")
-        if not tid:
+        if page["timed_out"]:
             return {
                 "status": "error",
                 "session_id": session_id,
-                "message": "Failed to start search: no TID returned",
+                "message": f"Search timed out after {timeout} seconds",
             }
 
-        # Poll for results
-        start_time = asyncio.get_event_loop().time()
-        while True:
-            elapsed = asyncio.get_event_loop().time() - start_time
-            if elapsed > timeout:
-                try:
-                    await client.logsearch_cancel(adom, tid)
-                except Exception:
-                    pass
-                return {
-                    "status": "error",
-                    "session_id": session_id,
-                    "message": f"Search timed out after {timeout} seconds",
-                }
-
-            fetch_result = await client.logsearch_fetch(adom=adom, tid=tid, limit=10, offset=0)
-
-            if fetch_result.get("percentage", 0) >= 100:
-                break
-
-            await asyncio.sleep(POLL_INTERVAL)
-
         # Check results
-        logs = fetch_result.get("data", [])
+        logs = page["logs"]
         if not logs:
             return {
                 "status": "error",
@@ -808,51 +763,30 @@ async def search_and_download_pcaps(
         )
 
         time_range_dict = await _parse_time_range(time_range)
-        device_filter = [{"devid": device}] if device else [{"devid": "All_FortiGate"}]
+        device_filter = build_device_filter(device)
 
         logger.info(f"Searching IPS logs for PCAP download: {filter_str}")
 
-        # Start search
-        start_result = await client.logsearch_start(
+        # Clamp here so the timed_out message reflects the effective budget.
+        timeout = _clamp_timeout(timeout)
+        # Run one search page (start -> poll logsearch_count -> fetch once).
+        # Get extra in case some fail.
+        page = await _run_logsearch_page(
+            client,
             adom=adom,
             logtype="attack",
-            device=device_filter,
+            device_filter=device_filter,
             time_range=time_range_dict,
             filter=filter_str,
-            limit=max_downloads * 2,  # Get extra in case some fail
             offset=0,
+            limit=max_downloads * 2,
+            timeout=timeout,
         )
 
-        tid = start_result.get("tid")
-        if not tid:
-            return {
-                "status": "error",
-                "message": "Failed to start search: no TID returned",
-            }
+        if page["timed_out"]:
+            return {"status": "error", "message": f"Search timed out after {timeout}s"}
 
-        # Poll for results
-        start_time = asyncio.get_event_loop().time()
-        while True:
-            elapsed = asyncio.get_event_loop().time() - start_time
-            if elapsed > timeout:
-                try:
-                    await client.logsearch_cancel(adom, tid)
-                except Exception:
-                    pass
-                return {"status": "error", "message": f"Search timed out after {timeout}s"}
-
-            fetch_result = await client.logsearch_fetch(
-                adom=adom, tid=tid, limit=max_downloads * 2, offset=0
-            )
-
-            if fetch_result.get("percentage", 0) >= 100:
-                break
-
-            await asyncio.sleep(POLL_INTERVAL)
-
-        logs = fetch_result.get("data", [])
-        if not isinstance(logs, list):
-            logs = [logs] if logs else []
+        logs = page["logs"]
 
         # Filter to only those with pcapurl
         logs_with_pcap = [log for log in logs if log.get("pcapurl")]

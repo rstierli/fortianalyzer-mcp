@@ -826,6 +826,10 @@ async def save_report(
                 output_file = output_path / f"{stem}_{counter}{suffix}"
                 counter += 1
 
+            # Defense-in-depth: keep the resolved path inside the validated
+            # output directory (mirrors the ZIP-extract path above).
+            output_file = assert_within_directory(output_file, output_path)
+
             with open(output_file, "wb") as f:
                 f.write(zip_data)
 

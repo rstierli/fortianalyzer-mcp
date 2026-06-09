@@ -47,6 +47,7 @@ SUPPORTED_TIME_RANGES: tuple[str, ...] = tuple(_RANGE_MAP.keys())
 def parse_time_range(
     time_range: str,
     faz_tz: ZoneInfo | None = None,
+    anchor: datetime | None = None,
 ) -> dict[str, str]:
     """Translate a caller-facing time-range string to FAZ's dict format.
 
@@ -60,6 +61,12 @@ def parse_time_range(
             :func:`datetime.now` (caller-local) — preserves legacy
             behavior, but only correct if the caller and FAZ happen
             to share a timezone.
+        anchor: Explicit naive FAZ-local "now" to end relative windows on.
+            When provided it takes precedence over ``faz_tz``/``datetime.now``
+            — used to align relative ranges to the appliance's LogView ingest
+            clock (see :mod:`fortianalyzer_mcp.utils.log_clock`) so a post-
+            upgrade clock skew does not silently miss recent logs. Ignored for
+            custom ``"start|end"`` ranges (those carry explicit timestamps).
 
     Returns:
         ``{"start": "...", "end": "..."}`` ready to send as
@@ -98,7 +105,11 @@ def parse_time_range(
             f"'YYYY-MM-DD HH:MM:SS|YYYY-MM-DD HH:MM:SS'."
         )
 
-    if faz_tz is not None:
+    if anchor is not None:
+        # Explicit FAZ-local anchor (e.g. latest LogView ingest time). Strip any
+        # tzinfo so the bytes-on-wire stay naive FAZ-local like every other path.
+        now = anchor.replace(tzinfo=None)
+    elif faz_tz is not None:
         now = datetime.now(UTC).astimezone(faz_tz).replace(tzinfo=None)
     else:
         now = datetime.now()

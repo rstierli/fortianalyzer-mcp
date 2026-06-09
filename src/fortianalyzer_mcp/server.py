@@ -3,7 +3,6 @@
 import hmac
 import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -31,36 +30,6 @@ def get_faz_client() -> FortiAnalyzerClient | None:
     return faz_client
 
 
-@asynccontextmanager
-async def server_lifespan(server: FastMCP) -> AsyncIterator[dict]:
-    """Manage server startup and shutdown.
-
-    Args:
-        server: FastMCP server instance
-
-    Yields:
-        Dictionary with FortiAnalyzer client
-    """
-    global faz_client
-
-    logger.info("Starting FortiAnalyzer MCP server")
-
-    # Initialize and connect FortiAnalyzer client
-    faz_client = FortiAnalyzerClient.from_settings(settings)
-    await faz_client.connect()
-
-    logger.info("FortiAnalyzer MCP server started successfully")
-
-    try:
-        yield {"faz_client": faz_client}
-    finally:
-        # Cleanup on shutdown
-        logger.info("Shutting down FortiAnalyzer MCP server")
-        if faz_client:
-            await faz_client.disconnect()
-        logger.info("FortiAnalyzer MCP server shut down")
-
-
 # Configure transport security for reverse proxy deployments
 _transport_security = None
 if settings.MCP_ALLOWED_HOSTS:
@@ -68,11 +37,17 @@ if settings.MCP_ALLOWED_HOSTS:
         allowed_hosts=settings.MCP_ALLOWED_HOSTS,
     )
 
-# Create FastMCP server
+# Create FastMCP server.
+#
+# Lifecycle ownership of the process-global ``faz_client`` is deliberately held
+# by exactly one path: ``run_http``'s ``app_lifespan`` in HTTP mode and
+# ``run_stdio`` in stdio mode. We do NOT pass a FastMCP ``lifespan`` here: with
+# ``stateless_http=True`` that lifespan runs per request/session, so it would
+# connect and then *disconnect* the shared client around every call, dropping the
+# session out from under concurrent requests.
 mcp = FastMCP(
     "FortiAnalyzer API Server",
     stateless_http=True,  # Stateless for Docker deployment
-    lifespan=server_lifespan,
     transport_security=_transport_security,
 )
 

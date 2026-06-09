@@ -306,6 +306,42 @@ def validate_device_serial(serial: str) -> str:
     return serial
 
 
+# Serial-number prefixes used to decide whether a device string is a serial
+# (devid) or a device name (devname). Kept here as the single source of truth so
+# every tool builds the FAZ device filter identically.
+_DEVICE_SERIAL_PREFIXES = ("FG", "FM", "FW", "FA", "FS", "FD", "FP", "FC")
+
+
+def build_device_filter(device: str | None) -> list[dict[str, str]]:
+    """Build the FortiAnalyzer ``device`` filter array for a logview search.
+
+    This is the single source of truth shared by the log, traffic, and pcap
+    tools (each previously carried its own copy). The FAZ logview API requires a
+    device filter; without one, searches return zero results.
+
+    Args:
+        device: Device serial number (e.g. ``"FG100FTK19001333"``), device name
+            (optionally ``"name[vdom]"``), an ``"All_*"`` device group, or
+            ``None`` to default to all FortiGate devices.
+
+    Returns:
+        A device-filter list, one of ``[{"devid": ...}]`` or
+        ``[{"devname": ...}]``, ready to pass as the ``device`` parameter.
+
+    Note:
+        Serial-looking values (``FG``/``FM``/... prefixes) and ``All_*`` groups
+        are sent as ``devid``; anything else is treated as a ``devname``.
+    """
+    if not device:
+        # FAZ rejects an empty device filter with 0 results; default to all FGTs.
+        return [{"devid": "All_FortiGate"}]
+    if device.startswith(_DEVICE_SERIAL_PREFIXES):
+        return [{"devid": device}]
+    if device.startswith("All_"):
+        return [{"devid": device}]
+    return [{"devname": device}]
+
+
 def validate_log_type(logtype: str) -> str:
     """Validate log type.
 

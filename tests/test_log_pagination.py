@@ -2,12 +2,16 @@
 
 These exercise query_logs / fetch_more_logs / cancel_log_search through a
 stateful in-memory FortiAnalyzer fake that models the *real* appliance
-contract discovered on the lab FAZ (7.6.x):
+contract discovered on the lab FAZ (7.6.x), under the poll-before-fetch rule:
 
 - ``logsearch_start(offset, limit)`` issues a task id (tid).
-- The first ``logsearch_fetch`` returns ``data[offset:offset+limit]`` plus a
-  ``total-count``; the task is then reaped, so a *second* fetch on the same tid
-  raises "Invalid tid".
+- ``logsearch_count(adom, tid)`` is a cheap GET that does NOT reap the tid; its
+  ``progress-percent`` climbs 0 -> 100 over a few polls.
+- ``logsearch_fetch`` may only be called once the scan is complete: a fetch
+  while the search is still running RAISES "Invalid tid" (the runner must poll
+  ``logsearch_count`` first). The first valid fetch returns
+  ``data[offset:offset+limit]`` plus ``total-count`` and reaps the task, so a
+  *second* fetch on the same tid raises "Invalid tid".
 - Therefore pagination is done by running a *fresh* search per page (the tid is
   not reusable). For a fixed time window the row order is stable across
   searches, so offset/limit paging is consistent.
@@ -25,6 +29,10 @@ from fortianalyzer_mcp.utils.errors import ResourceNotFoundError
 
 CUSTOM_RANGE = "2024-01-01 00:00:00|2024-01-02 00:00:00"
 
+# Number of logsearch_count polls a search reports as in-progress before it
+# reads 100% (so a normal search makes >=1 count call before the single fetch).
+_POLLS_TO_COMPLETE = 2
+
 
 def _rows(n: int) -> list[dict[str, object]]:
     """Build n distinct, stably ordered traffic log rows."""
@@ -34,13 +42,25 @@ def _rows(n: int) -> list[dict[str, object]]:
     ]
 
 
-class FakeFaz:
-    """Faithful fake of the FortiAnalyzer log-search surface.
+@pytest.fixture(autouse=True)
+def _fast_polls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop the poll cadence to zero so the start->poll->fetch loop is fast."""
+    monkeypatch.setattr(log_tools, "_INITIAL_POLL_DELAY", 0)
+    monkeypatch.setattr(log_tools, "POLL_INTERVAL", 0)
 
-    Models single-use tids: the first fetch delivers an offset slice plus
-    ``total-count`` and reaps the task; any later fetch on that tid raises
-    "Invalid tid". ``complete_on_attempt`` simulates a task that reaps
-    mid-poll before completing, forcing the tool to re-issue the search.
+
+class FakeFaz:
+    """Faithful fake of the FortiAnalyzer log-search surface (poll-before-fetch).
+
+    Each ``logsearch_start`` issues a fresh single-use tid. ``logsearch_count``
+    climbs ``progress-percent`` 0 -> 100 over ``_POLLS_TO_COMPLETE`` polls and
+    never reaps. ``logsearch_fetch`` raises "Invalid tid" if called before the
+    scan is complete *or* a second time on a reaped tid; a valid fetch delivers
+    the offset slice plus ``total-count`` and reaps the task.
+
+    ``complete_on_attempt`` models an appliance that reaps a search mid-poll: a
+    search whose start-attempt number is below it has its ``logsearch_count``
+    raise an invalid-tid error, forcing the runner to re-issue from scratch.
     """
 
     def __init__(
@@ -51,17 +71,21 @@ class FakeFaz:
         connected: bool = True,
         complete_on_attempt: int = 1,
         omit_total: bool = False,
+        stall: bool = False,
     ) -> None:
         self.dataset = dataset
         self.tz = tz
         self.connected = connected
         self.complete_on_attempt = complete_on_attempt
         self.omit_total = omit_total
+        self.stall = stall
         self.reconnects = 0
         self._tasks: dict[int, dict[str, object]] = {}
         self._next_tid = 1000
         self._start_count = 0
         self.start_calls: list[dict[str, object]] = []
+        self.count_calls: list[int] = []
+        self.fetch_calls: list[int] = []
         self.cancelled: list[int] = []
 
     @property
@@ -93,8 +117,29 @@ class FakeFaz:
         )
         tid = self._next_tid
         self._next_tid += 1
-        self._tasks[tid] = {"adom": adom, "alive": True, "attempt": self._start_count}
+        self._tasks[tid] = {"adom": adom, "alive": True, "attempt": self._start_count, "polls": 0}
         return {"tid": tid}
+
+    async def logsearch_count(self, adom: str, tid: int) -> dict[str, object]:
+        """Report scan progress without reaping the tid (a cheap GET)."""
+        self.count_calls.append(tid)
+        task = self._tasks.get(tid)
+        if task is None or task["adom"] != adom:
+            raise ResourceNotFoundError(f"Invalid tid {tid} for count.", code=-1)
+        # A search reaped before completing (older attempt) surfaces as an
+        # invalid-tid during count, forcing a fresh re-issue.
+        if int(task["attempt"]) < self.complete_on_attempt:
+            task["alive"] = False
+            raise ResourceNotFoundError(f"Invalid tid {tid} reaped mid-poll.", code=-1)
+        task["polls"] = int(task["polls"]) + 1
+        done = (not self.stall) and int(task["polls"]) >= _POLLS_TO_COMPLETE
+        total = len(self.dataset)
+        return {
+            "progress-percent": 100 if done else 50,
+            "matched-logs": min(total, int(task["polls"])),
+            "scanned-logs": total if done else 0,
+            "total-logs": total,
+        }
 
     async def logsearch_fetch(
         self,
@@ -103,14 +148,17 @@ class FakeFaz:
         limit: int = 50,
         offset: int = 0,
     ) -> dict[str, object]:
+        self.fetch_calls.append(tid)
         task = self._tasks.get(tid)
+        # Poll-before-fetch: fetching a still-running or reaped tid is invalid.
         if task is None or not task["alive"] or task["adom"] != adom:
             raise ResourceNotFoundError(f"Invalid tid {tid} for fetching result.", code=-1)
+        if int(task["polls"]) < _POLLS_TO_COMPLETE:
+            raise ResourceNotFoundError(f"Invalid tid {tid}: search not complete.", code=-1)
         task["alive"] = False  # single-use: task is reaped after one fetch
         page = self.dataset[offset : offset + limit]
-        complete = int(task["attempt"]) >= self.complete_on_attempt
         result: dict[str, object] = {
-            "percentage": 100 if complete else 50,
+            "percentage": 100,
             "return-lines": len(page),
             "data": page,
             "tid": tid,
@@ -221,6 +269,30 @@ class TestFetchMoreLogs:
         assert len(fake.start_calls) == 2
         assert fake.start_calls[1]["offset"] == 5
 
+    async def test_timeout_is_forwarded_to_page_runner(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """fetch_more_logs(timeout=180) forwards 180 into _run_logsearch_page."""
+        fake = FakeFaz(_rows(25))
+        _install(monkeypatch, fake)
+
+        first = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=10)
+        tid = first["tid"]
+
+        seen: dict[str, object] = {}
+        real_runner = log_tools._run_logsearch_page
+
+        async def recording_runner(client: object, **kwargs: object) -> dict[str, object]:
+            seen.update(kwargs)
+            return await real_runner(client, **kwargs)
+
+        monkeypatch.setattr(log_tools, "_run_logsearch_page", recording_runner)
+
+        more = await log_tools.fetch_more_logs(tid=tid, offset=10, limit=10, timeout=180)
+
+        assert more["status"] == "success"
+        assert seen["timeout"] == 180
+
     async def test_reuses_query_context_from_handle(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """fetch_more_logs reuses the ADOM and filter recorded for the handle."""
         fake = FakeFaz(_rows(25))
@@ -269,8 +341,8 @@ class TestReissueOnReap:
     async def test_query_logs_reissues_when_task_reaped_midpoll(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """If a task reaps mid-poll, the search is re-issued and still completes."""
-        monkeypatch.setattr(log_tools, "POLL_INTERVAL", 0)
+        """If a task reaps mid-poll (invalid-tid during count), the search is
+        re-issued exactly once and still completes."""
         fake = FakeFaz(_rows(8), complete_on_attempt=2)
         _install(monkeypatch, fake)
 
@@ -283,22 +355,25 @@ class TestReissueOnReap:
     async def test_never_completing_search_times_out_cleanly(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A search that never reaches 100% within timeout returns a clean
-        search_timeout error (honoring the timeout budget), not a raw 'Invalid
+        """A search whose scan never reaches 100% within the timeout returns a
+        clean search_timeout error (honoring the deadline), not a raw 'Invalid
         tid' string."""
-        monkeypatch.setattr(log_tools, "POLL_INTERVAL", 0.01)
-        fake = FakeFaz(_rows(8), complete_on_attempt=10_000)
+        monkeypatch.setattr(log_tools, "POLL_INTERVAL", 0.005)
+        monkeypatch.setattr(log_tools, "_INITIAL_POLL_DELAY", 0.005)
+        fake = FakeFaz(_rows(8), stall=True)  # count never reads 100%
         _install(monkeypatch, fake)
 
         result = await log_tools.query_logs(
-            adom="root", time_range=CUSTOM_RANGE, limit=10, timeout=0.05
+            adom="root", time_range=CUSTOM_RANGE, limit=10, timeout=1
         )
 
         assert result["status"] == "error"
         assert result["error"] == "search_timeout"
         assert "invalid tid" not in result.get("message", "").lower()
-        # The timeout (not a small fixed attempt cap) bounds the work.
-        assert len(fake.start_calls) >= 2
+        # A stalled scan is bounded by the deadline, not a fetch loop: the single
+        # search is polled but never fetched.
+        assert len(fake.start_calls) == 1
+        assert fake.fetch_calls == []
 
 
 class TestUnknownTotal:
@@ -333,6 +408,109 @@ class TestCancelLogSearch:
 
         assert result["status"] == "success"
         assert tid not in log_tools._SEARCH_REGISTRY
+
+
+class PrematureFaz:
+    """Models the 7.6.7 premature-100 case under poll-before-fetch.
+
+    ``logsearch_count`` always reports the scan complete (``progress-percent``
+    100), but the fetch returns an *empty* ``data`` page while ``total-count``
+    reports rows exist, until ``data_on_attempt`` searches have started -- at
+    which point the page carries real data. Each search is a fresh single-use
+    tid; the runner must therefore re-issue on a premature-empty-100 page.
+    """
+
+    def __init__(self, dataset: list[dict[str, object]], *, data_on_attempt: int) -> None:
+        self.dataset = dataset
+        self.data_on_attempt = data_on_attempt
+        self.connected = True
+        self.reconnects = 0
+        self._next_tid = 2000
+        self._attempt = 0
+        self._tasks: dict[int, int] = {}
+        self.count_calls: list[int] = []
+        self.cancelled: list[int] = []
+
+    @property
+    def is_connected(self) -> bool:
+        return self.connected
+
+    async def ensure_connected(self) -> None:
+        if not self.connected:
+            self.reconnects += 1
+            self.connected = True
+
+    async def get_system_timezone(self):  # noqa: ANN201 - test fake
+        return None
+
+    async def logsearch_start(self, **_kw: object) -> dict[str, object]:
+        self._attempt += 1
+        tid = self._next_tid
+        self._next_tid += 1
+        self._tasks[tid] = self._attempt
+        return {"tid": tid}
+
+    async def logsearch_count(self, adom: str, tid: int) -> dict[str, object]:
+        """Always report the scan complete (the premature-100 case)."""
+        self.count_calls.append(tid)
+        total = len(self.dataset)
+        return {
+            "progress-percent": 100,
+            "matched-logs": total,
+            "scanned-logs": total,
+            "total-logs": total,
+        }
+
+    async def logsearch_fetch(
+        self, adom: str, tid: int, limit: int = 50, offset: int = 0
+    ) -> dict[str, object]:
+        attempt = self._tasks[tid]
+        data = self.dataset[offset : offset + limit] if attempt >= self.data_on_attempt else []
+        return {
+            "percentage": 100,
+            "data": data,
+            "total-count": len(self.dataset),
+            "tid": tid,
+            "status": {"code": 0, "message": "succeeded"},
+        }
+
+    async def logsearch_cancel(self, adom: str, tid: int) -> dict[str, object]:
+        self.cancelled.append(tid)
+        return {"status": {"code": 0, "message": "ok"}}
+
+
+class TestPremature100:
+    async def test_empty_100pct_with_total_reissues_then_returns_rows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """percentage:100 + empty data + total-count>0 must re-issue, not report 0."""
+        fake = PrematureFaz(_rows(5), data_on_attempt=2)
+        _install(monkeypatch, fake)
+
+        result = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=10)
+
+        assert result["status"] == "success"
+        assert result["count"] == 5
+        assert result["total"] == 5
+        assert fake._attempt == 2  # first empty completion re-issued once
+
+    async def test_persistent_empty_100pct_is_bounded_and_warns(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A deterministically empty 100% page stops after a bounded re-issue
+        count (it must not loop to the timeout) and surfaces the inconsistency."""
+        fake = PrematureFaz(_rows(5), data_on_attempt=10_000)  # never yields data
+        _install(monkeypatch, fake)
+
+        result = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=10)
+
+        assert result["status"] == "success"
+        assert result["count"] == 0
+        assert result["has_more"] is False
+        assert any("beyond this offset" in w for w in result["warnings"])
+        # Bounded by the shared recovery budget: one initial search +
+        # MAX_SEARCH_REISSUES re-issues.
+        assert fake._attempt == 1 + log_tools.MAX_SEARCH_REISSUES
 
 
 class TestReconnectOnce:
