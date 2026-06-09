@@ -430,6 +430,26 @@ networks:
 > `has_more:false`. Call `cancel_log_search(tid=<handle>)` when finished; an
 > expired/unknown handle returns `error:"tid_invalid_or_expired"`.
 >
+> **Totals across pages (`total` vs `page_total`):** because `fetch_more_logs`
+> re-runs the search for each page, FortiAnalyzer may report a different
+> `total-count` from one page to the next even for the same fixed window (rows
+> indexed after page 0). To keep the headline figure stable, `total` is the
+> handle's **first-page baseline** and stays fixed for every page; `page_total`
+> is the raw count observed on the current page. `total_count_stability` is
+> `single_observation` (page 0), `stable` (page matches the baseline), `drifted`
+> (it differs), or `unknown`; `total_drift_detected` and `total_delta`
+> (`page_total - initial_total`) quantify it. `has_more_basis` reports which
+> figure drove `has_more` (`stable_total`, `best_effort_max_observed_total`,
+> `best_effort_page_total`, or `full_page_heuristic`); it answers a different
+> question than `total_count_stability` and the two may legitimately differ. A
+> handle is bound to the ADOM `query_logs` ran under — paging it with a different
+> `adom` returns `error:"adom_mismatch"`. When a broad/high-volume window reports
+> `drifted`, treat the total as **non-exact**: the window is **not
+> snapshot-consistent**, so row offsets may shift and individual rows can be
+> duplicated or skipped across pages. For exact investigations prefer narrow
+> filters and fixed absolute windows away from "now", and rerun controls rather
+> than deep offset paging through a drifting high-volume window.
+>
 > **Time & timezone:** `time_range` accepts presets (`1-hour` … `24-hour`,
 > `7-day`, `30-day`, `90-day`) or a custom
 > `"YYYY-MM-DD HH:MM:SS|YYYY-MM-DD HH:MM:SS"` window. Timestamps are interpreted

@@ -460,8 +460,25 @@ ERROR_CODE_MAP = {
 `query_logs` and `fetch_more_logs` return one self-describing shape:
 
 - `status`, `count`, `logs`
-- `total`, `total_is_known` — true match count from FAZ `total-count`;
-  `total_is_known=false` when the appliance omits it
+- `total`, `total_is_known` — the handle's **first-page Baseline total** (per ADR-0002),
+  held fixed for every page so it does not wobble as the appliance re-counts a frozen
+  window; `total_is_known=false` when no baseline was captured. `fetch_more_logs` never
+  promotes a later page's count into `total`
+- `page_total` — the raw FAZ `total-count` observed for the current page's re-run search
+  (the live per-page figure; equals `total` on page 0)
+- `initial_total` — the baseline `total` was derived from
+- `total_count_stability` — `single_observation` (page 0) | `stable` (page == baseline) |
+  `drifted` (page != baseline, same frozen window) | `unknown` (no comparable count)
+- `total_drift_detected`, `total_delta` — drift flag and `page_total - initial_total`
+  (when both known); a drift adds a warning that the broad total is non-exact and row
+  offsets may shift, and emits a redacted `logger.info` drift event
+- `has_more_basis` — which figure `has_more` was paged against: `stable_total` |
+  `best_effort_max_observed_total` (drift → `max(initial, page_total)`) |
+  `best_effort_page_total` (no baseline, this page has a count) | `full_page_heuristic`.
+  Distinct from `total_count_stability` and may differ (e.g. a later page omitting the
+  count is `stability=unknown` yet `basis=stable_total`)
+- A handle is bound to its ADOM — `fetch_more_logs` with a differing `adom` returns
+  `error="adom_mismatch"` (a cross-ADOM baseline/page comparison is meaningless)
 - `has_more`, `next_offset` — `next_offset = offset + count` while paging, `null`
   once `has_more` is false or a page returns `count == 0` (the count==0 guard
   prevents an infinite paging loop against an inconsistent total)

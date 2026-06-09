@@ -72,6 +72,7 @@ class FakeFaz:
         complete_on_attempt: int = 1,
         omit_total: bool = False,
         stall: bool = False,
+        total_overrides: list[int | None] | None = None,
     ) -> None:
         self.dataset = dataset
         self.tz = tz
@@ -79,6 +80,11 @@ class FakeFaz:
         self.complete_on_attempt = complete_on_attempt
         self.omit_total = omit_total
         self.stall = stall
+        # Per-fetch ``total-count`` sequence (models the appliance re-counting a
+        # frozen window across re-run page searches). Each successful fetch pops
+        # the next entry: an int sets ``total-count``; ``None`` omits it entirely
+        # (exercising the unknown path). Exhausted/absent -> len(dataset).
+        self.total_overrides = list(total_overrides) if total_overrides is not None else None
         self.reconnects = 0
         self._tasks: dict[int, dict[str, object]] = {}
         self._next_tid = 1000
@@ -113,7 +119,14 @@ class FakeFaz:
     ) -> dict[str, object]:
         self._start_count += 1
         self.start_calls.append(
-            {"adom": adom, "logtype": logtype, "filter": filter, "offset": offset, "limit": limit}
+            {
+                "adom": adom,
+                "logtype": logtype,
+                "filter": filter,
+                "offset": offset,
+                "limit": limit,
+                "time_range": time_range,
+            }
         )
         tid = self._next_tid
         self._next_tid += 1
@@ -164,7 +177,12 @@ class FakeFaz:
             "tid": tid,
             "status": {"code": 0, "message": "succeeded"},
         }
-        if not self.omit_total:
+        if self.total_overrides:
+            override = self.total_overrides.pop(0)
+            if override is not None:
+                result["total-count"] = override
+            # None -> omit total-count entirely (unknown path)
+        elif not self.omit_total:
             result["total-count"] = len(self.dataset)
         return result
 
@@ -541,3 +559,214 @@ class TestReconnectOnce:
 
         assert more["status"] == "success"
         assert fake.reconnects == 1
+
+
+class TestTotalStability:
+    """Baseline-total contract across re-run pages (ADR-0002).
+
+    A pagination handle's ``total`` is the first-page Baseline total and stays
+    fixed; the raw per-page ``total-count`` is exposed as ``page_total`` and the
+    page is labelled stable/drifted/unknown against the baseline.
+    """
+
+    async def test_stable_total_no_drift(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Equal page totals -> stable; total == baseline, no drift warning."""
+        fake = FakeFaz(_rows(25), total_overrides=[25, 25])
+        _install(monkeypatch, fake)
+
+        first = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=10)
+        more = await log_tools.fetch_more_logs(tid=first["tid"], offset=10, limit=10)
+
+        assert more["status"] == "success"
+        assert more["total"] == 25
+        assert more["page_total"] == 25
+        assert more["initial_total"] == 25
+        assert more["total_count_stability"] == "stable"
+        assert more["total_drift_detected"] is False
+        assert more["total_delta"] == 0
+        assert more["has_more_basis"] == "stable_total"
+        assert not any("baseline" in w for w in more["warnings"])
+
+    async def test_drifted_total_keeps_baseline(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A higher later total -> total stays the page-0 baseline; page_total is
+        the latest; drift is flagged and warned (incl. row-shift caveat)."""
+        fake = FakeFaz(_rows(25), total_overrides=[230071, 230741])
+        _install(monkeypatch, fake)
+
+        first = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=5)
+        assert first["total"] == 230071
+        assert first["initial_total"] == 230071
+        assert first["page_total"] == 230071
+
+        more = await log_tools.fetch_more_logs(tid=first["tid"], offset=5, limit=5)
+
+        assert more["total"] == 230071
+        assert more["page_total"] == 230741
+        assert more["initial_total"] == 230071
+        assert more["total_count_stability"] == "drifted"
+        assert more["total_drift_detected"] is True
+        assert more["total_delta"] == 670
+        assert more["has_more_basis"] == "best_effort_max_observed_total"
+        assert any("row offsets may also shift" in w for w in more["warnings"])
+        assert any("baseline" in w for w in more["warnings"])
+
+    async def test_drifted_has_more_uses_max_observed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """has_more on drift is computed from max(initial, page_total): a baseline
+        of 10 must not stop paging when the page reports 1000 rows."""
+        fake = FakeFaz(_rows(10), total_overrides=[10, 1000])
+        _install(monkeypatch, fake)
+
+        first = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=5)
+        more = await log_tools.fetch_more_logs(tid=first["tid"], offset=5, limit=5)
+
+        assert more["page_total"] == 1000
+        assert more["total"] == 10  # baseline preserved
+        assert more["has_more_basis"] == "best_effort_max_observed_total"
+        # (offset+count)=10 < max(10,1000) -> keep paging (baseline alone would stop).
+        assert more["has_more"] is True
+
+    async def test_query_logs_unknown_total_fields(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Page 0 with no total-count: total None, unknown stability, heuristic basis."""
+        fake = FakeFaz(_rows(50), omit_total=True)
+        _install(monkeypatch, fake)
+
+        r = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=10)
+
+        assert r["total"] is None
+        assert r["page_total"] is None
+        assert r["initial_total"] is None
+        assert r["total_count_stability"] == "unknown"
+        assert r["total_drift_detected"] is False
+        assert r["total_delta"] is None
+        assert r["has_more_basis"] == "full_page_heuristic"
+
+    async def test_query_logs_page0_single_observation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Page 0 with a known total -> single_observation, delta 0, stable_total basis."""
+        fake = FakeFaz(_rows(25))
+        _install(monkeypatch, fake)
+
+        r = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=10)
+
+        assert r["page_total"] == 25
+        assert r["initial_total"] == 25
+        assert r["total_count_stability"] == "single_observation"
+        assert r["total_drift_detected"] is False
+        assert r["total_delta"] == 0
+        assert r["has_more_basis"] == "stable_total"
+
+    async def test_no_baseline_never_promotes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Page 0 omits total-count: total stays None for the whole handle even
+        when a later page returns a count (page_total still surfaced)."""
+        fake = FakeFaz(_rows(8), total_overrides=[None, 230741])
+        _install(monkeypatch, fake)
+
+        first = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=5)
+        assert first["total"] is None
+        assert first["page_total"] is None
+
+        more = await log_tools.fetch_more_logs(tid=first["tid"], offset=5, limit=5)
+
+        assert more["total"] is None
+        assert more["page_total"] == 230741
+        assert more["initial_total"] is None
+        assert more["total_count_stability"] == "unknown"
+        assert more["total_drift_detected"] is False
+        assert more["has_more_basis"] == "best_effort_page_total"
+
+    async def test_no_baseline_short_page_does_not_stop_early(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No baseline + a short page must page off page_total, not the full-page
+        heuristic (which would stop early and hide rows)."""
+        fake = FakeFaz(_rows(8), total_overrides=[None, 1000])
+        _install(monkeypatch, fake)
+
+        first = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=5)
+        more = await log_tools.fetch_more_logs(tid=first["tid"], offset=5, limit=5)
+
+        assert more["count"] < 5  # rows[5:8] -> 3 rows, a short page
+        assert more["total"] is None
+        assert more["page_total"] == 1000
+        assert more["has_more_basis"] == "best_effort_page_total"
+        assert more["has_more"] is True  # 8 < 1000, would be False under the heuristic
+
+    async def test_known_baseline_page_omits_total(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Known baseline + a later page missing total-count: total stays the
+        baseline, stability unknown, has_more paged against the baseline."""
+        fake = FakeFaz(_rows(25), total_overrides=[25, None])
+        _install(monkeypatch, fake)
+
+        first = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=10)
+        more = await log_tools.fetch_more_logs(tid=first["tid"], offset=10, limit=10)
+
+        assert more["total"] == 25
+        assert more["page_total"] is None
+        assert more["initial_total"] == 25
+        assert more["total_count_stability"] == "unknown"
+        assert more["total_drift_detected"] is False
+        assert more["total_delta"] is None
+        assert more["has_more_basis"] == "stable_total"
+
+    async def test_adom_mismatch_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A differing ADOM is rejected (the handle is bound to its ADOM); reuse
+        and exact-match proceed."""
+        fake = FakeFaz(_rows(25))
+        _install(monkeypatch, fake)
+
+        first = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=10)
+        tid = first["tid"]
+        assert len(fake.start_calls) == 1
+
+        bad = await log_tools.fetch_more_logs(tid=tid, adom="other", offset=10, limit=10)
+        assert bad["status"] == "error"
+        assert bad["error"] == "adom_mismatch"
+        assert len(fake.start_calls) == 1  # no search was issued
+
+        ok = await log_tools.fetch_more_logs(tid=tid, adom="root", offset=10, limit=10)
+        assert ok["status"] == "success"
+        assert len(fake.start_calls) == 2
+
+    async def test_frozen_window_relative_preset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A relative preset is resolved to an absolute window at page 0 and the
+        same absolute window is re-sent on later pages (frozen, not sliding)."""
+        fake = FakeFaz(_rows(25), tz=ZoneInfo("UTC"))
+        _install(monkeypatch, fake)
+
+        first = await log_tools.query_logs(adom="root", time_range="1-hour", limit=10)
+        tid = first["tid"]
+        ctx = log_tools._SEARCH_REGISTRY[tid]
+        assert set(ctx["time_range"].keys()) == {"start", "end"}  # resolved, not "1-hour"
+
+        await log_tools.fetch_more_logs(tid=tid, offset=10, limit=10)
+
+        # The page-1 re-run search carries the same frozen absolute window.
+        assert fake.start_calls[1]["time_range"] == ctx["time_range"]
+
+    async def test_non_monotonic_drift_is_bounded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """high -> low -> high totals: total stays the baseline, has_more pages
+        against max(initial, current) each page, no crash, clean stop on empty."""
+        fake = FakeFaz(_rows(20), total_overrides=[240000, 230000, 240500])
+        _install(monkeypatch, fake)
+
+        first = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=5)
+        assert first["initial_total"] == 240000
+
+        more1 = await log_tools.fetch_more_logs(tid=first["tid"], offset=5, limit=5)
+        assert more1["total"] == 240000
+        assert more1["page_total"] == 230000
+        assert more1["total_delta"] == -10000
+        assert more1["has_more_basis"] == "best_effort_max_observed_total"
+
+        more2 = await log_tools.fetch_more_logs(tid=first["tid"], offset=10, limit=5)
+        assert more2["total"] == 240000
+        assert more2["page_total"] == 240500
+        assert more2["total_delta"] == 500
+
+        # Beyond the dataset: an empty page stops paging cleanly regardless of total.
+        more3 = await log_tools.fetch_more_logs(tid=first["tid"], offset=20, limit=5)
+        assert more3["count"] == 0
+        assert more3["has_more"] is False

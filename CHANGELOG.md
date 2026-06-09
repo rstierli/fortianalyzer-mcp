@@ -5,6 +5,14 @@ All notable changes to FortiAnalyzer MCP Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **`query_logs` / `fetch_more_logs` now report a stable baseline `total` for a pagination session.** A FortiAnalyzer logsearch re-runs per page over a frozen window and the appliance re-counts `total-count` between pages, so the reported `total` could wobble within one pagination session (observed on 7.6.7: 230071 → 230741). `total` is now held as the handle's first-page baseline; `has_more` is decoupled from it and pages against the best observed figure so a short page never stops paging early. See [ADR-0002](docs/adr/0002-baseline-total-for-pagination-handle.md).
+
+### Added
+- `page_total` (live per-page count), `total_count_stability` (`single_observation` | `stable` | `drifted` | `unknown`), `total_drift_detected`, `total_delta`, and `has_more_basis` on log-query responses; an `adom_mismatch` guard binding a pagination handle to its ADOM. 11 regression tests against a drift-capable fake.
+
 ## [2.0.1] - 2026-06-09
 
 Reliability hardening for FortiAnalyzer 7.6.7. PR [#18](https://github.com/rstierli/fortianalyzer-mcp/pull/18) by [@inxbit](https://github.com/inxbit). 529 unit tests pass; live-verified end-to-end on a 7.6.7 appliance.

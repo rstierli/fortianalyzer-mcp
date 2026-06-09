@@ -536,8 +536,20 @@ async def query_logs(
         dict: Log query results with keys:
             - status: "success" or "error"
             - count: Number of logs returned in this page
-            - total: Total logs matching the query (int), or None if unknown
+            - total: The handle's first-page Baseline total (int), or None if unknown.
+              Stays fixed across fetch_more_logs pages so it does not wobble as the
+              appliance re-counts a frozen window (see page_total for the live count).
             - total_is_known: Whether `total` is authoritative (False => unknown)
+            - page_total: The raw FortiAnalyzer total-count observed for this page's
+              search (the live per-page figure; equals total on page 0)
+            - initial_total: The first-page baseline (equals total on page 0)
+            - total_count_stability: "single_observation" on page 0 (or "unknown" when
+              no count was returned)
+            - total_drift_detected: False on page 0; see fetch_more_logs for drift
+            - total_delta: 0 on page 0 when known, else None
+            - has_more_basis: which figure has_more was computed against
+              ("stable_total" | "best_effort_max_observed_total" |
+              "best_effort_page_total" | "full_page_heuristic")
             - percentage: Search completion percentage (100 on success)
             - tid: Reusable pagination handle (pass to fetch_more_logs)
             - has_more: Whether more results remain beyond this page
@@ -643,6 +655,12 @@ async def query_logs(
         next_offset = offset + count if has_more else None
         handle = page["tid"]
 
+        # Page 0 is the Baseline total for this handle; there is nothing to
+        # compare against yet (see ADR-0002 / fetch_more_logs for drift handling).
+        page0_stability = "single_observation" if total_is_known else "unknown"
+        page0_basis = "stable_total" if total_is_known else "full_page_heuristic"
+        page0_delta = 0 if total_is_known else None
+
         warnings = build_warnings(
             requested_limit=requested_limit,
             limit=limit,
@@ -671,6 +689,7 @@ async def query_logs(
                 "timezone": tz_name,
                 "time_basis_source": time_basis_source,
                 "clock_skew_seconds": clock_skew_seconds,
+                "initial_total": total,
             },
         )
 
@@ -679,6 +698,12 @@ async def query_logs(
             "count": count,
             "total": total,
             "total_is_known": total_is_known,
+            "page_total": total,
+            "initial_total": total,
+            "total_count_stability": page0_stability,
+            "total_drift_detected": False,
+            "total_delta": page0_delta,
+            "has_more_basis": page0_basis,
             "percentage": 100,
             "tid": handle,
             "has_more": has_more,
@@ -798,13 +823,28 @@ async def fetch_more_logs(
             - count: Number of logs returned in this page
             - logs: List of log entries
             - tid, adom, logtype, filter, device: Echoed pagination context
-            - total, total_is_known, has_more: Pagination metadata
+            - total: The handle's first-page Baseline total (stays fixed across pages;
+              None if no baseline was ever captured). It is NOT this page's live count.
+            - page_total: The raw FortiAnalyzer total-count observed for THIS page's
+              re-run search (the live figure; may differ from total on a busy window)
+            - initial_total: The first-page baseline `total` was derived from
+            - total_count_stability: "stable" (page == baseline) | "drifted" (page !=
+              baseline) | "unknown" (no comparable count this page)
+            - total_drift_detected: True when this page's count disagrees with the baseline
+            - total_delta: page_total - initial_total when both known, else None
+            - has_more_basis: which figure has_more was computed against
+              ("stable_total" | "best_effort_max_observed_total" |
+              "best_effort_page_total" | "full_page_heuristic")
+            - total_is_known, has_more: Pagination metadata (total_is_known reflects the
+              baseline `total`)
             - next_offset: Offset for the next page, or None when has_more is False
             - offset, limit: Paging echoes (the clamped values actually used)
             - timezone, time_basis: FAZ timezone context
-            - warnings: Advisory strings
+            - warnings: Advisory strings (incl. a drift notice when total_drift_detected)
         On error, a structured envelope: {status: "error", error: <machine code>,
         message, operation, retry_count, plus tid/adom/recommendation where relevant}.
+        A handle is bound to its ADOM: passing a different `adom` returns
+        error="adom_mismatch".
 
     Example:
         >>> # Get first 100 logs
@@ -831,8 +871,21 @@ async def fetch_more_logs(
                 "search handle is not known to this server process",
             )
 
+        # The handle is bound to the ADOM query_logs ran under: comparing a
+        # baseline from one ADOM against a page from another is meaningless.
         if adom is None:
             adom = context["adom"]
+        elif adom != context["adom"]:
+            return error_response(
+                error="adom_mismatch",
+                message=(
+                    f"This handle is bound to ADOM {context['adom']!r}; it cannot be paged under "
+                    f"ADOM {adom!r}. Re-run query_logs to search a different ADOM."
+                ),
+                operation="fetch_more_logs",
+                adom=adom,
+                tid=tid,
+            )
         adom = validate_adom(adom)
 
         requested_limit = limit
@@ -867,26 +920,86 @@ async def fetch_more_logs(
 
         logs = page["logs"]
         count = len(logs)
-        total = page["total"]
-        total_is_known = total is not None
-        has_more = _compute_has_more(offset, count, limit, total)
-        next_offset = offset + count if has_more else None
+        page_total = page["total"]
+        initial_total = context.get("initial_total")
         timezone = context.get("timezone", "unknown")
         time_basis_source = context.get("time_basis_source", "unknown")
         clock_skew_seconds = context.get("clock_skew_seconds")
 
+        # Compare this page's raw total-count against the first-page Baseline
+        # total. The response `total` is always the baseline (or None when no
+        # baseline was ever captured); `page_total` carries the live observation.
+        # See ADR-0002 for the full branch table.
+        if initial_total is not None and page_total is not None and page_total != initial_total:
+            response_total = initial_total
+            total_count_stability = "drifted"
+            total_drift_detected = True
+            total_delta = page_total - initial_total
+        elif initial_total is not None and page_total == initial_total:
+            response_total = initial_total
+            total_count_stability = "stable"
+            total_drift_detected = False
+            total_delta = 0
+        else:
+            # No comparable pair: either no baseline, or this page omitted the
+            # count. Keep the baseline if we have one, else stay None (unknown).
+            response_total = initial_total
+            total_count_stability = "unknown"
+            total_drift_detected = False
+            total_delta = None
+        total_is_known = response_total is not None
+
+        # has_more is decoupled from the response `total`: page against the best
+        # available figure so a short page never stops paging early (favor
+        # completeness, best-effort -- see ADR-0002).
+        if total_drift_detected:
+            paging_total = max(initial_total, page_total)
+            has_more_basis = "best_effort_max_observed_total"
+        elif initial_total is not None:
+            paging_total = initial_total
+            has_more_basis = "stable_total"
+        elif page_total is not None:
+            paging_total = page_total
+            has_more_basis = "best_effort_page_total"
+        else:
+            paging_total = None
+            has_more_basis = "full_page_heuristic"
+        has_more = _compute_has_more(offset, count, limit, paging_total)
+        next_offset = offset + count if has_more else None
+
+        # Size the high-volume warning on the largest observed total, not the
+        # (possibly smaller) baseline returned as `total`.
         warnings = build_warnings(
             requested_limit=requested_limit,
             limit=limit,
-            total=total,
-            total_is_known=total_is_known,
+            total=paging_total,
+            total_is_known=paging_total is not None,
             timezone=timezone,
             has_more=has_more,
         )
-        if count == 0 and total_is_known and total is not None and total > offset:
+        if count == 0 and paging_total is not None and paging_total > offset:
             warnings.append(
                 "FortiAnalyzer reports more matching rows beyond this offset but returned "
                 "an empty page; the search task may have been reaped -- re-run query_logs."
+            )
+        if total_drift_detected:
+            warnings.append(
+                "FortiAnalyzer total-count changed between pages for this fixed window; total is "
+                "the first-page baseline and page_total is the latest observation. Because this "
+                "query is being re-run for pagination, row offsets may also shift, so duplicate or "
+                "skipped rows are possible. Treat this broad/high-volume result as non-exact."
+            )
+            logger.info(
+                "logsearch total-count drift on handle %s: adom=%s logtype=%s offset=%s "
+                "initial_total=%s page_total=%s delta=%s window=%s",
+                tid,
+                adom,
+                context.get("logtype"),
+                offset,
+                initial_total,
+                page_total,
+                total_delta,
+                redact(str(context.get("time_range"))),
             )
 
         return {
@@ -899,8 +1012,14 @@ async def fetch_more_logs(
             "filter": context.get("filter"),
             "device": context.get("device"),
             "time_range": context.get("time_range"),
-            "total": total,
+            "total": response_total,
             "total_is_known": total_is_known,
+            "page_total": page_total,
+            "initial_total": initial_total,
+            "total_count_stability": total_count_stability,
+            "total_drift_detected": total_drift_detected,
+            "total_delta": total_delta,
+            "has_more_basis": has_more_basis,
             "has_more": has_more,
             "next_offset": next_offset,
             "offset": offset,
