@@ -9,6 +9,7 @@ import logging
 from typing import Any
 
 from fortianalyzer_mcp.server import get_faz_client, mcp
+from fortianalyzer_mcp.utils.responses import redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
@@ -141,7 +142,7 @@ async def run_fortiview(
         return {"status": "error", "message": f"Validation error: {e}"}
     except Exception as e:
         logger.error(f"Failed to start FortiView query: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -192,7 +193,7 @@ async def fetch_fortiview(
         }
     except Exception as e:
         logger.error(f"Failed to fetch FortiView results: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -319,7 +320,7 @@ async def get_fortiview_data(
         return {"status": "error", "message": f"Validation error: {e}"}
     except Exception as e:
         logger.error(f"Failed to get FortiView data: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()

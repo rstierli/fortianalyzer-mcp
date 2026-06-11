@@ -5,6 +5,12 @@ All notable changes to FortiAnalyzer MCP Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.1] - 2026-06-10
+
+### Security
+- **Tool error responses no longer echo raw exception text.** The dvm/event/fortiview/incident/ioc/pcap/report/system and log tools returned `str(e)` directly in error responses, bypassing the `redact()` the log/traffic tools already applied; all such sites now route through `redact()` so echoed-back parameters and FortiAnalyzer internals (token, host, session id) cannot leak into a tool response.
+- **Warning when TLS verification is disabled.** Connecting with `FORTIANALYZER_VERIFY_SSL=false` now logs a one-time `WARNING` at connect time — the FortiAnalyzer API token and all log/PCAP data are exposed to man-in-the-middle interception — pointing operators toward trusting the FAZ CA instead.
+
 ## [2.1.0] - 2026-06-10
 
 Stable baseline `total` across pagination handles, plus drift observability and ADOM-bound handles. PR [#19](https://github.com/rstierli/fortianalyzer-mcp/pull/19) by [@inxbit](https://github.com/inxbit). 540 unit tests pass; live-verified end-to-end on a 7.6.7 appliance across 1d/7d/30d windows.

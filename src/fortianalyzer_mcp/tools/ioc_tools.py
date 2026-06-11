@@ -9,6 +9,7 @@ import logging
 from typing import Any
 
 from fortianalyzer_mcp.server import get_faz_client, mcp
+from fortianalyzer_mcp.utils.responses import redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import get_default_adom
 
@@ -66,7 +67,7 @@ async def get_ioc_license_state() -> dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"Failed to get IOC license state: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -114,7 +115,7 @@ async def acknowledge_ioc_events(
         }
     except Exception as e:
         logger.error(f"Failed to acknowledge IOC events: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -166,7 +167,7 @@ async def run_ioc_rescan(
         }
     except Exception as e:
         logger.error(f"Failed to start IOC rescan: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -208,7 +209,7 @@ async def get_ioc_rescan_status(
         }
     except Exception as e:
         logger.error(f"Failed to get IOC rescan status: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -260,7 +261,7 @@ async def get_ioc_rescan_history(
         }
     except Exception as e:
         logger.error(f"Failed to get IOC rescan history: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -350,4 +351,4 @@ async def run_and_wait_ioc_rescan(
 
     except Exception as e:
         logger.error(f"Failed to run and wait for IOC rescan: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}

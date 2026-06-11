@@ -101,6 +101,12 @@ class FortiAnalyzerClient:
             return
 
         logger.info("Connecting to FortiAnalyzer")
+        if not self.verify_ssl:
+            logger.warning(
+                "TLS verification is DISABLED (FORTIANALYZER_VERIFY_SSL=false) -- the FortiAnalyzer "
+                "API token and all log/PCAP data are exposed to man-in-the-middle interception. "
+                "Prefer trusting the FAZ CA (set the CA bundle) over disabling verification."
+            )
 
         try:
             if self.api_token:

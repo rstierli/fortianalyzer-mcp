@@ -9,6 +9,7 @@ import logging
 from typing import Any
 
 from fortianalyzer_mcp.server import get_faz_client, mcp
+from fortianalyzer_mcp.utils.responses import redact
 from fortianalyzer_mcp.utils.validation import get_default_adom
 
 logger = logging.getLogger(__name__)
@@ -62,7 +63,7 @@ async def list_device_groups(
         }
     except Exception as e:
         logger.error(f"Failed to list device groups: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -103,7 +104,7 @@ async def list_device_vdoms(
         }
     except Exception as e:
         logger.error(f"Failed to list VDOMs for device {device}: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 # =============================================================================
@@ -216,7 +217,7 @@ async def add_device(
         }
     except Exception as e:
         logger.error(f"Failed to add device {name}: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -264,7 +265,7 @@ async def delete_device(
         }
     except Exception as e:
         logger.error(f"Failed to delete device {device}: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -328,7 +329,7 @@ async def add_devices_bulk(
         }
     except Exception as e:
         logger.error(f"Failed to add devices in bulk: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -380,7 +381,7 @@ async def delete_devices_bulk(
         }
     except Exception as e:
         logger.error(f"Failed to delete devices in bulk: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -427,7 +428,7 @@ async def get_device_info(
         return result
     except Exception as e:
         logger.error(f"Failed to get device info for {device}: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -490,4 +491,4 @@ async def search_devices(
         }
     except Exception as e:
         logger.error(f"Failed to search devices: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}

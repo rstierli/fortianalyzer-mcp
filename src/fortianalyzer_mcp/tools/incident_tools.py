@@ -8,6 +8,7 @@ import logging
 from typing import Any
 
 from fortianalyzer_mcp.server import get_faz_client, mcp
+from fortianalyzer_mcp.utils.responses import redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import get_default_adom
 
@@ -95,7 +96,7 @@ async def get_incidents(
         }
     except Exception as e:
         logger.error(f"Failed to get incidents: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -137,7 +138,7 @@ async def get_incident(
         }
     except Exception as e:
         logger.error(f"Failed to get incident {incident_id}: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -181,7 +182,7 @@ async def get_incident_count(
         }
     except Exception as e:
         logger.error(f"Failed to get incident count: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -241,7 +242,7 @@ async def create_incident(
         }
     except Exception as e:
         logger.error(f"Failed to create incident: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -300,7 +301,7 @@ async def update_incident(
         }
     except Exception as e:
         logger.error(f"Failed to update incident {incident_id}: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -353,4 +354,4 @@ async def get_incident_stats(
         }
     except Exception as e:
         logger.error(f"Failed to get incident stats: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}

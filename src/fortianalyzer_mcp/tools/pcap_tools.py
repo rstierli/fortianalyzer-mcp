@@ -17,6 +17,7 @@ from typing import Any
 
 from fortianalyzer_mcp.server import get_faz_client, mcp
 from fortianalyzer_mcp.tools.log_tools import _clamp_timeout, _run_logsearch_page
+from fortianalyzer_mcp.utils.responses import redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
@@ -341,7 +342,7 @@ async def search_ips_logs(
         return {"status": "error", "message": f"Validation error: {e}"}
     except Exception as e:
         logger.error(f"Failed to search IPS logs: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -554,7 +555,7 @@ async def get_pcap_by_session(
         return {"status": "error", "message": f"Validation error: {e}"}
     except Exception as e:
         logger.error(f"Failed to download PCAP for session {session_id}: {e}")
-        return {"status": "error", "session_id": session_id, "message": str(e)}
+        return {"status": "error", "session_id": session_id, "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -672,7 +673,7 @@ async def download_pcap_by_url(
         return {"status": "error", "message": f"Validation error: {e}"}
     except Exception as e:
         logger.error(f"Failed to download PCAP: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -892,7 +893,7 @@ async def search_and_download_pcaps(
         return {"status": "error", "message": f"Validation error: {e}"}
     except Exception as e:
         logger.error(f"Failed to search and download PCAPs: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -995,4 +996,4 @@ async def list_available_pcaps(
         return {"status": "error", "message": f"Validation error: {e}"}
     except Exception as e:
         logger.error(f"Failed to list available PCAPs: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}

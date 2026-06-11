@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 from fortianalyzer_mcp.server import get_faz_client, mcp
+from fortianalyzer_mcp.utils.responses import redact
 from fortianalyzer_mcp.utils.validation import get_default_adom
 
 logger = logging.getLogger(__name__)
@@ -57,7 +58,7 @@ async def get_system_status() -> dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"Failed to get system status: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -89,7 +90,7 @@ async def get_ha_status() -> dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"Failed to get HA status: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 # =============================================================================
@@ -131,7 +132,7 @@ async def list_adoms(
         }
     except Exception as e:
         logger.error(f"Failed to list ADOMs: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -166,7 +167,7 @@ async def get_adom(
         }
     except Exception as e:
         logger.error(f"Failed to get ADOM {name}: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 # =============================================================================
@@ -211,7 +212,7 @@ async def list_devices(
         }
     except Exception as e:
         logger.error(f"Failed to list devices in ADOM {adom}: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -249,7 +250,7 @@ async def get_device(
         }
     except Exception as e:
         logger.error(f"Failed to get device {name}: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 # =============================================================================
@@ -307,7 +308,7 @@ async def list_tasks(
         }
     except Exception as e:
         logger.error(f"Failed to list tasks: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -349,7 +350,7 @@ async def get_task(
         return result
     except Exception as e:
         logger.error(f"Failed to get task {task_id}: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -412,7 +413,7 @@ async def wait_for_task(
 
     except Exception as e:
         logger.error(f"Failed to wait for task {task_id}: {e}")
-        return {"status": "error", "completed": False, "message": str(e)}
+        return {"status": "error", "completed": False, "message": redact(str(e))}
 
 
 # =============================================================================
@@ -452,7 +453,7 @@ async def get_api_ratelimit() -> dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"Failed to get API rate limit: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -518,4 +519,4 @@ async def update_api_ratelimit(
         }
     except Exception as e:
         logger.error(f"Failed to update API rate limit: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}

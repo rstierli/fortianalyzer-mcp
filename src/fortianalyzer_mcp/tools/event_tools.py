@@ -8,6 +8,7 @@ import logging
 from typing import Any
 
 from fortianalyzer_mcp.server import get_faz_client, mcp
+from fortianalyzer_mcp.utils.responses import redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import get_default_adom
 
@@ -94,7 +95,7 @@ async def get_alerts(
         }
     except Exception as e:
         logger.error(f"Failed to get alerts: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -134,7 +135,7 @@ async def get_alert_count(
         }
     except Exception as e:
         logger.error(f"Failed to get alert count: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -176,7 +177,7 @@ async def acknowledge_alerts(
         }
     except Exception as e:
         logger.error(f"Failed to acknowledge alerts: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -218,7 +219,7 @@ async def unacknowledge_alerts(
         }
     except Exception as e:
         logger.error(f"Failed to unacknowledge alerts: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -262,7 +263,7 @@ async def get_alert_logs(
         }
     except Exception as e:
         logger.error(f"Failed to get alert logs: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -300,7 +301,7 @@ async def get_alert_details(
         }
     except Exception as e:
         logger.error(f"Failed to get alert details: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -345,7 +346,7 @@ async def add_alert_comment(
         }
     except Exception as e:
         logger.error(f"Failed to add alert comment: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -391,4 +392,4 @@ async def get_alert_incident_stats(
         }
     except Exception as e:
         logger.error(f"Failed to get alert-incident stats: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}

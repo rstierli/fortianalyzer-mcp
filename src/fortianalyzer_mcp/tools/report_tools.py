@@ -13,6 +13,7 @@ import zipfile
 from typing import Any
 
 from fortianalyzer_mcp.server import get_faz_client, mcp
+from fortianalyzer_mcp.utils.responses import redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
@@ -228,7 +229,7 @@ async def list_report_layouts(adom: str | None = None) -> dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"Failed to list report layouts: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -343,7 +344,7 @@ async def run_report(
         }
     except Exception as e:
         logger.error(f"Failed to run report '{layout}': {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -382,7 +383,7 @@ async def fetch_report(
         }
     except Exception as e:
         logger.error(f"Failed to fetch report status: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -432,7 +433,7 @@ async def get_report_data(
         }
     except Exception as e:
         logger.error(f"Failed to get report data: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -475,7 +476,7 @@ async def get_running_reports(
         }
     except Exception as e:
         logger.error(f"Failed to get running reports: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -527,7 +528,7 @@ async def get_report_history(
         }
     except Exception as e:
         logger.error(f"Failed to get report history: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -685,7 +686,7 @@ async def run_and_wait_report(
 
     except Exception as e:
         logger.error(f"Failed to run and wait for report '{layout}': {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
 
 
 @mcp.tool()
@@ -850,4 +851,4 @@ async def save_report(
         return {"status": "error", "message": f"Validation error: {e}"}
     except Exception as e:
         logger.error(f"Failed to save report: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": redact(str(e))}
