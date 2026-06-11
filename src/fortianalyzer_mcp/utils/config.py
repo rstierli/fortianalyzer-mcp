@@ -72,7 +72,10 @@ class Settings(BaseSettings):
 
     # MCP Server Settings
     MCP_SERVER_HOST: str = Field(
-        default="0.0.0.0",
+        # Operator-controlled bind. 0.0.0.0 is intended for Docker / reverse-proxy
+        # deployments; pair it with MCP_AUTH_TOKEN so the HTTP transport requires
+        # Bearer auth on a non-loopback bind.
+        default="0.0.0.0",  # nosec B104
         description="MCP server bind address",
     )
 

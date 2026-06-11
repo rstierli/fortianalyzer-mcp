@@ -23,7 +23,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           version: "latest"
 
@@ -49,7 +49,7 @@ jobs:
           uv run pytest tests/ --ignore=tests/integration --cov=src/fortianalyzer_mcp --cov-report=xml
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@f2274c2c340e0c81c8f7dc407b2a477b8935f171 # v6
         if: matrix.python-version == '3.12'
         with:
           files: ./coverage.xml
@@ -66,7 +66,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           version: "latest"
 
@@ -82,3 +82,31 @@ jobs:
       - name: Check linting
         run: |
           uv run ruff check src/ tests/
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: |
+          uv venv
+          uv sync --all-extras
+
+      - name: Dependency vulnerability audit (pip-audit)
+        run: |
+          uv run --with pip-audit -- pip-audit --desc
+
+      - name: Static security analysis (bandit)
+        run: |
+          uv run --with bandit -- bandit -r src/ -ll -ii
