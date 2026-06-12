@@ -852,3 +852,5 @@ async def save_report(
     except Exception as e:
         logger.error(f"Failed to save report: {e}")
         return {"status": "error", "message": redact(str(e))}
+
+list_report_templates = list_report_layouts
