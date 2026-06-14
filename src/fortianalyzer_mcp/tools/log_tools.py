@@ -37,10 +37,9 @@ DEFAULT_SEARCH_TIMEOUT = 60
 # *holds* a concurrency slot for its whole budget (poll-before-fetch), a caller
 # passing a huge timeout must not be able to monopolize the slot pool.
 MAX_SEARCH_TIMEOUT = 300
-# Poll cadence: the first logsearch_count check is immediate, then the delay
-# backs off from _INITIAL_POLL_DELAY doubling up to POLL_INTERVAL. logsearch_count
-# is a cheap GET that does not reap the tid or consume a search slot, so an
-# immediate first check returns sub-second searches without a fixed 1s floor.
+# Poll cadence: the first logsearch_fetch is immediate, then the delay backs
+# off from _INITIAL_POLL_DELAY doubling up to POLL_INTERVAL. Sub-second searches
+# return on the first poll without a fixed 1s floor.
 POLL_INTERVAL = 1.0
 _INITIAL_POLL_DELAY = 0.25
 # Appliance maximum for the logsearch fetch limit (rejects > 1000).
@@ -212,42 +211,6 @@ def _coerce_num(value: Any) -> float | None:
     return num if math.isfinite(num) else None
 
 
-def _search_complete(count: dict[str, Any]) -> bool:
-    """Decide whether a logsearch scan has finished (safe to fetch).
-
-    Readiness only -- never the match total; unknown fields are ignored. Complete
-    iff ``progress-percent >= 100`` OR (``total-logs > 0`` and
-    ``scanned-logs >= total-logs``). ``matched-logs`` is deliberately NOT a
-    readiness signal (it proves matches exist, not that scanning is done), and
-    ``estimated-remain-sec`` is not used (live 7.6.7 does not return it). A
-    just-started ``0 >= 0`` scan is not complete; a real zero-result search
-    completes via ``progress-percent >= 100``.
-    """
-    progress = _coerce_num(count.get("progress-percent"))
-    if progress is not None and progress >= 100:
-        return True
-    total_logs = _coerce_num(count.get("total-logs"))
-    scanned = _coerce_num(count.get("scanned-logs"))
-    return (
-        total_logs is not None and total_logs > 0 and scanned is not None and scanned >= total_logs
-    )
-
-
-def _is_unsupported_count_endpoint(exc: Exception) -> bool:
-    """Detect an older build whose ``logsearch/count`` endpoint is absent.
-
-    Only matches a clear missing/unsupported-URL error -- never an invalid-tid,
-    timeout, or generic error (those must NOT trigger the direct-fetch fallback).
-    """
-    msg = str(exc).lower()
-    if "tid" in msg:  # invalid-tid is a different, non-fallback condition
-        return False
-    return any(
-        marker in msg
-        for marker in ("unknown url", "unsupported url", "invalid url", "endpoint not found")
-    )
-
-
 def _page_is_final(logs: list[Any], total: int | None, offset: int) -> bool:
     """Decide whether a ``percentage>=100`` fetch is genuinely complete.
 
@@ -314,22 +277,22 @@ async def _run_logsearch_page_unlocked(
     limit: int,
     timeout: int,
 ) -> dict[str, Any]:
-    """Run one search page: start -> poll ``logsearch_count`` -> fetch once.
+    """Run one search page: start -> poll ``logsearch_fetch`` until complete.
 
-    A FAZ logsearch tid is single-use (the first ``fetch`` reaps it), and the
-    async search needs a moment to finish, so we must NOT fetch before it is
-    ready: doing so returns an incomplete page AND reaps the tid, forcing a
-    re-issue. Instead we poll ``logsearch_count`` (a cheap GET that does not reap)
-    until :func:`_search_complete`, then fetch exactly once. The reported
-    ``total`` comes from the fetch's ``total-count`` (authoritative for this
-    page); count fields are readiness only.
+    The official FAZ JSON-RPC API exposes a single read endpoint
+    (``GET /logview/adom/{adom}/logsearch/{tid}``) that returns BOTH progress
+    (``percentage``) AND the data slice in the same response. We loop on this
+    endpoint, returning when ``percentage`` reaches 100. ``percentage`` is the
+    only spec-documented readiness signal; per the FAZ docs it equals 100 when
+    either the requested number of matching logs has been found, or all matching
+    logs have been scanned.
 
-    Recovery (invalid-tid during count, invalid-tid race during fetch, premature
-    100%) shares one budget of ``MAX_SEARCH_REISSUES`` and is also bounded by the
-    wall-clock ``deadline``; no new start or fetch is issued past the deadline,
-    and every ``count``/``fetch`` await is bounded by the remaining budget. On a
-    non-delivered exit the started tid is best-effort (shielded, bounded)
-    cancelled so a search is never leaked.
+    Recovery (invalid-tid race during fetch, premature 100% empty page) shares
+    one budget of ``MAX_SEARCH_REISSUES`` and is also bounded by the wall-clock
+    ``deadline``; no new start or fetch is issued past the deadline, and every
+    ``fetch`` await is bounded by the remaining budget. On a non-delivered exit
+    the started tid is best-effort (shielded, bounded) cancelled so a search is
+    never leaked.
 
     Returns ``{"timed_out": bool, "tid": int|None, "logs": list, "total": int|None}``.
     """
@@ -339,7 +302,6 @@ async def _run_logsearch_page_unlocked(
     limit = _clamp_limit(limit)
     deadline = loop.time() + timeout
     reissues_left = MAX_SEARCH_REISSUES
-    count_unsupported = bool(getattr(client, "_logsearch_count_unsupported", False))
 
     while True:
         # No new start once the budget is spent.
@@ -359,79 +321,54 @@ async def _run_logsearch_page_unlocked(
         if not tid:
             raise RuntimeError(f"Failed to start search: no TID returned. Response: {start_result}")
 
-        delivered = False  # True once a fetch result is in hand (tid self-reaped)
+        delivered = False  # True once a fetch returned percentage>=100
         try:
             reissue = False
-            # ---- Poll readiness via logsearch_count (does NOT reap the tid) ----
-            if not count_unsupported:
-                poll_delay = _INITIAL_POLL_DELAY
-                while True:
-                    remaining = deadline - loop.time()
-                    if remaining <= 0:
-                        return {"timed_out": True, "tid": tid, "logs": [], "total": None}
-                    try:
-                        count_result = await asyncio.wait_for(
-                            client.logsearch_count(adom, tid), timeout=remaining
-                        )
-                    except TimeoutError:
-                        return {"timed_out": True, "tid": tid, "logs": [], "total": None}
-                    except Exception as exc:
-                        if _is_invalid_tid_error(exc):
-                            reissue = True  # appliance reaped the tid -> recover
-                            break
-                        if _is_unsupported_count_endpoint(exc):
-                            # Older build with no count endpoint: cache and fall
-                            # through to a single direct fetch on this same tid.
-                            client._logsearch_count_unsupported = True
-                            count_unsupported = True
-                            break
-                        raise
-                    if _search_complete(count_result):
+            poll_delay = _INITIAL_POLL_DELAY
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    return {"timed_out": True, "tid": tid, "logs": [], "total": None}
+                try:
+                    fetch_result = await asyncio.wait_for(
+                        client.logsearch_fetch(adom=adom, tid=tid, limit=limit, offset=offset),
+                        timeout=remaining,
+                    )
+                except TimeoutError:
+                    return {"timed_out": True, "tid": tid, "logs": [], "total": None}
+                except Exception as exc:
+                    if _is_invalid_tid_error(exc):
+                        # Appliance reaped the tid mid-poll -> recover.
+                        reissue = True
                         break
-                    remaining = deadline - loop.time()
-                    if remaining <= 0:
-                        return {"timed_out": True, "tid": tid, "logs": [], "total": None}
-                    await asyncio.sleep(min(poll_delay, remaining))
-                    poll_delay = min(poll_delay * 2, POLL_INTERVAL)
+                    raise
+
+                # Per spec: scan complete iff percentage >= 100.
+                percentage = _coerce_num(fetch_result.get("percentage"))
+                if percentage is not None and percentage >= 100:
+                    delivered = True
+                    logs = _normalize_logs(fetch_result.get("data"))
+                    total = _coerce_total(fetch_result.get("total-count"))
+                    if _page_is_final(logs, total, offset):
+                        return {"timed_out": False, "tid": tid, "logs": logs, "total": total}
+                    # Premature 100%: empty page while total claims rows here -> recover.
+                    if reissues_left <= 0:
+                        return {"timed_out": False, "tid": tid, "logs": logs, "total": total}
+                    reissue = True
+                    break
+
+                # Still streaming: sleep, then re-poll the same tid.
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    return {"timed_out": True, "tid": tid, "logs": [], "total": None}
+                await asyncio.sleep(min(poll_delay, remaining))
+                poll_delay = min(poll_delay * 2, POLL_INTERVAL)
 
             if reissue:
                 if reissues_left <= 0:
                     return {"timed_out": True, "tid": tid, "logs": [], "total": None}
                 reissues_left -= 1
                 continue
-
-            # ---- Re-check the deadline: count may complete after it expired ----
-            if loop.time() >= deadline:
-                return {"timed_out": True, "tid": tid, "logs": [], "total": None}
-
-            # ---- Fetch once (reaps tid; returns the page + total-count) ----
-            remaining = deadline - loop.time()
-            try:
-                fetch_result = await asyncio.wait_for(
-                    client.logsearch_fetch(adom=adom, tid=tid, limit=limit, offset=offset),
-                    timeout=remaining,
-                )
-            except TimeoutError:
-                return {"timed_out": True, "tid": tid, "logs": [], "total": None}
-            except Exception as exc:
-                if _is_invalid_tid_error(exc):
-                    # Race: tid reaped between count-complete and our fetch.
-                    if reissues_left <= 0:
-                        return {"timed_out": True, "tid": tid, "logs": [], "total": None}
-                    reissues_left -= 1
-                    continue
-                raise
-            delivered = True
-
-            logs = _normalize_logs(fetch_result.get("data"))
-            total = _coerce_total(fetch_result.get("total-count"))
-            if _page_is_final(logs, total, offset):
-                return {"timed_out": False, "tid": tid, "logs": logs, "total": total}
-            # Premature 100%: empty page while total claims rows here -> recover.
-            if reissues_left <= 0:
-                return {"timed_out": False, "tid": tid, "logs": logs, "total": total}
-            reissues_left -= 1
-            continue
         finally:
             # Any exit without a delivered fetch (generic count/fetch error,
             # cancellation, or deadline) may leave the started search running:

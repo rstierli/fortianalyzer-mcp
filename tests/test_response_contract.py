@@ -11,7 +11,6 @@ from zoneinfo import ZoneInfo
 import pytest
 
 import fortianalyzer_mcp.tools.log_tools as log_tools
-from fortianalyzer_mcp.utils.errors import ResourceNotFoundError
 
 CUSTOM_RANGE = "2024-01-01 00:00:00|2024-01-02 00:00:00"
 _PACIFIC = ZoneInfo("US/Pacific")
@@ -24,9 +23,8 @@ def _rows(n: int) -> list[dict[str, object]]:
 class ContractFaz:
     """Minimal log-search fake with a controllable total and forced errors.
 
-    Honors poll-before-fetch: ``logsearch_count`` reports the scan complete (a
-    cheap GET that does not reap), so the runner polls once and then fetches the
-    page exactly once.
+    ``logsearch_fetch`` returns ``percentage=100`` immediately, so the runner's
+    poll loop completes on the first fetch.
     """
 
     def __init__(
@@ -44,8 +42,7 @@ class ContractFaz:
         self.connected = True
         self.reconnects = 0
         self.start_calls: list[dict[str, object]] = []
-        self.count_calls: list[int] = []
-        self._complete_tids: set[int] = set()
+        self.fetch_calls: list[int] = []
         self._tid = 500
 
     @property
@@ -77,27 +74,10 @@ class ContractFaz:
         self._tid += 1
         return {"tid": self._tid}
 
-    async def logsearch_count(self, adom: str, tid: int) -> dict[str, object]:
-        """Report the scan complete (does not reap the tid)."""
-        self.count_calls.append(tid)
-        self._complete_tids.add(tid)
-        rows = len(self.page)
-        total = self.total if self.total is not None else rows
-        return {
-            "progress-percent": 100,
-            "matched-logs": rows,
-            "scanned-logs": total,
-            "total-logs": total,
-        }
-
     async def logsearch_fetch(
         self, adom: str, tid: int, limit: int = 50, offset: int = 0
     ) -> dict[str, object]:
-        # Poll-before-fetch: a fetch before this tid's count has reported
-        # complete is an invalid-tid error (the live appliance reaps an
-        # un-ready single-use tid on a premature fetch).
-        if tid not in self._complete_tids:
-            raise ResourceNotFoundError(f"Invalid tid {tid}: not complete.", code=-1)
+        self.fetch_calls.append(tid)
         result: dict[str, object] = {
             "percentage": 100,
             "data": list(self.page),
@@ -142,10 +122,9 @@ class TestQueryLogsContractFields:
         assert r["limit"] == 10
         assert r["next_offset"] == 10  # offset + count, has_more
         assert r["warnings"] == []
-        # Poll-before-fetch: the count probe ran before the fetch (the fetch now
-        # raises invalid-tid if called before its count reports complete, so a
-        # successful page proves count was polled first).
-        assert len(fake.count_calls) >= 1
+        # Spec-compliant polling: the runner polls logsearch_fetch until
+        # percentage=100, so at least one fetch must have happened.
+        assert len(fake.fetch_calls) >= 1
         # Old names are gone.
         assert "total_known" not in r
         assert "returned_offset" not in r

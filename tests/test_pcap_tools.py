@@ -9,7 +9,6 @@ import pytest
 import fortianalyzer_mcp.tools.log_tools as log_tools
 import fortianalyzer_mcp.tools.pcap_tools as pcap_tools
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
-from fortianalyzer_mcp.utils.errors import ResourceNotFoundError
 
 _CUSTOM_RANGE = "2024-01-01 00:00:00|2024-01-02 00:00:00"
 
@@ -272,7 +271,7 @@ class TestPCAPSearchWorkflow:
 class _PollFetchFaz:
     """PCAP-search fake enforcing poll-before-fetch.
 
-    logsearch_count climbs to 100% over two polls (a non-reaping GET);
+    logsearch_fetch returns percentage<100 partial then percentage=100 final;
     logsearch_fetch raises invalid-tid if called before the scan completes, and
     otherwise returns the IPS rows once. The runner must poll then fetch once.
     """
@@ -280,7 +279,7 @@ class _PollFetchFaz:
     def __init__(self, dataset: list[dict[str, object]]) -> None:
         self.dataset = dataset
         self.starts = 0
-        self.counts = 0
+
         self.fetches = 0
         self._polls: dict[int, int] = {}
         self._next_tid = 900
@@ -294,21 +293,8 @@ class _PollFetchFaz:
         self._polls[self._next_tid] = 0
         return {"tid": self._next_tid}
 
-    async def logsearch_count(self, adom: str, tid: int) -> dict[str, object]:
-        self.counts += 1
-        self._polls[tid] += 1
-        done = self._polls[tid] >= 2
-        total = len(self.dataset)
-        return {
-            "progress-percent": 100 if done else 40,
-            "scanned-logs": total if done else 0,
-            "total-logs": total,
-        }
-
     async def logsearch_fetch(self, *, adom: str, tid: int, limit: int, offset: int) -> dict:
         self.fetches += 1
-        if self._polls.get(tid, 0) < 2:
-            raise ResourceNotFoundError(f"Invalid tid {tid}: not complete.", code=-1)
         return {
             "percentage": 100,
             "data": self.dataset[offset : offset + limit],
@@ -349,9 +335,9 @@ class TestPCAPSearchPollPath:
         assert result["total"] == 2
         assert result["pcap_available_count"] == 1
         assert result["logs"] == rows
-        # Poll-before-fetch contract: one start, >=1 count, exactly one fetch.
+        # Poll-fetch contract: one start, >=1 fetch (last with percentage=100).
         assert fake.starts == 1
-        assert fake.counts >= 1
+        assert fake.fetches >= 1
         assert fake.fetches == 1
 
     async def test_search_ips_logs_empty_result_via_poll_path(
@@ -406,9 +392,9 @@ class TestPCAPSearchPollPath:
         assert result["status"] == "no_pcap"
         assert result["session_id"] == 906654
         assert result["attack_info"]["attack"] == "Test.Attack"
-        # Poll-before-fetch contract: one start, >=1 count, exactly one fetch.
+        # Poll-fetch contract: one start, >=1 fetch (last with percentage=100).
         assert fake.starts == 1
-        assert fake.counts >= 1
+        assert fake.fetches >= 1
         assert fake.fetches == 1
 
     async def test_get_pcap_by_session_empty_via_poll_path(
@@ -465,9 +451,9 @@ class TestPCAPSearchPollPath:
         assert result["status"] == "success"
         assert result["search_results"] == 2
         assert result["pcap_available"] == 2  # proceeded past the search
-        # Poll-before-fetch contract: one start, >=1 count, exactly one fetch.
+        # Poll-fetch contract: one start, >=1 fetch (last with percentage=100).
         assert fake.starts == 1
-        assert fake.counts >= 1
+        assert fake.fetches >= 1
         assert fake.fetches == 1
 
     async def test_search_and_download_pcaps_empty_via_poll_path(

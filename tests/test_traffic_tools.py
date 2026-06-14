@@ -422,9 +422,6 @@ class TestPolicyPortAnalysisToolBounded:
             async def logsearch_start(self, **_kwargs: object) -> dict[str, int]:
                 return {"tid": 123}
 
-            async def logsearch_count(self, adom: str, tid: int) -> dict[str, object]:
-                return {"progress-percent": 100, "total-logs": 25, "scanned-logs": 25}
-
             async def logsearch_fetch(self, **_kwargs: object) -> dict[str, object]:
                 return {
                     "percentage": 100,
@@ -882,8 +879,7 @@ class TestCoerceLogTotal:
 
 class TestQueryPolicySliceReliability:
     """A bounded slice query routes through log_tools._run_logsearch_page, so it
-    polls logsearch_count (a non-reaping GET) until the scan is complete and then
-    fetches exactly once, re-issuing a fresh search instead of re-fetching a
+    polls logsearch_fetch until percentage=100, re-issuing a fresh search instead of re-fetching a
     single-use (reaped) FortiAnalyzer tid."""
 
     _WINDOW = {"start": "2024-01-01 00:00:00", "end": "2024-01-01 01:00:00"}
@@ -893,53 +889,6 @@ class TestQueryPolicySliceReliability:
     def _fast_polls(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(log_tools, "_INITIAL_POLL_DELAY", 0)
         monkeypatch.setattr(log_tools, "POLL_INTERVAL", 0)
-
-    async def test_reissues_a_fresh_search_on_invalid_tid_during_count(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """An invalid-tid during count (appliance reaped the search mid-poll)
-        re-issues a fresh search rather than fetching a reaped tid."""
-        starts: list[dict[str, object]] = []
-        counts = {"n": 0}
-
-        class FakeClient:
-            async def ensure_connected(self) -> None:
-                return None
-
-            async def logsearch_start(self, **kwargs: object) -> dict[str, int]:
-                starts.append(kwargs)
-                return {"tid": 100 + len(starts)}
-
-            async def logsearch_count(self, adom: str, tid: int) -> dict[str, object]:
-                counts["n"] += 1
-                if counts["n"] == 1:
-                    raise RuntimeError("Invalid tid reaped mid-poll.")
-                return {"progress-percent": 100, "total-logs": 7, "scanned-logs": 7}
-
-            async def logsearch_fetch(self, **_kwargs: object) -> dict[str, object]:
-                return {
-                    "percentage": 100,
-                    "total-count": "7",
-                    "data": [{"dstport": 443, "proto": "6"}],
-                }
-
-            async def logsearch_cancel(self, *_a: object, **_k: object) -> dict[str, object]:
-                return {}
-
-        monkeypatch.setattr(traffic_tools, "_get_client", lambda: FakeClient())
-
-        result = await _query_policy_log_slice(
-            adom="root",
-            device_filter=self._DEVICE,
-            policy_id=2,
-            time_range=self._WINDOW,
-            action="accept",
-        )
-
-        assert len(starts) == 2  # re-issued, did NOT re-fetch a reaped tid
-        assert result["logs"] == [{"dstport": 443, "proto": "6"}]
-        assert result["total_hits"] == 7
-        assert result["total_hits_is_known"] is True
 
     async def test_reissues_a_fresh_search_on_invalid_tid_error(
         self, monkeypatch: pytest.MonkeyPatch
@@ -956,9 +905,6 @@ class TestQueryPolicySliceReliability:
             async def logsearch_start(self, **kwargs: object) -> dict[str, int]:
                 starts.append(kwargs)
                 return {"tid": 200 + len(starts)}
-
-            async def logsearch_count(self, adom: str, tid: int) -> dict[str, object]:
-                return {"progress-percent": 100, "total-logs": 3, "scanned-logs": 3}
 
             async def logsearch_fetch(self, **_kwargs: object) -> dict[str, object]:
                 fetches["n"] += 1
@@ -997,9 +943,6 @@ class TestQueryPolicySliceReliability:
             async def logsearch_start(self, **_kwargs: object) -> dict[str, int]:
                 return {"tid": 1}
 
-            async def logsearch_count(self, adom: str, tid: int) -> dict[str, object]:
-                return {"progress-percent": 100, "total-logs": 1, "scanned-logs": 1}
-
             async def logsearch_fetch(self, **_kwargs: object) -> dict[str, object]:
                 raise RuntimeError("connection reset by peer")
 
@@ -1028,9 +971,6 @@ class TestQueryPolicySliceReliability:
 
             async def logsearch_start(self, **_kwargs: object) -> dict[str, object]:
                 return {}
-
-            async def logsearch_count(self, adom: str, tid: int) -> dict[str, object]:
-                raise AssertionError("must not count without a tid")
 
             async def logsearch_fetch(self, **_kwargs: object) -> dict[str, object]:
                 raise AssertionError("must not fetch without a tid")
@@ -1061,11 +1001,16 @@ class TestQueryPolicySliceReliability:
             async def logsearch_start(self, **_kwargs: object) -> dict[str, int]:
                 return {"tid": 5}
 
-            async def logsearch_count(self, adom: str, tid: int) -> dict[str, object]:
-                return {"progress-percent": 10, "total-logs": 9, "scanned-logs": 0}
-
             async def logsearch_fetch(self, **_kwargs: object) -> dict[str, object]:
-                raise AssertionError("must not fetch a still-running search")
+                # Spec-compliant polling: scan never reaches 100% within the
+                # deadline; each poll returns percentage<100 with empty data.
+                return {
+                    "percentage": 20,
+                    "return-lines": 0,
+                    "data": [],
+                    "tid": 5,
+                    "status": {"code": 0, "message": "in-progress"},
+                }
 
             async def logsearch_cancel(self, adom: str, tid: int) -> dict[str, object]:
                 cancels.append(tid)
@@ -1221,10 +1166,6 @@ class TestPolicyPathEnsuresConnection:
             async def logsearch_start(self, **_kwargs: object) -> dict[str, int]:
                 events.append("start")
                 return {"tid": 1}
-
-            async def logsearch_count(self, adom: str, tid: int) -> dict[str, object]:
-                events.append("count")
-                return {"progress-percent": 100, "total-logs": 3, "scanned-logs": 3}
 
             async def logsearch_fetch(self, **_kwargs: object) -> dict[str, object]:
                 return {

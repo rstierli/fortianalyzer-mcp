@@ -133,27 +133,6 @@ class FakeFaz:
         self._tasks[tid] = {"adom": adom, "alive": True, "attempt": self._start_count, "polls": 0}
         return {"tid": tid}
 
-    async def logsearch_count(self, adom: str, tid: int) -> dict[str, object]:
-        """Report scan progress without reaping the tid (a cheap GET)."""
-        self.count_calls.append(tid)
-        task = self._tasks.get(tid)
-        if task is None or task["adom"] != adom:
-            raise ResourceNotFoundError(f"Invalid tid {tid} for count.", code=-1)
-        # A search reaped before completing (older attempt) surfaces as an
-        # invalid-tid during count, forcing a fresh re-issue.
-        if int(task["attempt"]) < self.complete_on_attempt:
-            task["alive"] = False
-            raise ResourceNotFoundError(f"Invalid tid {tid} reaped mid-poll.", code=-1)
-        task["polls"] = int(task["polls"]) + 1
-        done = (not self.stall) and int(task["polls"]) >= _POLLS_TO_COMPLETE
-        total = len(self.dataset)
-        return {
-            "progress-percent": 100 if done else 50,
-            "matched-logs": min(total, int(task["polls"])),
-            "scanned-logs": total if done else 0,
-            "total-logs": total,
-        }
-
     async def logsearch_fetch(
         self,
         adom: str,
@@ -163,12 +142,37 @@ class FakeFaz:
     ) -> dict[str, object]:
         self.fetch_calls.append(tid)
         task = self._tasks.get(tid)
-        # Poll-before-fetch: fetching a still-running or reaped tid is invalid.
         if task is None or not task["alive"] or task["adom"] != adom:
             raise ResourceNotFoundError(f"Invalid tid {tid} for fetching result.", code=-1)
+        # Model the appliance reaping a search mid-poll: a search whose
+        # start-attempt number is below complete_on_attempt has its fetch raise
+        # an invalid-tid error, forcing the runner to re-issue from scratch.
+        if int(task["attempt"]) < self.complete_on_attempt:
+            task["alive"] = False
+            raise ResourceNotFoundError(f"Invalid tid {tid}: reaped mid-poll.", code=-1)
+        task["polls"] = int(task["polls"]) + 1
+        # Stalled scans never reach percentage=100 (deadline must bound them).
+        if self.stall:
+            return {
+                "percentage": 20,
+                "return-lines": 0,
+                "data": [],
+                "tid": tid,
+                "status": {"code": 0, "message": "in-progress"},
+            }
+        # Spec-compliant polling: return percentage<100 with empty data until the
+        # scan has completed (polls >= _POLLS_TO_COMPLETE), then a percentage=100
+        # response with data. The tid stays alive for in-flight polls; it is
+        # reaped only when a final result is delivered.
         if int(task["polls"]) < _POLLS_TO_COMPLETE:
-            raise ResourceNotFoundError(f"Invalid tid {tid}: search not complete.", code=-1)
-        task["alive"] = False  # single-use: task is reaped after one fetch
+            return {
+                "percentage": 30,
+                "return-lines": 0,
+                "data": [],
+                "tid": tid,
+                "status": {"code": 0, "message": "in-progress"},
+            }
+        task["alive"] = False  # single-use: task is reaped after the final fetch
         page = self.dataset[offset : offset + limit]
         result: dict[str, object] = {
             "percentage": 100,
@@ -388,10 +392,11 @@ class TestReissueOnReap:
         assert result["status"] == "error"
         assert result["error"] == "search_timeout"
         assert "invalid tid" not in result.get("message", "").lower()
-        # A stalled scan is bounded by the deadline, not a fetch loop: the single
-        # search is polled but never fetched.
+        # A stalled scan is bounded by the deadline: the single search is polled
+        # via logsearch_fetch (which returns percentage<100 forever) but never
+        # delivers a final page.
         assert len(fake.start_calls) == 1
-        assert fake.fetch_calls == []
+        assert len(fake.fetch_calls) >= 1
 
 
 class TestUnknownTotal:
@@ -467,17 +472,6 @@ class PrematureFaz:
         self._next_tid += 1
         self._tasks[tid] = self._attempt
         return {"tid": tid}
-
-    async def logsearch_count(self, adom: str, tid: int) -> dict[str, object]:
-        """Always report the scan complete (the premature-100 case)."""
-        self.count_calls.append(tid)
-        total = len(self.dataset)
-        return {
-            "progress-percent": 100,
-            "matched-logs": total,
-            "scanned-logs": total,
-            "total-logs": total,
-        }
 
     async def logsearch_fetch(
         self, adom: str, tid: int, limit: int = 50, offset: int = 0

@@ -777,25 +777,6 @@ class FortiAnalyzerClient:
             offset=offset,
         )
 
-    async def logsearch_count(self, adom: str, tid: int) -> dict[str, Any]:
-        """Get log search count/progress.
-
-        FNDN: GET /logview/adom/{adom}/logsearch/count/{tid}
-
-        Returns:
-            {
-                "progress-percent": 100,
-                "matched-logs": 1234,
-                "scanned-logs": 5000,
-                "total-logs": 10000
-            }
-        """
-        return await self._raw_request(
-            "get",
-            f"/logview/adom/{adom}/logsearch/count/{tid}",
-            apiver=API_VERSION,
-        )
-
     async def logsearch_cancel(self, adom: str, tid: int) -> dict[str, Any]:
         """Cancel a log search task.
 

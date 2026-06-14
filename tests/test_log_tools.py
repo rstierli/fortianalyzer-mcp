@@ -107,19 +107,6 @@ class TestLogSearchClient:
         assert result["data"][0]["srcip"] == "10.0.0.1"
         assert result["data"][1]["srcip"] == "10.0.0.2"
 
-    async def test_logsearch_count_success(
-        self, mock_client_with_logview: FortiAnalyzerClient
-    ) -> None:
-        """Test logsearch_count returns search progress."""
-        result = await mock_client_with_logview.logsearch_count(
-            adom="root",
-            tid=12345,
-        )
-        assert result["progress-percent"] == 100
-        assert result["matched-logs"] == 1234
-        assert result["scanned-logs"] == 5000
-        assert result["total-logs"] == 10000
-
     async def test_get_logfields_success(
         self, mock_client_with_logview: FortiAnalyzerClient
     ) -> None:

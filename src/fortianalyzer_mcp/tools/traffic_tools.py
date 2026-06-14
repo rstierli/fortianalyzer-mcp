@@ -235,12 +235,11 @@ async def _query_policy_log_slice(
     """Query traffic logs and total-count for a single policy/time slice.
 
     Delegates to the shared :func:`_run_logsearch_page` runner, which polls
-    ``logsearch_count`` (a cheap GET that does not reap the single-use ``tid``)
-    until the scan is complete and then fetches exactly once -- so we never fetch
-    a still-running search. The runner owns connection revival, limit/timeout
-    clamping, the global concurrency guard, and all bounded re-issue/cancel
-    recovery (invalid-tid races and 7.6.7 premature-100% empty pages). On a
-    timed-out page an empty result with an unknown total is returned.
+    ``logsearch_fetch`` against the official spec endpoint until ``percentage``
+    reaches 100. The runner owns connection revival, limit/timeout clamping, the
+    global concurrency guard, and all bounded re-issue/cancel recovery
+    (invalid-tid races and premature-100% empty pages). On a timed-out page an
+    empty result with an unknown total is returned.
     """
     client = _get_client()
     filter_str = _build_policy_filter(policy_id, action)

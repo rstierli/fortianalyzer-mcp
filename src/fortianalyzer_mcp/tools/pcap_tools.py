@@ -300,7 +300,7 @@ async def search_ips_logs(
 
         # Clamp here so the timed_out message reflects the effective budget.
         timeout = _clamp_timeout(timeout)
-        # Run one search page (start -> poll logsearch_count -> fetch once).
+        # Run one search page (start -> poll logsearch_fetch until percentage>=100).
         # logtype "attack" for IPS logs.
         page = await _run_logsearch_page(
             client,
@@ -404,7 +404,7 @@ async def get_pcap_by_session(
 
         # Clamp here so the timed_out message reflects the effective budget.
         timeout = _clamp_timeout(timeout)
-        # Run one search page (start -> poll logsearch_count -> fetch once).
+        # Run one search page (start -> poll logsearch_fetch until percentage>=100).
         page = await _run_logsearch_page(
             client,
             adom=adom,
@@ -770,7 +770,7 @@ async def search_and_download_pcaps(
 
         # Clamp here so the timed_out message reflects the effective budget.
         timeout = _clamp_timeout(timeout)
-        # Run one search page (start -> poll logsearch_count -> fetch once).
+        # Run one search page (start -> poll logsearch_fetch until percentage>=100).
         # Get extra in case some fail.
         page = await _run_logsearch_page(
             client,
