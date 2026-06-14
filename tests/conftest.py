@@ -224,9 +224,30 @@ MOCK_FORTIVIEW_RESULTS = {
 
 MOCK_REPORT_TEMPLATES = {
     "data": [
-        {"tid": "template-001", "name": "Security Report"},
-        {"tid": "template-002", "name": "Traffic Analysis"},
+        {
+            "layout-id": 1000050001,
+            "title": "Template - Security Analysis",
+            "language": "en",
+            "content-pack-uuid": "",
+            "content-pack-id": "",
+            "category": "Security",
+            "description": "Security Analysis of traffic, applications, users, threats.",
+            "font-family": "Open Sans",
+            "protected": "enable",
+        },
+        {
+            "layout-id": 1000060002,
+            "title": "Template - Bandwidth and Applications Report",
+            "language": "en",
+            "content-pack-uuid": "",
+            "content-pack-id": "",
+            "category": "Application",
+            "description": "Traffic, Bandwidth, Sessions summaries by users and applications.",
+            "font-family": "Open Sans",
+            "protected": "enable",
+        },
     ],
+    "status": {"code": 0, "message": "Get 2 report templates."},
 }
 
 MOCK_REPORT_LAYOUTS = {

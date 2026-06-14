@@ -233,6 +233,70 @@ async def list_report_layouts(adom: str | None = None) -> dict[str, Any]:
 
 
 @mcp.tool()
+async def list_report_templates(adom: str | None = None) -> dict[str, Any]:
+    """List available read-only report templates in FortiAnalyzer.
+
+    IMPORTANT: Templates are protected blueprints, not runnable reports. To run
+    a report use list_report_layouts() + run_report() instead. Templates are
+    typically cloned into custom layouts via the FortiAnalyzer GUI/CLI.
+
+    Returns templates served by the dedicated FAZ endpoint
+    GET /report/adom/{adom}/template/list, which is distinct from the
+    layout endpoint that list_report_layouts() uses.
+
+    Args:
+        adom: ADOM name (default: from config DEFAULT_ADOM)
+
+    Returns:
+        dict with report templates list including:
+        - layout-id: Template ID (NOT directly runnable — clone first)
+        - title: Human-readable name (e.g., "Template - Security Analysis")
+        - description: Template description
+        - category: Report category (Security, Application, System, ...)
+        - language: Template language (e.g., "en")
+        - content-pack-uuid: Content pack UUID if from a content pack
+
+    Example:
+        >>> result = await list_report_templates("root")
+        >>> for tmpl in result["data"]:
+        ...     print(f"[{tmpl['layout-id']}] {tmpl['title']}")
+    """
+    try:
+        adom = adom or get_default_adom()
+        client = _get_client()
+
+        logger.info(f"Listing report templates in ADOM {adom}")
+
+        result = await client.report_list_templates(adom=adom)
+
+        data = result.get("data", []) if isinstance(result, dict) else result
+        if not isinstance(data, list):
+            data = [data] if data else []
+
+        simplified = [
+            {
+                "layout-id": tmpl.get("layout-id"),
+                "title": tmpl.get("title"),
+                "description": tmpl.get("description", ""),
+                "category": tmpl.get("category", ""),
+                "language": tmpl.get("language", "en"),
+                "content-pack-uuid": tmpl.get("content-pack-uuid", ""),
+            }
+            for tmpl in data
+        ]
+
+        return {
+            "status": "success",
+            "adom": adom,
+            "count": len(simplified),
+            "data": simplified,
+        }
+    except Exception as e:
+        logger.error(f"Failed to list report templates: {e}")
+        return {"status": "error", "message": redact(str(e))}
+
+
+@mcp.tool()
 async def run_report(
     layout: str,
     adom: str | None = None,

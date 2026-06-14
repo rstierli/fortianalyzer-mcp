@@ -143,10 +143,8 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
                 ("get_policy_hits", "Get policy hit statistics"),
             ],
             "reports": [
-                # list_report_templates removed pending API verification --
-                # see Roland's investigation plan; will be reinstated as either
-                # an alias to list_report_layouts or as a distinct templates-
-                # only tool depending on the live API behavior.
+                ("list_report_layouts", "List runnable report layouts"),
+                ("list_report_templates", "List read-only report templates (blueprints)"),
                 ("run_report", "Run a report"),
                 ("fetch_report", "Fetch report status"),
                 ("get_report_data", "Download report data"),
@@ -281,10 +279,8 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
             "get_top_cloud_applications": fortiview_tools.get_top_cloud_applications,
             "get_policy_hits": fortiview_tools.get_policy_hits,
             # Report tools
-            # list_report_templates removed pending API verification --
-            # see Roland's investigation plan; will be reinstated as either
-            # an alias to list_report_layouts or as a distinct templates-only
-            # tool depending on the live API behavior.
+            "list_report_layouts": report_tools.list_report_layouts,
+            "list_report_templates": report_tools.list_report_templates,
             "run_report": report_tools.run_report,
             "fetch_report": report_tools.fetch_report,
             "get_report_data": report_tools.get_report_data,

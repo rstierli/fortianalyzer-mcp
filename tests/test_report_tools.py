@@ -125,6 +125,34 @@ class TestReportClient:
         assert layouts[0]["layout-id"] == 1
         assert layouts[0]["title"] == "Executive Summary"
 
+    async def test_report_list_templates_success(
+        self, mock_client_with_reports: FortiAnalyzerClient
+    ) -> None:
+        """Test report_list_templates returns template list with API shape."""
+        result = await mock_client_with_reports.report_list_templates(adom="root")
+        assert "data" in result
+        templates = result["data"]
+        assert len(templates) == 2
+        # Confirm the spec shape (layout-id, title, content-pack-uuid, protected)
+        # is preserved end-to-end from the dedicated /template/list endpoint.
+        assert templates[0]["layout-id"] == 1000050001
+        assert templates[0]["title"] == "Template - Security Analysis"
+        assert templates[0]["protected"] == "enable"
+        assert templates[0]["content-pack-uuid"] == ""
+        assert templates[1]["category"] == "Application"
+
+    async def test_report_list_templates_not_connected(self) -> None:
+        """Test report_list_templates raises when not connected."""
+        from fortianalyzer_mcp.utils.errors import ConnectionError
+
+        client = FortiAnalyzerClient(
+            host="test-faz.example.com",
+            username="admin",
+            password="password",
+        )
+        with pytest.raises(ConnectionError, match="Not connected"):
+            await client.report_list_templates(adom="root")
+
     async def test_report_run_success(self, mock_client_with_reports: FortiAnalyzerClient) -> None:
         """Test report_run returns TID."""
         result = await mock_client_with_reports.report_run(
