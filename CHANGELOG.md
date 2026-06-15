@@ -5,6 +5,17 @@ All notable changes to FortiAnalyzer MCP Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] - 2026-06-15
+
+Align logsearch poll-before-fetch with the FortiAnalyzer JSON-API spec — drop the non-spec `/logsearch/count/{tid}` endpoint and non-spec `progress-percent` field. PR [#28](https://github.com/rstierli/fortianalyzer-mcp/pull/28). Closes [#27](https://github.com/rstierli/fortianalyzer-mcp/issues/27). 589 unit tests pass; cross-verified against FAZ 7.6.7 and 8.0.0 (same MCP code, both hosts produce the same shape).
+
+### Fixed
+- **Log search no longer hits a non-spec count endpoint that 8.0 rejects.** The 2.0.1 poll-before-fetch contract probed readiness via `/logsearch/count/{tid}` and the non-spec field names `progress-percent` / `total-logs` / `scanned-logs`. That endpoint is not in the FortiAnalyzer JSON-API spec — on 8.0 it returns an error which cascaded into `search_timeout`, slot exhaustion, and the FortiView fallback. Readiness now polls the standard `/logsearch/get/{tid}?limit=0` and the spec-defined `percentage` field — behavior identical on 7.6.7 and 8.0.0, confirmed end-to-end against both versions.
+- **Same slot-leak fix still in force.** The shared budget, semaphore-bounded concurrency, deadline-bounded count/fetch, and shielded best-effort `logsearch_cancel` on non-delivered exits all survive — only the readiness signal changed.
+
+### Removed
+- The non-spec `/logsearch/count/{tid}` probe path (and its `count_unsupported` fallback flag), the non-spec `progress-percent` / `scanned-logs` readiness fields, and the supporting client helpers. The poll-before-fetch contract now uses only documented spec calls.
+
 ## [2.2.0] - 2026-06-12
 
 Fail closed: the streamable-HTTP transport now refuses to start without `MCP_AUTH_TOKEN` unless the operator explicitly opts out with `MCP_ALLOW_NO_AUTH=true`. PR [#25](https://github.com/rstierli/fortianalyzer-mcp/pull/25) by [@inxbit](https://github.com/inxbit). Closes [#20](https://github.com/rstierli/fortianalyzer-mcp/issues/20). 544 unit tests pass.
