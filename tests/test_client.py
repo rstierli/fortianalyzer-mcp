@@ -313,6 +313,36 @@ class TestExecuteResilient:
 
         assert len(calls) == 1
 
+    async def test_no_permission_forces_reconnect_not_dead_session_retry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Code -11 (No permission) is what an expired or closed FAZ session
+        returns per request, so it must force a single re-login and retry rather
+        than retrying the dead session as a transient error."""
+        from fortianalyzer_mcp.utils.errors import APIError
+
+        client = _bare_client()
+        reconnects: list[int] = []
+
+        async def fake_reconnect() -> None:
+            reconnects.append(1)
+
+        monkeypatch.setattr(client, "_force_reconnect", fake_reconnect)
+
+        calls: list[int] = []
+
+        async def factory() -> str:
+            calls.append(1)
+            if len(calls) == 1:
+                raise APIError("No permission for the resource", code=-11)
+            return "ok"
+
+        result = await client._execute_resilient(factory, sleep=_no_sleep)
+
+        assert result == "ok"
+        assert reconnects == [1]  # re-logged in once, did not retry the dead session
+        assert len(calls) == 2
+
     async def test_oserror_retried_then_succeeds(self) -> None:
         """A network OSError is transient and retried."""
         client = _bare_client()
