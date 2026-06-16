@@ -75,7 +75,7 @@ ERROR_CODE_MAP: dict[int, type[FortiAnalyzerError]] = {
     -8: WorkspaceError,  # Workspace locked
     -9: WorkspaceError,  # Workspace uncommitted changes
     -10: APIError,  # Version mismatch
-    -11: TimeoutError,  # Task timeout
+    -11: PermissionError,  # No permission for the resource (session expired or rpc-permit denied)
     -20: AuthenticationError,  # Invalid credentials
     -21: AuthenticationError,  # Token expired
 }

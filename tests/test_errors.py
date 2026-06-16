@@ -113,7 +113,7 @@ class TestErrorCodeMapping:
             (-8, WorkspaceError),
             (-9, WorkspaceError),
             (-10, APIError),
-            (-11, TimeoutError),
+            (-11, PermissionError),
             (-20, AuthenticationError),
             (-21, AuthenticationError),
         ],
@@ -163,10 +163,10 @@ class TestParseFazError:
         error = parse_faz_error(-8, "Workspace locked")
         assert isinstance(error, WorkspaceError)
 
-    def test_timeout_error_code(self):
-        """Test timeout error code."""
-        error = parse_faz_error(-11, "Task timeout")
-        assert isinstance(error, TimeoutError)
+    def test_no_permission_error_code(self):
+        """Test no-permission / session-expired error code."""
+        error = parse_faz_error(-11, "No permission for the resource")
+        assert isinstance(error, PermissionError)
 
     def test_validation_error_code(self):
         """Test validation error code."""

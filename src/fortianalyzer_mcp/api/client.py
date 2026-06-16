@@ -40,10 +40,13 @@ class FortiAnalyzerClient:
     # is handled separately by ensure_connected() (tools call it upfront).
     _TRANSIENT_RETRIES = 2
     _TRANSIENT_BACKOFF_BASE = 0.5  # seconds; doubled each retry
-    # FAZ error codes worth a retry: internal error, task timeout.
-    _TRANSIENT_ERROR_CODES = frozenset({-1, -11})
+    # FAZ error codes worth a retry on the same session: internal/general error.
+    _TRANSIENT_ERROR_CODES = frozenset({-1})
     # FAZ error codes that mean the server session is gone (revive once).
-    _RECONNECTABLE_ERROR_CODES = frozenset({-2, -20, -21})
+    # -11 "No permission for the resource" is what an expired or closed FAZ
+    # session returns on a per-request basis (not a clean no-session error), so a
+    # long-lived client must re-login on it instead of retrying the dead session.
+    _RECONNECTABLE_ERROR_CODES = frozenset({-2, -11, -20, -21})
 
     def __init__(
         self,
