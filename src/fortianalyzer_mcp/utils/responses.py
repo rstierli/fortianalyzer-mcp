@@ -5,6 +5,7 @@ a free-text redactor that keeps secrets out of error messages and logs. These ar
 reused across the log and traffic tools so every error path looks the same.
 """
 
+import math
 import re
 from typing import Any
 
@@ -21,8 +22,13 @@ _HIGH_VOLUME_FLOOR = 10_000
 # "pass") so ordinary text is not mangled; the long-token rule below still masks
 # real session ids/tokens.
 _REDACT_KEYS = sorted(SENSITIVE_FIELDS - {"key", "auth", "pass"}, key=len, reverse=True)
+# Matches bare (adm_pass=x, adm_pass: x) and quoted-key JSON/dict forms
+# ("adm_pass": "x", 'adm_pass': 'x') — the optional closing quote after the key
+# is what lets the separator match on JSON-style payloads.
 _KV_PATTERN = re.compile(
-    r"(?i)\b(" + "|".join(re.escape(k) for k in _REDACT_KEYS) + r")\b\s*[=:]\s*\"?([^\s\"&,;]+)\"?"
+    r"(?i)\b("
+    + "|".join(re.escape(k) for k in _REDACT_KEYS)
+    + r")\b[\"']?\s*[=:]\s*[\"']?([^\s\"'&,;]+)"
 )
 # Opaque token-like run (mirrors sanitize_for_logging's hex>20 heuristic).
 _HEX_TOKEN_PATTERN = re.compile(r"\b[a-fA-F0-9]{20,}\b")
@@ -39,6 +45,28 @@ def redact(text: str) -> str:
     redacted = _KV_PATTERN.sub(lambda m: f"{m.group(1)}={MASK_VALUE}", text)
     redacted = _HEX_TOKEN_PATTERN.sub(MASK_VALUE, redacted)
     return redacted
+
+
+def coerce_num(value: Any) -> float | None:
+    """Coerce a FAZ count/progress field to a finite number for readiness checks.
+
+    Accepts ``int``/``float`` and numeric strings (``"100"``, ``"100.0"``);
+    rejects ``bool``, non-numeric, and non-finite (``inf``/``nan``) values.
+    Returns ``None`` when the field is absent or unusable. Used only for
+    readiness, never for the reported total.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        num = float(value)
+    elif isinstance(value, str):
+        try:
+            num = float(value.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    return num if math.isfinite(num) else None
 
 
 def build_warnings(

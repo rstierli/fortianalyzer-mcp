@@ -6,13 +6,12 @@ Implements the two-step TID-based log search workflow.
 
 import asyncio
 import logging
-import math
 from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.server import get_faz_client, mcp
 from fortianalyzer_mcp.utils.log_clock import resolve_time_window
-from fortianalyzer_mcp.utils.responses import build_warnings, error_response, redact
+from fortianalyzer_mcp.utils.responses import build_warnings, coerce_num, error_response, redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
@@ -190,28 +189,6 @@ def _clamp_timeout(timeout: int) -> int:
     return max(1, min(timeout, MAX_SEARCH_TIMEOUT))
 
 
-def _coerce_num(value: Any) -> float | None:
-    """Coerce a FAZ count/progress field to a finite number for readiness checks.
-
-    Accepts ``int``/``float`` and numeric strings (``"100"``, ``"100.0"``);
-    rejects ``bool``, non-numeric, and non-finite (``inf``/``nan``) values.
-    Returns ``None`` when the field is absent or unusable. Used only for
-    readiness, never for the reported total.
-    """
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        num = float(value)
-    elif isinstance(value, str):
-        try:
-            num = float(value.strip())
-        except ValueError:
-            return None
-    else:
-        return None
-    return num if math.isfinite(num) else None
-
-
 def _page_is_final(logs: list[Any], total: int | None, offset: int) -> bool:
     """Decide whether a ``percentage>=100`` fetch is genuinely complete.
 
@@ -345,7 +322,7 @@ async def _run_logsearch_page_unlocked(
                     raise
 
                 # Per spec: scan complete iff percentage >= 100.
-                percentage = _coerce_num(fetch_result.get("percentage"))
+                percentage = coerce_num(fetch_result.get("percentage"))
                 if percentage is not None and percentage >= 100:
                     delivered = True
                     logs = _normalize_logs(fetch_result.get("data"))
@@ -1073,7 +1050,7 @@ async def get_log_stats(
         >>> print(result['stats'])
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
         device_filter = _build_device_filter(device) if device else None
         stats = await client.get_logstats(adom, device_filter)
@@ -1113,7 +1090,7 @@ async def get_log_fields(
         ...     print(f"{field['name']}: {field['description']}")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
         result = await client.get_logfields(adom, logtype, devtype)
         return {
@@ -1175,7 +1152,7 @@ async def search_traffic_logs(
         ... )
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         # Build filter string using FortiAnalyzer syntax.
         # Every caller-supplied value is validated/sanitized before
         # interpolation to prevent filter injection.
@@ -1190,7 +1167,7 @@ async def search_traffic_logs(
             filters.append(f"dstport=={validate_port(dstport, 'dstport')}")
         if action:
             filters.append(f"action=={validate_traffic_action(action)}")
-        if policy_id:
+        if policy_id is not None:
             if isinstance(policy_id, bool) or not isinstance(policy_id, int) or policy_id < 0:
                 raise ValidationError(
                     f"Invalid policy_id '{policy_id}'. Must be a non-negative integer."
@@ -1277,7 +1254,7 @@ async def search_security_logs(
         ... )
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         # Build filter string. Every caller-supplied value is validated or
         # sanitized before interpolation to prevent filter injection.
         filters = []
@@ -1372,7 +1349,7 @@ async def search_event_logs(
         ... )
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         # Build filter string. Caller-supplied values are validated against
         # allowlists before interpolation to prevent filter injection.
         filters = []
@@ -1443,7 +1420,7 @@ async def get_logfiles_state(
         >>> result = await get_logfiles_state("root", "FGT-001")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
 
         time_range_dict = None

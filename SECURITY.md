@@ -39,5 +39,5 @@ This security policy covers the MCP server code in this repository. It does NOT 
 When using this MCP server:
 - Use API tokens with minimum required permissions
 - Store credentials in environment variables, never in code
-- Use `ALLOWED_OUTPUT_DIRS` to restrict file output locations
+- Use `FAZ_ALLOWED_OUTPUT_DIRS` to restrict file output locations (file output is disabled unless it is set)
 - Run in Docker for additional isolation

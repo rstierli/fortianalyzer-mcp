@@ -14,11 +14,12 @@ from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.server import get_faz_client, mcp
-from fortianalyzer_mcp.utils.responses import redact
+from fortianalyzer_mcp.utils.responses import coerce_num, redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
     assert_within_directory,
+    build_device_filter,
     get_default_adom,
     validate_adom,
     validate_output_path,
@@ -91,7 +92,28 @@ def _convert_to_api_time_period(time_range: str) -> str:
         "90-day": "last-90-days",
     }
 
-    return time_map.get(time_range, "last-7-days")
+    api_period = time_map.get(time_range)
+    if api_period is None:
+        raise ValidationError(
+            f"Unknown time_range {time_range!r}. Valid values: {', '.join(sorted(time_map))}, "
+            "an API period like 'last-N-days', or a custom "
+            "'YYYY-MM-DD HH:MM:SS|YYYY-MM-DD HH:MM:SS' range."
+        )
+    return api_period
+
+
+def _custom_report_period(time_range: str) -> tuple[str | None, str | None]:
+    """Resolve period-start/period-end for a custom ``"start|end"`` range.
+
+    FAZ ignores ``time-period: "other"`` without an explicit window, silently
+    running the report over a default period instead of the requested one.
+    Returns ``(None, None)`` for non-custom ranges. FNDN documents the
+    "YYYY-MM-DD HH:MM" minute format for period-start/period-end.
+    """
+    if "|" not in time_range:
+        return None, None
+    tr = parse_time_range(time_range)
+    return tr["start"][:16], tr["end"][:16]
 
 
 async def _get_layout_id_by_title(client: Any, adom: str, title: str) -> int | None:
@@ -198,7 +220,7 @@ async def list_report_layouts(adom: str | None = None) -> dict[str, Any]:
         ...     print(f"[{layout['layout-id']}] {layout['title']}")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
 
         logger.info(f"Listing report layouts in ADOM {adom}")
@@ -265,7 +287,7 @@ async def list_report_templates(adom: str | None = None) -> dict[str, Any]:
         ...     print(f"[{tmpl['layout-id']}] {tmpl['title']}")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
 
         logger.info(f"Listing report templates in ADOM {adom}")
@@ -343,7 +365,7 @@ async def run_report(
         >>> print(f"TID: {result['tid']}")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
 
         # Step 1: Determine layout_id
@@ -375,19 +397,23 @@ async def run_report(
 
         # Step 3: Convert time range to API format
         time_period = _convert_to_api_time_period(time_range)
+        period_start, period_end = _custom_report_period(time_range)
 
-        # Step 4: Build device filter if specified
-        device_filter = None
-        if device:
-            device_filter = [{"devid": device}]
+        # Step 4: Build device filter if specified (serials -> devid, names -> devname)
+        device_filter = build_device_filter(device) if device else None
 
         # Step 5: Run the report
         logger.info(f"Running report with layout-id {layout_id}, time-period: {time_period}")
+        run_kwargs: dict[str, Any] = {}
+        if period_start and period_end:
+            run_kwargs["period_start"] = period_start
+            run_kwargs["period_end"] = period_end
         result = await client.report_run(
             adom=adom,
             layout_id=layout_id,
             time_period=time_period,
             device=device_filter,
+            **run_kwargs,
         )
 
         tid = result.get("tid") if isinstance(result, dict) else None
@@ -435,7 +461,7 @@ async def fetch_report(
         >>> print(f"Progress: {result.get('data', {}).get('percentage', 0)}%")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
 
         logger.info(f"Fetching report status for TID {tid}")
@@ -485,7 +511,7 @@ async def get_report_data(
         ...     f.write(base64.b64decode(data))
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
 
         logger.info(f"Downloading report data for TID {tid}")
@@ -524,7 +550,7 @@ async def get_running_reports(
         ...     print(f"TID: {report['tid']} - {report.get('percent', 0)}%")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
 
         logger.info(f"Getting running reports in ADOM {adom}")
@@ -570,7 +596,7 @@ async def get_report_history(
         ...     print(f"{report['title']}: {report['state']}")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
         tr = await _parse_time_range(time_range)
 
@@ -644,7 +670,7 @@ async def run_and_wait_report(
         ...     # Use get_report_data(tid=result['tid']) to download
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
 
         # Step 1: Determine layout_id
@@ -669,17 +695,23 @@ async def run_and_wait_report(
                 "message": f"Failed to ensure schedule exists: {schedule_result['error']}",
             }
 
-        # Step 3: Convert time range and build device filter
+        # Step 3: Convert time range and build device filter (serials -> devid)
         time_period = _convert_to_api_time_period(time_range)
-        device_filter = [{"devid": device}] if device else None
+        period_start, period_end = _custom_report_period(time_range)
+        device_filter = build_device_filter(device) if device else None
 
         # Step 4: Start the report
         logger.info(f"Running report with layout-id {layout_id}, time-period: {time_period}")
+        run_kwargs: dict[str, Any] = {}
+        if period_start and period_end:
+            run_kwargs["period_start"] = period_start
+            run_kwargs["period_end"] = period_end
         run_result = await client.report_run(
             adom=adom,
             layout_id=layout_id,
             time_period=time_period,
             device=device_filter,
+            **run_kwargs,
         )
 
         tid = run_result.get("tid") if isinstance(run_result, dict) else None
@@ -691,6 +723,8 @@ async def run_and_wait_report(
             }
 
         # Step 5: Poll for completion using get_running_reports
+        # Bound the wait so one call can't pin the shared client for hours.
+        timeout = max(1, min(timeout, 3600))
         start_time = asyncio.get_running_loop().time()
         poll_interval = 3.0
 
@@ -721,11 +755,13 @@ async def run_and_wait_report(
                     break
 
             if our_report:
-                # Report is still running
-                percentage = our_report.get("percent", our_report.get("percentage", 0))
+                # Report is still running. FAZ may return the progress field
+                # as a string; coerce before comparing (an unusable value
+                # counts as not-finished and the loop keeps polling).
+                percentage = coerce_num(our_report.get("percent", our_report.get("percentage")))
                 logger.info(f"Report {tid} progress: {percentage}%")
 
-                if percentage >= 100:
+                if percentage is not None and percentage >= 100:
                     return {
                         "status": "success",
                         "tid": tid,

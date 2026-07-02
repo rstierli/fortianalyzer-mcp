@@ -75,6 +75,7 @@ class FortiAnalyzerClient:
         self._ever_connected = False
         self._faz_version: tuple[int, int, int] | None = None  # (major, minor, patch)
         self._faz_tz: ZoneInfo | None = None  # cached FAZ system timezone
+        self._faz_tz_detected = False  # True once TZ detection ran to a definitive answer
         # Serialize forced reconnects so concurrent requests that all hit a
         # dropped session perform a single re-login instead of racing to clear
         # and rebuild ``_fmg`` underneath one another. The generation counter
@@ -159,8 +160,12 @@ class FortiAnalyzerClient:
                 logger.info("Successfully connected to FortiAnalyzer")
 
             except AuthenticationError:
+                # Drop the half-built pyfmg instance so repeated failed
+                # connects don't each orphan a requests.Session pool.
+                self._fmg = None
                 raise
             except Exception as e:
+                self._fmg = None
                 logger.error(f"Connection failed: {e}")
                 raise ConnectionError(f"Failed to connect to FortiAnalyzer: {e}") from e
 
@@ -245,7 +250,7 @@ class FortiAnalyzerClient:
             ``ZoneInfo`` for the FAZ system TZ, or ``None`` if it
             couldn't be determined.
         """
-        if self._faz_tz is not None:
+        if self._faz_tz_detected:
             return self._faz_tz
 
         try:
@@ -255,14 +260,21 @@ class FortiAnalyzerClient:
             tz_name = status.get("TZ") or status.get("Time Zone")
             if isinstance(tz_name, str) and tz_name:
                 self._faz_tz = ZoneInfo(tz_name)
+                self._faz_tz_detected = True
                 logger.info(f"Detected FAZ system timezone: {tz_name}")
                 return self._faz_tz
             logger.warning(
                 "FAZ system status missing TZ/Time Zone field; time-range queries may misalign."
             )
+            # Cache the negative outcome: without this, every relative-range
+            # query re-probes /sys/status for the life of the process.
+            self._faz_tz_detected = True
         except ZoneInfoNotFoundError as e:
             logger.warning(f"FAZ reported unknown IANA timezone {e}; falling back to naive")
+            self._faz_tz_detected = True
         except Exception as e:
+            # Probe itself failed (network/session); do NOT cache, so a later
+            # call can still detect the TZ once FAZ is reachable again.
             logger.warning(f"Failed to detect FAZ timezone: {e}; falling back to naive")
         return None
 
@@ -354,6 +366,7 @@ class FortiAnalyzerClient:
         factory: Callable[[], Awaitable[Any]],
         *,
         sleep: Callable[[float], Awaitable[None]] | None = None,
+        idempotent: bool = True,
     ) -> Any:
         """Run an async request factory with reconnect-once + transient retry.
 
@@ -363,9 +376,16 @@ class FortiAnalyzerClient:
         errors are then retried up to ``_TRANSIENT_RETRIES`` with exponential
         backoff. Validation, invalid-tid, and not-connected errors are surfaced
         immediately so callers can handle them.
+
+        ``idempotent=False`` disables the transient retry (network error / FAZ
+        code -1): those errors can fire after the request already executed
+        server-side, so replaying an ADD/SET/EXEC would double-execute it
+        (e.g. create a duplicate incident). The session-error reconnect stays
+        enabled either way — an expired session means the request was never
+        accepted, so replaying it is safe.
         """
         sleeper = sleep or asyncio.sleep
-        retries_left = self._TRANSIENT_RETRIES
+        retries_left = self._TRANSIENT_RETRIES if idempotent else 0
         reconnect_left = 1
         attempt = 0
         while True:
@@ -412,7 +432,7 @@ class FortiAnalyzerClient:
         async def _factory() -> Any:
             return await self._raw_request_once(method, url, **kwargs)
 
-        return await self._execute_resilient(_factory)
+        return await self._execute_resilient(_factory, idempotent=method.lower() == "get")
 
     async def _raw_request_once(self, method: str, url: str, **kwargs: Any) -> Any:
         """Execute raw JSON-RPC request for APIs with non-standard response format.
@@ -493,11 +513,16 @@ class FortiAnalyzerClient:
         # Handle both formats: {"result": {"data": ...}} and {"result": [{"status": ..., "data": ...}]}
         if isinstance(res, list) and len(res) > 0:
             item = res[0]
-            if "status" in item:
-                code = item["status"].get("code", 0)
-                if code != 0:
-                    msg = item["status"].get("message", "Unknown error")
-                    raise parse_faz_error(code, msg, f"{method.upper()} {url}")
+            if isinstance(item, dict) and "status" in item:
+                status = item["status"]
+                # Some endpoints return "status" as a plain string ("ok") the
+                # same way the dict-form branch below tolerates; only a dict
+                # status can carry an error code.
+                if isinstance(status, dict):
+                    code = status.get("code", 0)
+                    if code != 0:
+                        msg = status.get("message", "Unknown error")
+                        raise parse_faz_error(code, msg, f"{method.upper()} {url}")
                 return item.get("data", item)
             return item
         elif isinstance(res, dict):
@@ -535,7 +560,7 @@ class FortiAnalyzerClient:
                 code, response = await asyncio.to_thread(lambda: method(url, **kwargs))
             return self._handle_response(code, response, f"{verb.upper()} {url}")
 
-        return await self._execute_resilient(_factory)
+        return await self._execute_resilient(_factory, idempotent=verb.lower() == "get")
 
     async def get(self, url: str, **kwargs: Any) -> Any:
         """Execute GET request."""
@@ -1305,6 +1330,8 @@ class FortiAnalyzerClient:
         layout_id: int,
         time_period: str = "last-7-days",
         device: list[dict[str, str]] | None = None,
+        period_start: str | None = None,
+        period_end: str | None = None,
     ) -> dict[str, Any]:
         """Run a report.
 
@@ -1321,8 +1348,10 @@ class FortiAnalyzerClient:
             time_period: Time period for report. Options:
                 - Predefined: "last-n-hours", "last-n-days", "last-n-weeks", "last-n-months"
                   e.g., "last-1-hours", "last-7-days", "last-30-days", "last-4-weeks"
-                - "other" with custom start/end in device filter
+                - "other": custom window; requires period_start/period_end
             device: Device filter list [{"devname": "myfw01"}, ...]
+            period_start: Custom window start ("YYYY-MM-DD HH:MM"), only with "other"
+            period_end: Custom window end ("YYYY-MM-DD HH:MM"), only with "other"
         """
         # schedule parameter must be a string of the layout-id
         params: dict[str, Any] = {
@@ -1333,6 +1362,10 @@ class FortiAnalyzerClient:
         }
         if device:
             params["device"] = device
+        if period_start:
+            params["period-start"] = period_start
+        if period_end:
+            params["period-end"] = period_end
 
         return await self._raw_request_dict("add", f"/report/adom/{adom}/run", **params)
 
