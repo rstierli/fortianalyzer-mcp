@@ -146,14 +146,19 @@ async def _apply_custom_window(
     Sets time-period=16 ("other") + period-start/period-end on the schedule
     config object, then READS IT BACK: FAZ silently nulls an unparseable
     timedate, and a run against time-period "other" with no stored window
-    falls back to the layout default — the silent wrong-window bug this
-    machinery exists to prevent. On verification failure the schedule is
+    falls back to the layout default. On verification failure the schedule is
     restored and an error is returned instead of running the report.
+
+    The read-back proves FAZ PARSED the window, not that the report generator
+    consumes it — the caller must keep the window in place until generation
+    finishes (FAZ reads the schedule at generation time, verified live) and
+    should verify the produced report's period.
 
     Note: the schedule object is shared per layout, so two concurrent
     custom-window runs of the same layout can race on it.
 
-    Returns ``{"saved": {...}}`` on success or ``{"error": "..."}``.
+    Returns ``{"saved": {...}, "window": {...}}`` on success or
+    ``{"error": "..."}``.
     """
     tr = parse_time_range(time_range)
     window = {
@@ -188,7 +193,56 @@ async def _apply_custom_window(
                 "instead of the requested window."
             )
         }
-    return {"saved": saved}
+    return {
+        "saved": saved,
+        "window": {"period-start": window["period-start"], "period-end": window["period-end"]},
+    }
+
+
+async def _custom_window_result_fields(
+    client: Any,
+    adom: str,
+    layout_id: int,
+    requested_window: dict[str, str],
+    fetch_info: Any = None,
+) -> dict[str, Any]:
+    """Build result fields describing how trustworthy a custom-window run is.
+
+    Checks (best effort) that the schedule still holds the requested window
+    after generation — a mid-run change of the shared object means the report
+    may cover something else — and surfaces any period metadata the report
+    instance itself exposes so callers can assert the real window.
+    """
+    fields: dict[str, Any] = {"requested_window": dict(requested_window)}
+    warning = (
+        "Custom-window consumption by the report generator is under live "
+        "validation; verify the generated report actually covers the "
+        "requested window before trusting it."
+    )
+    try:
+        stored = _schedule_object(await client.get_report_schedule(adom=adom, layout_id=layout_id))
+        intact = (
+            coerce_num(stored.get("time-period")) == _TIME_PERIOD_OTHER
+            and stored.get("period-start") == requested_window.get("period-start")
+            and stored.get("period-end") == requested_window.get("period-end")
+        )
+        if not intact:
+            warning = (
+                "The shared schedule period changed while the report was "
+                "generating; the report may not cover the requested window."
+            )
+    except Exception as e:  # noqa: BLE001 - decoration must not mask the run result
+        logger.warning(f"Could not verify schedule integrity after report run: {e}")
+    if isinstance(fetch_info, dict):
+        instance_period = {
+            k: fetch_info[k]
+            for k in ("time-period", "period-start", "period-end", "start", "end")
+            if k in fetch_info
+        }
+        if instance_period:
+            fields["report_period"] = instance_period
+    fields["warning"] = warning
+    return fields
 
 
 async def _restore_schedule_window(
@@ -456,7 +510,10 @@ async def run_report(
             - Short format: "1-hour", "6-hour", "12-hour", "24-hour",
               "1-day", "7-day", "30-day", "90-day"
             - API format: "last-7-days", "last-30-days", "last-4-weeks"
-            - Custom: "2024-01-01 00:00:00|2024-01-02 00:00:00"
+            - Custom "start|end" ranges are NOT supported here — they require
+              holding the layout's shared schedule window through generation,
+              which this fire-and-forget tool cannot do. Use
+              run_and_wait_report for custom ranges.
 
     Returns:
         dict with TID for tracking report progress
@@ -499,34 +556,37 @@ async def run_report(
         if schedule_created:
             logger.info(f"Created new schedule for layout-id {layout_id}")
 
-        # Step 3: Convert time range to API format. A custom "start|end" range
-        # must be configured on the schedule config object; the run endpoint
-        # has no window fields and the run's "other" falls back to it.
+        # Step 3: Convert time range to API format. Custom "start|end" ranges
+        # live on the layout's SHARED schedule config object, and FAZ reads it
+        # at GENERATION time (verified live on 7.6.7/8.0.0) — the window must
+        # stay in place until the report finishes. run_report returns right
+        # after submission and therefore cannot restore the schedule safely,
+        # so custom ranges are only supported by run_and_wait_report.
         time_period = _convert_to_api_time_period(time_range)
-        saved_window: dict[str, Any] | None = None
         if time_period == "other":
-            applied = await _apply_custom_window(client, adom, layout_id, time_range)
-            if "error" in applied:
-                return {"status": "error", "message": applied["error"]}
-            saved_window = applied["saved"]
+            return {
+                "status": "error",
+                "message": (
+                    "Custom 'start|end' time ranges are only supported by "
+                    "run_and_wait_report: the window is configured on the "
+                    "layout's shared schedule object and must remain in place "
+                    "until generation completes, which this fire-and-forget "
+                    "tool cannot guarantee. Use run_and_wait_report, or a "
+                    "preset time_range."
+                ),
+            }
 
         # Step 4: Build device filter if specified (serials -> devid, names -> devname)
         device_filter = build_device_filter(device) if device else None
 
-        # Step 5: Run the report. The report instance snapshots the schedule
-        # period at submission, so the window is restored right after the run
-        # is accepted.
+        # Step 5: Run the report
         logger.info(f"Running report with layout-id {layout_id}, time-period: {time_period}")
-        try:
-            result = await client.report_run(
-                adom=adom,
-                layout_id=layout_id,
-                time_period=time_period,
-                device=device_filter,
-            )
-        finally:
-            if saved_window is not None:
-                await _restore_schedule_window(client, adom, layout_id, saved_window)
+        result = await client.report_run(
+            adom=adom,
+            layout_id=layout_id,
+            time_period=time_period,
+            device=device_filter,
+        )
 
         tid = result.get("tid") if isinstance(result, dict) else None
 
@@ -765,7 +825,13 @@ async def run_and_wait_report(
             - Short format: "1-hour", "6-hour", "12-hour", "24-hour",
               "1-day", "7-day", "30-day", "90-day"
             - API format: "last-7-days", "last-30-days", "last-4-weeks"
-            - Custom: "2024-01-01 00:00:00|2024-01-02 00:00:00"
+            - Custom: "2024-01-01 00:00:00|2024-01-02 00:00:00" — applied via
+              the layout's SHARED schedule config object, held in place until
+              generation completes, then restored. Concurrent custom-window
+              runs of the same layout race on that object. The result carries
+              requested_window plus a warning: verify the produced report
+              actually covers the window (generator consumption is still
+              being validated live).
         timeout: Maximum wait time in seconds (default: 300)
 
     Returns:
@@ -808,20 +874,27 @@ async def run_and_wait_report(
             }
 
         # Step 3: Convert time range and build device filter (serials -> devid).
-        # A custom "start|end" range must be configured on the schedule config
-        # object; the run endpoint has no window fields (see _apply_custom_window).
+        # A custom "start|end" range is configured on the schedule config
+        # object and must STAY there until generation completes: FAZ reads the
+        # schedule period at generation time, not at submission (verified live
+        # on 7.6.7/8.0.0 — restoring right after submit made the report cover
+        # the restored default period).
         time_period = _convert_to_api_time_period(time_range)
         device_filter = build_device_filter(device) if device else None
         saved_window: dict[str, Any] | None = None
+        requested_window: dict[str, str] | None = None
         if time_period == "other":
             applied = await _apply_custom_window(client, adom, layout_id, time_range)
             if "error" in applied:
                 return {"status": "error", "message": applied["error"]}
             saved_window = applied["saved"]
+            requested_window = applied["window"]
 
-        # Step 4: Start the report. The report instance snapshots the schedule
-        # period at submission, so the window is restored right after the run
-        # is accepted.
+        # Step 4/5: Start the report and poll to completion. The schedule
+        # window is restored in the finally below — after completion, timeout,
+        # or error — never between submit and completion. On timeout the
+        # in-flight report is abandoned and may end up covering the restored
+        # period; the timeout message says so.
         logger.info(f"Running report with layout-id {layout_id}, time-period: {time_period}")
         try:
             run_result = await client.report_run(
@@ -830,98 +903,124 @@ async def run_and_wait_report(
                 time_period=time_period,
                 device=device_filter,
             )
-        finally:
-            if saved_window is not None:
-                await _restore_schedule_window(client, adom, layout_id, saved_window)
 
-        tid = run_result.get("tid") if isinstance(run_result, dict) else None
-        if not tid:
-            return {
-                "status": "error",
-                "message": "Failed to get TID from report execution",
-                "api_response": run_result,
-            }
-
-        # Step 5: Poll for completion using get_running_reports
-        # Bound the wait so one call can't pin the shared client for hours.
-        timeout = max(1, min(timeout, 3600))
-        start_time = asyncio.get_running_loop().time()
-        poll_interval = 3.0
-
-        while True:
-            elapsed = asyncio.get_running_loop().time() - start_time
-            if elapsed > timeout:
+            tid = run_result.get("tid") if isinstance(run_result, dict) else None
+            if not tid:
                 return {
-                    "status": "timeout",
-                    "tid": tid,
-                    "layout": layout,
-                    "layout_id": layout_id,
-                    "message": f"Report timed out after {timeout}s. Use get_report_data(tid='{tid}') to check if it completed.",
+                    "status": "error",
+                    "message": "Failed to get TID from report execution",
+                    "api_response": run_result,
                 }
 
-            # Check running reports to see if our TID is still in progress
-            running_result = await client.get_running_reports(adom=adom)
-            running_data = (
-                running_result.get("data", []) if isinstance(running_result, dict) else []
-            )
-            if not isinstance(running_data, list):
-                running_data = [running_data] if running_data else []
+            # Bound the wait so one call can't pin the shared client for hours.
+            timeout = max(1, min(timeout, 3600))
+            start_time = asyncio.get_running_loop().time()
+            poll_interval = 3.0
 
-            # Find our report in the running list
-            our_report = None
-            for report in running_data:
-                if report.get("tid") == tid:
-                    our_report = report
-                    break
-
-            if our_report:
-                # Report is still running. FAZ may return the progress field
-                # as a string; coerce before comparing (an unusable value
-                # counts as not-finished and the loop keeps polling).
-                percentage = coerce_num(our_report.get("percent", our_report.get("percentage")))
-                logger.info(f"Report {tid} progress: {percentage}%")
-
-                if percentage is not None and percentage >= 100:
+            while True:
+                elapsed = asyncio.get_running_loop().time() - start_time
+                if elapsed > timeout:
+                    timeout_msg = (
+                        f"Report timed out after {timeout}s. Use "
+                        f"get_report_data(tid='{tid}') to check if it completed."
+                    )
+                    if requested_window is not None:
+                        timeout_msg += (
+                            " The custom window is being restored now, so a "
+                            "report that finishes later may cover the "
+                            "restored default period instead."
+                        )
                     return {
-                        "status": "success",
+                        "status": "timeout",
                         "tid": tid,
                         "layout": layout,
                         "layout_id": layout_id,
-                        "adom": adom,
-                        "time_period": time_period,
-                        "message": "Report completed. Use get_report_data() to download.",
+                        "message": timeout_msg,
                     }
-            else:
-                # Report not in running list - either completed or failed.
-                # Verify via report_fetch instead of assuming success
-                # (state is "generated" on completion; a vanished tid raises).
-                logger.info(f"Report {tid} not in running list, verifying completion")
-                fetch_result = await client.report_fetch(adom=adom, tid=tid)
-                state = fetch_result.get("state") if isinstance(fetch_result, dict) else None
-                if state == "generated":
-                    return {
-                        "status": "success",
-                        "tid": tid,
-                        "layout": layout,
-                        "layout_id": layout_id,
-                        "adom": adom,
-                        "time_period": time_period,
-                        "message": "Report completed. Use get_report_data() to download.",
-                    }
-                if state not in ("pending", "running"):
-                    return {
-                        "status": "error",
-                        "tid": tid,
-                        "layout": layout,
-                        "layout_id": layout_id,
-                        "adom": adom,
-                        "time_period": time_period,
-                        "message": f"Report ended in state '{state}' without completing.",
-                    }
-                # pending/running: not yet visible in the running list
-                # (startup race); fall through and keep polling.
 
-            await asyncio.sleep(poll_interval)
+                # Check running reports to see if our TID is still in progress
+                running_result = await client.get_running_reports(adom=adom)
+                running_data = (
+                    running_result.get("data", []) if isinstance(running_result, dict) else []
+                )
+                if not isinstance(running_data, list):
+                    running_data = [running_data] if running_data else []
+
+                # Find our report in the running list
+                our_report = None
+                for report in running_data:
+                    if report.get("tid") == tid:
+                        our_report = report
+                        break
+
+                if our_report:
+                    # Report is still running. FAZ may return the progress field
+                    # as a string; coerce before comparing (an unusable value
+                    # counts as not-finished and the loop keeps polling).
+                    percentage = coerce_num(our_report.get("percent", our_report.get("percentage")))
+                    logger.info(f"Report {tid} progress: {percentage}%")
+
+                    if percentage is not None and percentage >= 100:
+                        response = {
+                            "status": "success",
+                            "tid": tid,
+                            "layout": layout,
+                            "layout_id": layout_id,
+                            "adom": adom,
+                            "time_period": time_period,
+                            "message": "Report completed. Use get_report_data() to download.",
+                        }
+                        if requested_window is not None:
+                            response.update(
+                                await _custom_window_result_fields(
+                                    client, adom, layout_id, requested_window
+                                )
+                            )
+                        return response
+                else:
+                    # Report not in running list - either completed or failed.
+                    # Verify via report_fetch instead of assuming success
+                    # (state is "generated" on completion; a vanished tid raises).
+                    logger.info(f"Report {tid} not in running list, verifying completion")
+                    fetch_result = await client.report_fetch(adom=adom, tid=tid)
+                    state = fetch_result.get("state") if isinstance(fetch_result, dict) else None
+                    if state == "generated":
+                        response = {
+                            "status": "success",
+                            "tid": tid,
+                            "layout": layout,
+                            "layout_id": layout_id,
+                            "adom": adom,
+                            "time_period": time_period,
+                            "message": "Report completed. Use get_report_data() to download.",
+                        }
+                        if requested_window is not None:
+                            response.update(
+                                await _custom_window_result_fields(
+                                    client, adom, layout_id, requested_window, fetch_result
+                                )
+                            )
+                        return response
+                    if state not in ("pending", "running"):
+                        return {
+                            "status": "error",
+                            "tid": tid,
+                            "layout": layout,
+                            "layout_id": layout_id,
+                            "adom": adom,
+                            "time_period": time_period,
+                            "message": f"Report ended in state '{state}' without completing.",
+                        }
+                    # pending/running: not yet visible in the running list
+                    # (startup race); fall through and keep polling.
+
+                await asyncio.sleep(poll_interval)
+        finally:
+            # Restore the shared schedule's period only after the report has
+            # left the running state (or we gave up): FAZ reads it during
+            # generation, so an earlier restore silently re-windows the report.
+            if saved_window is not None:
+                await _restore_schedule_window(client, adom, layout_id, saved_window)
 
     except Exception as e:
         logger.error(f"Failed to run and wait for report '{layout}': {e}")

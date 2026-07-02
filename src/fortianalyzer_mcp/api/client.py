@@ -1328,8 +1328,10 @@ class FortiAnalyzerClient:
         self,
         adom: str,
         layout_id: int,
-        time_period: str = "last-7-days",
+        time_period: str | None = "last-7-days",
         device: list[dict[str, str]] | None = None,
+        period_start: str | None = None,
+        period_end: str | None = None,
     ) -> dict[str, Any]:
         """Run a report.
 
@@ -1346,22 +1348,32 @@ class FortiAnalyzerClient:
             time_period: Time period for report. Options:
                 - Predefined: "last-n-hours", "last-n-days", "last-n-weeks", "last-n-months"
                   e.g., "last-1-hours", "last-7-days", "last-30-days", "last-4-weeks"
-                - "other": the run falls back to the schedule config's period.
-                  The run endpoint accepts ONLY a preset string here — it has no
-                  period-start/period-end fields (confirmed live on 7.6.7/8.0.0);
-                  a custom window must be configured on the schedule config
-                  object first (see update_report_schedule).
+                - "other": custom window semantics are still being validated
+                  live. Known so far (7.6.7/8.0.0): run-side period dates in
+                  date-first formats are silently ignored, and a schedule
+                  config window (time-period=16 + timedate dates) is stored
+                  but produced an empty report when the run passed "other".
+                - None: omit the time-period key from the run request
+                  entirely (mechanism-discovery knob).
             device: Device filter list [{"devname": "myfw01"}, ...]
+            period_start: Optional run-side window start, passed verbatim
+                (discovery knob; use FortiOS timedate "HH:MM yyyy/mm/dd").
+            period_end: Optional run-side window end, passed verbatim.
         """
         # schedule parameter must be a string of the layout-id
         params: dict[str, Any] = {
             "apiver": API_VERSION,
             "schedule": str(layout_id),
-            "time-period": time_period,
             "runfrom": "GUI",
         }
+        if time_period is not None:
+            params["time-period"] = time_period
         if device:
             params["device"] = device
+        if period_start:
+            params["period-start"] = period_start
+        if period_end:
+            params["period-end"] = period_end
 
         return await self._raw_request_dict("add", f"/report/adom/{adom}/run", **params)
 

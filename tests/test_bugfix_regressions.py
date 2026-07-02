@@ -182,7 +182,12 @@ class TestReportTimeRange:
 
 
 class _ScheduleFakeClient:
-    """Fake FAZ client simulating the schedule config object for report runs."""
+    """Fake FAZ client simulating the schedule config object for report runs.
+
+    Records every call in ``events`` so tests can assert ordering — in
+    particular that the schedule window is restored only AFTER the report
+    left the running state (FAZ reads the schedule at generation time).
+    """
 
     def __init__(self, accept_window: bool = True) -> None:
         self.accept_window = accept_window
@@ -193,18 +198,22 @@ class _ScheduleFakeClient:
             "period-start": None,
             "period-end": None,
         }
+        self.events: list[str] = []
         self.update_calls: list[dict[str, Any]] = []
         self.run_calls: list[dict[str, Any]] = []
 
     async def get_report_schedules(self, adom: str, layout_id: int | None = None) -> dict[str, Any]:
+        self.events.append("get_schedules")
         return {"data": [{"name": str(layout_id)}]}
 
     async def get_report_schedule(self, adom: str, layout_id: int) -> dict[str, Any]:
+        self.events.append("get_schedule")
         return {"data": dict(self.schedule)}
 
     async def update_report_schedule(
         self, adom: str, layout_id: int, fields: dict[str, Any]
     ) -> dict[str, Any]:
+        self.events.append(f"update:{fields.get('time-period')}")
         self.update_calls.append(dict(fields))
         applied = dict(fields)
         if not self.accept_window and applied.get("time-period") == 16:
@@ -218,35 +227,53 @@ class _ScheduleFakeClient:
         self,
         adom: str,
         layout_id: int,
-        time_period: str = "last-7-days",
+        time_period: str | None = "last-7-days",
         device: list[dict[str, str]] | None = None,
+        period_start: str | None = None,
+        period_end: str | None = None,
     ) -> dict[str, Any]:
+        self.events.append("report_run")
         self.run_calls.append(
-            {"layout_id": layout_id, "time_period": time_period, "device": device}
+            {
+                "layout_id": layout_id,
+                "time_period": time_period,
+                "device": device,
+                "period_start": period_start,
+                "period_end": period_end,
+            }
         )
-        return {"tid": 99}
+        return {"tid": "tid-99"}
+
+    async def get_running_reports(self, adom: str) -> dict[str, Any]:
+        self.events.append("get_running")
+        return {"data": []}  # never in the running list -> verify via fetch
+
+    async def report_fetch(self, adom: str, tid: str) -> dict[str, Any]:
+        self.events.append("report_fetch")
+        return {"tid": tid, "state": "generated"}
 
 
 class TestReportCustomWindow:
     """Custom "start|end" ranges are configured on the schedule config object.
 
-    The run endpoint has no period fields (confirmed live on 7.6.7/8.0.0), so
-    the window must be written to the schedule, verified by read-back, and
-    restored after the run.
+    The run endpoint's date-first period params are ignored by FAZ, and the
+    generator reads the schedule at GENERATION time — so the window must be
+    written to the schedule, verified by read-back, held through generation,
+    and only then restored.
     """
 
     CUSTOM = "2026-06-27 00:00:00|2026-06-28 00:00:00"
 
-    async def test_custom_window_configured_and_restored(
+    async def test_custom_window_held_through_generation_then_restored(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         fake = _ScheduleFakeClient()
         _patch_client(monkeypatch, report_tools, fake)
 
-        result = await report_tools.run_report(layout="10002", time_range=self.CUSTOM)
+        result = await report_tools.run_and_wait_report(layout="10002", time_range=self.CUSTOM)
 
         assert result["status"] == "success"
-        assert result["tid"] == 99
+        assert result["tid"] == "tid-99"
         # Window applied: numeric enum 16 + timedate-formatted dates,
         # preserving the existing clock basis.
         assert fake.update_calls[0] == {
@@ -255,11 +282,21 @@ class TestReportCustomWindow:
             "period-start": "00:00 2026/06/27",
             "period-end": "00:00 2026/06/28",
         }
-        # Run referenced the preset string only (no window fields exist there).
-        assert fake.run_calls == [{"layout_id": 10002, "time_period": "other", "device": None}]
-        # Schedule restored to its prior period; no null date write-back.
-        assert fake.update_calls[1]["time-period"] == 5
-        assert "period-start" not in fake.update_calls[1]
+        # Run referenced the preset string only; no run-side window params.
+        assert fake.run_calls[0]["time_period"] == "other"
+        assert fake.run_calls[0]["period_start"] is None
+        # Restore is the LAST schedule write and happens only after the
+        # completion check (report_fetch), never right after report_run.
+        assert fake.update_calls[-1]["time-period"] == 5
+        assert "period-start" not in fake.update_calls[-1]
+        restore_idx = len(fake.events) - 1 - fake.events[::-1].index("update:5")
+        assert restore_idx > fake.events.index("report_fetch")
+        # The result is explicit about what was requested and what to verify.
+        assert result["requested_window"] == {
+            "period-start": "00:00 2026/06/27",
+            "period-end": "00:00 2026/06/28",
+        }
+        assert "warning" in result
 
     async def test_rejected_window_errors_instead_of_wrong_period(
         self, monkeypatch: pytest.MonkeyPatch
@@ -267,15 +304,26 @@ class TestReportCustomWindow:
         fake = _ScheduleFakeClient(accept_window=False)
         _patch_client(monkeypatch, report_tools, fake)
 
-        result = await report_tools.run_report(layout="10002", time_range=self.CUSTOM)
+        result = await report_tools.run_and_wait_report(layout="10002", time_range=self.CUSTOM)
 
         assert result["status"] == "error"
         assert "did not accept the custom report window" in result["message"]
         # The report must NOT run over the layout's default period.
         assert fake.run_calls == []
         # Apply + restore both happened.
-        assert len(fake.update_calls) == 2
-        assert fake.update_calls[1]["time-period"] == 5
+        assert fake.update_calls[-1]["time-period"] == 5
+
+    async def test_run_report_rejects_custom_range(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = _ScheduleFakeClient()
+        _patch_client(monkeypatch, report_tools, fake)
+
+        result = await report_tools.run_report(layout="10002", time_range=self.CUSTOM)
+
+        assert result["status"] == "error"
+        assert "run_and_wait_report" in result["message"]
+        # Fire-and-forget path must not touch the schedule or start a run.
+        assert fake.update_calls == []
+        assert fake.run_calls == []
 
     async def test_preset_range_leaves_schedule_untouched(
         self, monkeypatch: pytest.MonkeyPatch
