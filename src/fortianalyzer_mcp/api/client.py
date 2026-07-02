@@ -1330,8 +1330,6 @@ class FortiAnalyzerClient:
         layout_id: int,
         time_period: str = "last-7-days",
         device: list[dict[str, str]] | None = None,
-        period_start: str | None = None,
-        period_end: str | None = None,
     ) -> dict[str, Any]:
         """Run a report.
 
@@ -1348,10 +1346,12 @@ class FortiAnalyzerClient:
             time_period: Time period for report. Options:
                 - Predefined: "last-n-hours", "last-n-days", "last-n-weeks", "last-n-months"
                   e.g., "last-1-hours", "last-7-days", "last-30-days", "last-4-weeks"
-                - "other": custom window; requires period_start/period_end
+                - "other": the run falls back to the schedule config's period.
+                  The run endpoint accepts ONLY a preset string here — it has no
+                  period-start/period-end fields (confirmed live on 7.6.7/8.0.0);
+                  a custom window must be configured on the schedule config
+                  object first (see update_report_schedule).
             device: Device filter list [{"devname": "myfw01"}, ...]
-            period_start: Custom window start ("YYYY-MM-DD HH:MM"), only with "other"
-            period_end: Custom window end ("YYYY-MM-DD HH:MM"), only with "other"
         """
         # schedule parameter must be a string of the layout-id
         params: dict[str, Any] = {
@@ -1362,10 +1362,6 @@ class FortiAnalyzerClient:
         }
         if device:
             params["device"] = device
-        if period_start:
-            params["period-start"] = period_start
-        if period_end:
-            params["period-end"] = period_end
 
         return await self._raw_request_dict("add", f"/report/adom/{adom}/run", **params)
 
@@ -1475,6 +1471,46 @@ class FortiAnalyzerClient:
 
         return await self._raw_request_dict(
             "get", f"/config/adom/{adom}/sql-report/schedule", **params
+        )
+
+    async def get_report_schedule(
+        self,
+        adom: str,
+        layout_id: int,
+    ) -> dict[str, Any]:
+        """Get one report schedule CONFIG object (period fields included).
+
+        FNDN: GET /config/adom/{adom}/sql-report/schedule/{schedule}
+
+        Unlike :meth:`get_report_schedules` (report-API listing), this reads the
+        raw config object, which is where time-period / period-start /
+        period-end live.
+        """
+        return await self._raw_request_dict(
+            "get",
+            f"/config/adom/{adom}/sql-report/schedule/{layout_id}",
+            apiver=API_VERSION,
+        )
+
+    async def update_report_schedule(
+        self,
+        adom: str,
+        layout_id: int,
+        fields: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Update fields on a report schedule CONFIG object.
+
+        FNDN: UPDATE /config/adom/{adom}/sql-report/schedule/{schedule}
+
+        Used to set a custom report window (time-period=16 "other" +
+        period-start/period-end) before a run, and to restore the previous
+        period afterwards. ``time-period`` is a NUMERIC enum on this object.
+        """
+        return await self._raw_request_dict(
+            "update",
+            f"/config/adom/{adom}/sql-report/schedule/{layout_id}",
+            apiver=API_VERSION,
+            data=fields,
         )
 
     async def create_report_schedule(

@@ -10,6 +10,7 @@ import io
 import logging
 import os
 import zipfile
+from datetime import datetime
 from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
@@ -102,18 +103,121 @@ def _convert_to_api_time_period(time_range: str) -> str:
     return api_period
 
 
-def _custom_report_period(time_range: str) -> tuple[str | None, str | None]:
-    """Resolve period-start/period-end for a custom ``"start|end"`` range.
+# The /report/adom/{adom}/run endpoint accepts ONLY a preset time-period
+# string; it silently ignores period-start/period-end (confirmed live on FAZ
+# 7.6.7 and 8.0.0). A custom window must instead be configured on the layout's
+# SCHEDULE CONFIG object (/config/.../sql-report/schedule/{layout_id}), whose
+# time-period is a NUMERIC enum: today=0, yesterday=1, last-n-hours=2,
+# this-week=3, last-week=4, last-7-days=5, last-n-days=6, last-2-weeks=7,
+# last-14-days=8, this-month=9, last-month=10, last-30-days=11,
+# last-n-weeks=12, this-quarter=13, last-quarter=14, this-year=15, other=16.
+_TIME_PERIOD_OTHER = 16
 
-    FAZ ignores ``time-period: "other"`` without an explicit window, silently
-    running the report over a default period instead of the requested one.
-    Returns ``(None, None)`` for non-custom ranges. FNDN documents the
-    "YYYY-MM-DD HH:MM" minute format for period-start/period-end.
+# FAZ default for a schedule whose previous period is unknown (last-7-days).
+_TIME_PERIOD_DEFAULT = 5
+
+# period-start / period-end are FortiOS `timedate` fields: "HH:MM yyyy/mm/dd"
+# (time first). Minute resolution is all the object stores.
+_PERIOD_TIMEDATE_FMT = "%H:%M %Y/%m/%d"
+
+# Schedule fields saved before a custom-window run and restored afterwards.
+# period-opt is the clock basis (0=device, 1=faz), NOT the range selector.
+_SCHEDULE_PERIOD_FIELDS = ("time-period", "period-opt", "period-start", "period-end")
+
+
+def _format_period_timedate(ts: str) -> str:
+    """Convert a parse_time_range timestamp ('YYYY-MM-DD HH:MM:SS') to timedate."""
+    return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").strftime(_PERIOD_TIMEDATE_FMT)
+
+
+def _schedule_object(result: Any) -> dict[str, Any]:
+    """Normalize a schedule-config GET result to the schedule dict."""
+    obj = result.get("data", result) if isinstance(result, dict) else result
+    if isinstance(obj, list):
+        obj = obj[0] if obj else {}
+    return obj if isinstance(obj, dict) else {}
+
+
+async def _apply_custom_window(
+    client: Any, adom: str, layout_id: int, time_range: str
+) -> dict[str, Any]:
+    """Configure the layout's schedule for a custom report window.
+
+    Sets time-period=16 ("other") + period-start/period-end on the schedule
+    config object, then READS IT BACK: FAZ silently nulls an unparseable
+    timedate, and a run against time-period "other" with no stored window
+    falls back to the layout default — the silent wrong-window bug this
+    machinery exists to prevent. On verification failure the schedule is
+    restored and an error is returned instead of running the report.
+
+    Note: the schedule object is shared per layout, so two concurrent
+    custom-window runs of the same layout can race on it.
+
+    Returns ``{"saved": {...}}`` on success or ``{"error": "..."}``.
     """
-    if "|" not in time_range:
-        return None, None
     tr = parse_time_range(time_range)
-    return tr["start"][:16], tr["end"][:16]
+    window = {
+        "time-period": _TIME_PERIOD_OTHER,
+        "period-start": _format_period_timedate(tr["start"]),
+        "period-end": _format_period_timedate(tr["end"]),
+    }
+
+    current = _schedule_object(await client.get_report_schedule(adom=adom, layout_id=layout_id))
+    saved = {k: current.get(k) for k in _SCHEDULE_PERIOD_FIELDS}
+    # Preserve the existing clock basis; default to the FAZ clock.
+    window["period-opt"] = saved["period-opt"] if saved.get("period-opt") is not None else 1
+
+    await client.update_report_schedule(adom=adom, layout_id=layout_id, fields=window)
+
+    stored = _schedule_object(await client.get_report_schedule(adom=adom, layout_id=layout_id))
+    stored_period = coerce_num(stored.get("time-period"))
+    if (
+        stored_period != _TIME_PERIOD_OTHER
+        or not stored.get("period-start")
+        or not stored.get("period-end")
+    ):
+        await _restore_schedule_window(client, adom, layout_id, saved)
+        return {
+            "error": (
+                "FortiAnalyzer did not accept the custom report window "
+                f"(schedule {layout_id} read back time-period="
+                f"{stored.get('time-period')!r}, period-start="
+                f"{stored.get('period-start')!r}, period-end="
+                f"{stored.get('period-end')!r}). The report was NOT run, "
+                "because it would silently cover the layout's default period "
+                "instead of the requested window."
+            )
+        }
+    return {"saved": saved}
+
+
+async def _restore_schedule_window(
+    client: Any, adom: str, layout_id: int, saved: dict[str, Any]
+) -> None:
+    """Restore the schedule's pre-run period fields (best effort).
+
+    FAZ rejects writing period-start/period-end back to null, so when the
+    schedule previously had no custom window only time-period/period-opt are
+    restored — the stale dates are inert once time-period is not "other".
+    """
+    fields: dict[str, Any] = {
+        # A missing prior value falls back to the FAZ default (last-7-days)
+        # rather than leaving the schedule stuck on the one-off window.
+        "time-period": (
+            saved["time-period"] if saved.get("time-period") is not None else _TIME_PERIOD_DEFAULT
+        ),
+    }
+    if saved.get("period-opt") is not None:
+        fields["period-opt"] = saved["period-opt"]
+    if saved.get("period-start") and saved.get("period-end"):
+        fields["period-start"] = saved["period-start"]
+        fields["period-end"] = saved["period-end"]
+    try:
+        await client.update_report_schedule(adom=adom, layout_id=layout_id, fields=fields)
+    except Exception as e:
+        logger.warning(
+            f"Failed to restore schedule {layout_id} period fields after custom-window run: {e}"
+        )
 
 
 async def _get_layout_id_by_title(client: Any, adom: str, title: str) -> int | None:
@@ -395,26 +499,34 @@ async def run_report(
         if schedule_created:
             logger.info(f"Created new schedule for layout-id {layout_id}")
 
-        # Step 3: Convert time range to API format
+        # Step 3: Convert time range to API format. A custom "start|end" range
+        # must be configured on the schedule config object; the run endpoint
+        # has no window fields and the run's "other" falls back to it.
         time_period = _convert_to_api_time_period(time_range)
-        period_start, period_end = _custom_report_period(time_range)
+        saved_window: dict[str, Any] | None = None
+        if time_period == "other":
+            applied = await _apply_custom_window(client, adom, layout_id, time_range)
+            if "error" in applied:
+                return {"status": "error", "message": applied["error"]}
+            saved_window = applied["saved"]
 
         # Step 4: Build device filter if specified (serials -> devid, names -> devname)
         device_filter = build_device_filter(device) if device else None
 
-        # Step 5: Run the report
+        # Step 5: Run the report. The report instance snapshots the schedule
+        # period at submission, so the window is restored right after the run
+        # is accepted.
         logger.info(f"Running report with layout-id {layout_id}, time-period: {time_period}")
-        run_kwargs: dict[str, Any] = {}
-        if period_start and period_end:
-            run_kwargs["period_start"] = period_start
-            run_kwargs["period_end"] = period_end
-        result = await client.report_run(
-            adom=adom,
-            layout_id=layout_id,
-            time_period=time_period,
-            device=device_filter,
-            **run_kwargs,
-        )
+        try:
+            result = await client.report_run(
+                adom=adom,
+                layout_id=layout_id,
+                time_period=time_period,
+                device=device_filter,
+            )
+        finally:
+            if saved_window is not None:
+                await _restore_schedule_window(client, adom, layout_id, saved_window)
 
         tid = result.get("tid") if isinstance(result, dict) else None
 
@@ -695,24 +807,32 @@ async def run_and_wait_report(
                 "message": f"Failed to ensure schedule exists: {schedule_result['error']}",
             }
 
-        # Step 3: Convert time range and build device filter (serials -> devid)
+        # Step 3: Convert time range and build device filter (serials -> devid).
+        # A custom "start|end" range must be configured on the schedule config
+        # object; the run endpoint has no window fields (see _apply_custom_window).
         time_period = _convert_to_api_time_period(time_range)
-        period_start, period_end = _custom_report_period(time_range)
         device_filter = build_device_filter(device) if device else None
+        saved_window: dict[str, Any] | None = None
+        if time_period == "other":
+            applied = await _apply_custom_window(client, adom, layout_id, time_range)
+            if "error" in applied:
+                return {"status": "error", "message": applied["error"]}
+            saved_window = applied["saved"]
 
-        # Step 4: Start the report
+        # Step 4: Start the report. The report instance snapshots the schedule
+        # period at submission, so the window is restored right after the run
+        # is accepted.
         logger.info(f"Running report with layout-id {layout_id}, time-period: {time_period}")
-        run_kwargs: dict[str, Any] = {}
-        if period_start and period_end:
-            run_kwargs["period_start"] = period_start
-            run_kwargs["period_end"] = period_end
-        run_result = await client.report_run(
-            adom=adom,
-            layout_id=layout_id,
-            time_period=time_period,
-            device=device_filter,
-            **run_kwargs,
-        )
+        try:
+            run_result = await client.report_run(
+                adom=adom,
+                layout_id=layout_id,
+                time_period=time_period,
+                device=device_filter,
+            )
+        finally:
+            if saved_window is not None:
+                await _restore_schedule_window(client, adom, layout_id, saved_window)
 
         tid = run_result.get("tid") if isinstance(run_result, dict) else None
         if not tid:

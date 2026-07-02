@@ -18,11 +18,12 @@ import fortianalyzer_mcp.tools.dvm_tools as dvm_tools
 import fortianalyzer_mcp.tools.fortiview_tools as fortiview_tools
 import fortianalyzer_mcp.tools.ioc_tools as ioc_tools
 import fortianalyzer_mcp.tools.log_tools as log_tools
+import fortianalyzer_mcp.tools.report_tools as report_tools
 import fortianalyzer_mcp.tools.system_tools as system_tools
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.tools.report_tools import (
     _convert_to_api_time_period,
-    _custom_report_period,
+    _format_period_timedate,
 )
 from fortianalyzer_mcp.utils.errors import ValidationError
 from fortianalyzer_mcp.utils.responses import coerce_num
@@ -175,13 +176,118 @@ class TestReportTimeRange:
     def test_custom_range_maps_to_other(self) -> None:
         assert _convert_to_api_time_period("2026-01-01 00:00:00|2026-01-02 00:00:00") == "other"
 
-    def test_custom_period_resolves_window(self) -> None:
-        start, end = _custom_report_period("2026-01-01 00:00:00|2026-01-02 12:30:00")
-        assert start == "2026-01-01 00:00"
-        assert end == "2026-01-02 12:30"
+    def test_period_timedate_format(self) -> None:
+        # FortiOS `timedate` fields are "HH:MM yyyy/mm/dd" (time first).
+        assert _format_period_timedate("2026-01-02 12:30:00") == "12:30 2026/01/02"
 
-    def test_non_custom_period_is_none(self) -> None:
-        assert _custom_report_period("7-day") == (None, None)
+
+class _ScheduleFakeClient:
+    """Fake FAZ client simulating the schedule config object for report runs."""
+
+    def __init__(self, accept_window: bool = True) -> None:
+        self.accept_window = accept_window
+        self.schedule: dict[str, Any] = {
+            "name": "10002",
+            "time-period": 5,  # last-7-days
+            "period-opt": 1,
+            "period-start": None,
+            "period-end": None,
+        }
+        self.update_calls: list[dict[str, Any]] = []
+        self.run_calls: list[dict[str, Any]] = []
+
+    async def get_report_schedules(self, adom: str, layout_id: int | None = None) -> dict[str, Any]:
+        return {"data": [{"name": str(layout_id)}]}
+
+    async def get_report_schedule(self, adom: str, layout_id: int) -> dict[str, Any]:
+        return {"data": dict(self.schedule)}
+
+    async def update_report_schedule(
+        self, adom: str, layout_id: int, fields: dict[str, Any]
+    ) -> dict[str, Any]:
+        self.update_calls.append(dict(fields))
+        applied = dict(fields)
+        if not self.accept_window and applied.get("time-period") == 16:
+            # Simulate FAZ silently nulling an unparseable timedate.
+            applied["period-start"] = None
+            applied["period-end"] = None
+        self.schedule.update(applied)
+        return {"status": {"code": 0}}
+
+    async def report_run(
+        self,
+        adom: str,
+        layout_id: int,
+        time_period: str = "last-7-days",
+        device: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        self.run_calls.append(
+            {"layout_id": layout_id, "time_period": time_period, "device": device}
+        )
+        return {"tid": 99}
+
+
+class TestReportCustomWindow:
+    """Custom "start|end" ranges are configured on the schedule config object.
+
+    The run endpoint has no period fields (confirmed live on 7.6.7/8.0.0), so
+    the window must be written to the schedule, verified by read-back, and
+    restored after the run.
+    """
+
+    CUSTOM = "2026-06-27 00:00:00|2026-06-28 00:00:00"
+
+    async def test_custom_window_configured_and_restored(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = _ScheduleFakeClient()
+        _patch_client(monkeypatch, report_tools, fake)
+
+        result = await report_tools.run_report(layout="10002", time_range=self.CUSTOM)
+
+        assert result["status"] == "success"
+        assert result["tid"] == 99
+        # Window applied: numeric enum 16 + timedate-formatted dates,
+        # preserving the existing clock basis.
+        assert fake.update_calls[0] == {
+            "time-period": 16,
+            "period-opt": 1,
+            "period-start": "00:00 2026/06/27",
+            "period-end": "00:00 2026/06/28",
+        }
+        # Run referenced the preset string only (no window fields exist there).
+        assert fake.run_calls == [{"layout_id": 10002, "time_period": "other", "device": None}]
+        # Schedule restored to its prior period; no null date write-back.
+        assert fake.update_calls[1]["time-period"] == 5
+        assert "period-start" not in fake.update_calls[1]
+
+    async def test_rejected_window_errors_instead_of_wrong_period(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = _ScheduleFakeClient(accept_window=False)
+        _patch_client(monkeypatch, report_tools, fake)
+
+        result = await report_tools.run_report(layout="10002", time_range=self.CUSTOM)
+
+        assert result["status"] == "error"
+        assert "did not accept the custom report window" in result["message"]
+        # The report must NOT run over the layout's default period.
+        assert fake.run_calls == []
+        # Apply + restore both happened.
+        assert len(fake.update_calls) == 2
+        assert fake.update_calls[1]["time-period"] == 5
+
+    async def test_preset_range_leaves_schedule_untouched(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = _ScheduleFakeClient()
+        _patch_client(monkeypatch, report_tools, fake)
+
+        result = await report_tools.run_report(layout="10002", time_range="7-day")
+
+        assert result["status"] == "success"
+        assert fake.update_calls == []
+        assert fake.run_calls[0]["time_period"] == "last-7-days"
 
 
 class TestPercentageCoercion:
