@@ -1,13 +1,14 @@
 """Configuration management for FortiAnalyzer MCP server."""
 
+import json
 import logging
 import stat
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # Compute project root (3 levels up from this file: utils -> fortianalyzer_mcp -> src -> project)
 _PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
@@ -108,10 +109,14 @@ class Settings(BaseSettings):
     )
 
     # MCP Allowed Hosts (for reverse proxy / Docker deployments)
-    MCP_ALLOWED_HOSTS: list[str] = Field(
+    # NoDecode: without it pydantic-settings JSON-decodes the env value for a
+    # list[str] field and a plain "host1,host2" (the documented format) raises
+    # SettingsError at startup before the validator below ever runs.
+    MCP_ALLOWED_HOSTS: Annotated[list[str], NoDecode] = Field(
         default_factory=list,
         description="Additional allowed Host header values for DNS rebinding protection. "
-        "Comma-separated in env var. localhost/127.0.0.1 always allowed by SDK.",
+        "Comma-separated in env var (a JSON array is also accepted). "
+        "localhost/127.0.0.1 always allowed by SDK.",
     )
 
     # Tool Loading Mode
@@ -159,6 +164,22 @@ class Settings(BaseSettings):
         default=False,
         description="Skip write operations in tests",
     )
+
+    @field_validator("MCP_ALLOWED_HOSTS", mode="before")
+    @classmethod
+    def parse_allowed_hosts(cls, v: object) -> object:
+        """Parse MCP_ALLOWED_HOSTS from a comma-separated string or JSON array."""
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return []
+            if s.startswith("["):
+                try:
+                    return json.loads(s)
+                except ValueError:
+                    pass
+            return [h.strip() for h in s.split(",") if h.strip()]
+        return v
 
     @field_validator("FORTIANALYZER_HOST")
     @classmethod
