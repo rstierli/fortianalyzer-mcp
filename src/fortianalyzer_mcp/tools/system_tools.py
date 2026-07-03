@@ -9,9 +9,44 @@ from typing import Any
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.server import get_faz_client, mcp
 from fortianalyzer_mcp.utils.responses import redact
-from fortianalyzer_mcp.utils.validation import get_default_adom, sanitize_for_logging
+from fortianalyzer_mcp.utils.validation import (
+    get_default_adom,
+    sanitize_for_logging,
+    validate_adom,
+    validate_device_name,
+)
 
 logger = logging.getLogger(__name__)
+
+# FAZ /task/task returns ``state`` as a numeric code on the wire (FNDN task
+# schema); some builds/endpoints use the string names instead. Keep both forms
+# working by normalizing to the lowercase name.
+_TASK_STATE_NAMES = {
+    0: "pending",
+    1: "running",
+    2: "cancelling",
+    3: "cancelled",
+    4: "done",
+    5: "error",
+    6: "aborting",
+    7: "aborted",
+    8: "warning",
+    9: "to_continue",
+    10: "unknown",
+}
+_TASK_STATE_CODES = {name: code for code, name in _TASK_STATE_NAMES.items()}
+_TASK_TERMINAL_STATES = {"done", "error", "cancelled", "aborted", "warning"}
+
+
+def _normalize_task_state(state: Any) -> str:
+    """Normalize a FAZ task state (numeric code or string name) to its name."""
+    if isinstance(state, bool):
+        return "unknown"
+    if isinstance(state, int):
+        return _TASK_STATE_NAMES.get(state, "unknown")
+    if isinstance(state, str):
+        return state.strip().lower()
+    return "unknown"
 
 
 def _get_client() -> FortiAnalyzerClient:
@@ -159,6 +194,7 @@ async def get_adom(
         >>> print(f"Mode: {result['adom'].get('mode', 'N/A')}")
     """
     try:
+        name = validate_adom(name)
         client = _get_client()
         loadsub = 1 if include_details else 0
         adom = await client.get_adom(name, loadsub=loadsub)
@@ -203,7 +239,7 @@ async def list_devices(
         ...     print(f"{device['name']}: {device.get('ip', 'N/A')}")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
         devices = await client.list_devices(adom, fields=fields)
         return {
@@ -243,7 +279,8 @@ async def get_device(
         >>> print(f"Platform: {result['device']['platform_str']}")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
+        name = validate_device_name(name)
         client = _get_client()
         loadsub = 1 if include_details else 0
         device = await client.get_device(name, adom, loadsub=loadsub)
@@ -300,10 +337,19 @@ async def list_tasks(
     try:
         client = _get_client()
 
-        # Build filter if state specified
+        # Build filter if state specified. FAZ stores state as a numeric code,
+        # so translate the documented state names before filtering; a name the
+        # enum doesn't know is rejected instead of silently matching nothing.
         filter_list = None
         if filter_state:
-            filter_list = [["state", "==", filter_state]]
+            state_code = _TASK_STATE_CODES.get(filter_state.strip().lower())
+            if state_code is None:
+                valid = ", ".join(sorted(_TASK_STATE_CODES))
+                return {
+                    "status": "error",
+                    "message": f"Invalid filter_state '{filter_state}'. Must be one of: {valid}",
+                }
+            filter_list = [["state", "==", state_code]]
 
         tasks = await client.list_tasks(filter=filter_list)
         return {
@@ -389,6 +435,11 @@ async def wait_for_task(
     import asyncio
 
     try:
+        # Clamp caller-supplied values: a zero/negative poll_interval would turn
+        # the loop below into a tight spin against the shared FAZ client, and an
+        # oversized timeout would pin it for hours.
+        poll_interval = max(1, poll_interval)
+        timeout = max(1, min(timeout, 3600))
         client = _get_client()
         start_time = asyncio.get_running_loop().time()
 
@@ -402,12 +453,12 @@ async def wait_for_task(
                 }
 
             task = await client.get_task(task_id)
-            state = task.get("state", "").lower()
+            state = _normalize_task_state(task.get("state"))
 
-            # Check if completed
-            if state in ("done", "error", "cancelled"):
+            # Check if completed ("warning" = finished with warnings)
+            if state in _TASK_TERMINAL_STATES:
                 return {
-                    "status": "success" if state == "done" else "error",
+                    "status": "success" if state in ("done", "warning") else "error",
                     "task": task,
                     "completed": True,
                     "message": f"Task completed with state: {state}",

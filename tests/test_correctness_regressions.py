@@ -116,8 +116,10 @@ class TestRunAndWaitReportVerifiesCompletion:
                 self,
                 adom: str,
                 layout_id: int,
-                time_period: str = "last-7-days",
+                time_period: str | None = "last-7-days",
                 device: list[dict[str, str]] | None = None,
+                period_start: str | None = None,
+                period_end: str | None = None,
             ) -> dict[str, Any]:
                 return {"tid": "TID-1"}
 
@@ -169,8 +171,10 @@ class TestRunAndWaitReportVerifiesCompletion:
                 self,
                 adom: str,
                 layout_id: int,
-                time_period: str = "last-7-days",
+                time_period: str | None = "last-7-days",
                 device: list[dict[str, str]] | None = None,
+                period_start: str | None = None,
+                period_end: str | None = None,
             ) -> dict[str, Any]:
                 return {"tid": "TID-1"}
 

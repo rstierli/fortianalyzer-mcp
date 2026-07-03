@@ -11,7 +11,7 @@ from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.server import get_faz_client, mcp
 from fortianalyzer_mcp.utils.responses import redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
-from fortianalyzer_mcp.utils.validation import get_default_adom
+from fortianalyzer_mcp.utils.validation import get_default_adom, validate_adom
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +69,10 @@ async def get_alerts(
         >>> print(f"Found {result.get('count', 0)} alerts")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
+        # Enforce the documented 1-2000 range and non-negative offset.
+        limit = max(1, min(limit, 2000))
+        offset = max(0, offset)
         client = _get_client()
         tr = await _parse_time_range(time_range)
 
@@ -116,7 +119,7 @@ async def get_alert_count(
         dict with alert count
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
         tr = await _parse_time_range(time_range)
 
@@ -158,7 +161,7 @@ async def acknowledge_alerts(
         dict with acknowledgment result
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
 
         logger.info(f"Acknowledging {len(alert_ids)} alerts in ADOM {adom} by {user}")
@@ -200,7 +203,7 @@ async def unacknowledge_alerts(
         dict with result
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
 
         logger.info(f"Unacknowledging {len(alert_ids)} alerts in ADOM {adom} by {user}")
@@ -244,7 +247,10 @@ async def get_alert_logs(
         dict with alert logs
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
+        # Enforce the documented 1-2000 range and non-negative offset.
+        limit = max(1, min(limit, 2000))
+        offset = max(0, offset)
         client = _get_client()
 
         logger.info(f"Getting logs for {len(alert_ids)} alerts in ADOM {adom}")
@@ -285,7 +291,7 @@ async def get_alert_details(
         dict with alert details
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
 
         logger.info(f"Getting details for {len(alert_ids)} alerts in ADOM {adom}")
@@ -326,7 +332,7 @@ async def add_alert_comment(
         dict with result
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
 
         logger.info(f"Adding comment to alert {alert_id} in ADOM {adom}")
@@ -372,7 +378,7 @@ async def get_alert_incident_stats(
         dict with statistics
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
         tr = await _parse_time_range(time_range)
 

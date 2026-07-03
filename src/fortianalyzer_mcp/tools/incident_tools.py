@@ -14,6 +14,8 @@ from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
     get_default_adom,
+    validate_adom,
+    validate_incident_id,
     validate_severity,
 )
 
@@ -77,7 +79,10 @@ async def get_incidents(
         >>> print(f"Found {result.get('count', 0)} incidents")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
+        # Enforce the documented 1-2000 range and non-negative offset.
+        limit = max(1, min(limit, 2000))
+        offset = max(0, offset)
         client = _get_client()
         tr = await _parse_time_range(time_range)
 
@@ -128,7 +133,8 @@ async def get_incident(
         >>> print(f"Incident: {result['data']['name']}")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
+        incident_id = validate_incident_id(incident_id)
         client = _get_client()
 
         logger.info(f"Getting incident {incident_id} from ADOM {adom}")
@@ -170,7 +176,7 @@ async def get_incident_count(
         >>> print(f"Total incidents: {result['data']['count']}")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
         tr = await _parse_time_range(time_range)
 
@@ -228,7 +234,7 @@ async def create_incident(
         >>> print(f"Created incident: {result['data']['id']}")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         severity = validate_severity(severity)
         client = _get_client()
 
@@ -291,7 +297,8 @@ async def update_incident(
         ... )
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
+        incident_id = validate_incident_id(incident_id)
         if severity is not None:
             severity = validate_severity(severity)
         if status is not None and status.lower() not in _VALID_INCIDENT_STATUSES:
@@ -355,7 +362,7 @@ async def get_incident_stats(
         >>> print(f"High severity: {result['data']['severity']['high']}")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
         tr = await _parse_time_range(time_range)
 

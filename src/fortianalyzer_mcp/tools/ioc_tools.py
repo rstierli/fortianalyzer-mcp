@@ -12,7 +12,7 @@ from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.server import get_faz_client, mcp
 from fortianalyzer_mcp.utils.responses import redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
-from fortianalyzer_mcp.utils.validation import build_device_filter, get_default_adom
+from fortianalyzer_mcp.utils.validation import build_device_filter, get_default_adom, validate_adom
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +96,7 @@ async def acknowledge_ioc_events(
         ... )
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
 
         logger.info(f"Acknowledging {len(ioc_ids)} IOC events in ADOM {adom}")
@@ -146,7 +146,7 @@ async def run_ioc_rescan(
         >>> # Check progress with get_ioc_rescan_status
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
         tr = await _parse_time_range(time_range)
 
@@ -159,6 +159,13 @@ async def run_ioc_rescan(
         )
 
         tid = result.get("tid") if isinstance(result, dict) else None
+        if not tid:
+            # Without a tid the rescan cannot be tracked; surface the failed
+            # launch instead of a success-shaped payload with tid=None.
+            return {
+                "status": "error",
+                "message": "Failed to get TID from IOC rescan",
+            }
 
         return {
             "status": "success",
@@ -192,7 +199,7 @@ async def get_ioc_rescan_status(
         >>> print(f"Progress: {result['data'].get('percentage', 0)}%")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
 
         logger.info(f"Getting IOC rescan status for TID {tid}")
@@ -233,7 +240,7 @@ async def get_ioc_rescan_history(
         ...     print(f"{scan['time-begin']}: {scan['status']}")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
 
         logger.info(f"Getting IOC rescan history for ADOM {adom}")
@@ -292,7 +299,7 @@ async def run_and_wait_ioc_rescan(
         ...     print(f"Found {result['data'].get('hits', 0)} IOC matches")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
         tr = await _parse_time_range(time_range)
 
@@ -313,6 +320,8 @@ async def run_and_wait_ioc_rescan(
             }
 
         # Poll for completion
+        # Bound the wait so one call can't pin the shared client for hours.
+        timeout = max(1, min(timeout, 3600))
         start_time = asyncio.get_running_loop().time()
         poll_interval = 2.0
 

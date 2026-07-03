@@ -10,15 +10,17 @@ import io
 import logging
 import os
 import zipfile
+from datetime import datetime
 from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.server import get_faz_client, mcp
-from fortianalyzer_mcp.utils.responses import redact
+from fortianalyzer_mcp.utils.responses import coerce_num, redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
     assert_within_directory,
+    build_device_filter,
     get_default_adom,
     validate_adom,
     validate_output_path,
@@ -91,7 +93,34 @@ def _convert_to_api_time_period(time_range: str) -> str:
         "90-day": "last-90-days",
     }
 
-    return time_map.get(time_range, "last-7-days")
+    api_period = time_map.get(time_range)
+    if api_period is None:
+        raise ValidationError(
+            f"Unknown time_range {time_range!r}. Valid values: {', '.join(sorted(time_map))}, "
+            "an API period like 'last-N-days', or a custom "
+            "'YYYY-MM-DD HH:MM:SS|YYYY-MM-DD HH:MM:SS' range."
+        )
+    return api_period
+
+
+# A custom "start|end" window is delivered inside the report RUN's nested
+# ``schedule-param`` object (time-period="other" + the two timedate bounds),
+# NOT on the schedule config object and NOT as flat run params -- both of those
+# fail to scope the window (ignored / empty report on 7.6.7 and 8.0.0, verified
+# live). period-start / period-end are FortiOS ``timedate`` strings:
+# "HH:MM yyyy/mm/dd" (time first, minute resolution).
+_PERIOD_TIMEDATE_FMT = "%H:%M %Y/%m/%d"
+
+
+def _format_period_timedate(ts: str) -> str:
+    """Convert a parse_time_range timestamp ('YYYY-MM-DD HH:MM:SS') to timedate."""
+    return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").strftime(_PERIOD_TIMEDATE_FMT)
+
+
+def _custom_window_timedate(time_range: str) -> tuple[str, str]:
+    """FortiOS ``timedate`` (period-start, period-end) for a custom 'start|end' range."""
+    tr = parse_time_range(time_range)
+    return _format_period_timedate(tr["start"]), _format_period_timedate(tr["end"])
 
 
 async def _get_layout_id_by_title(client: Any, adom: str, title: str) -> int | None:
@@ -198,7 +227,7 @@ async def list_report_layouts(adom: str | None = None) -> dict[str, Any]:
         ...     print(f"[{layout['layout-id']}] {layout['title']}")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
 
         logger.info(f"Listing report layouts in ADOM {adom}")
@@ -265,7 +294,7 @@ async def list_report_templates(adom: str | None = None) -> dict[str, Any]:
         ...     print(f"[{tmpl['layout-id']}] {tmpl['title']}")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
 
         logger.info(f"Listing report templates in ADOM {adom}")
@@ -330,7 +359,8 @@ async def run_report(
             - Short format: "1-hour", "6-hour", "12-hour", "24-hour",
               "1-day", "7-day", "30-day", "90-day"
             - API format: "last-7-days", "last-30-days", "last-4-weeks"
-            - Custom: "2024-01-01 00:00:00|2024-01-02 00:00:00"
+            - Custom "start|end" range, e.g.
+              "2026-06-27 00:00:00|2026-06-28 00:00:00".
 
     Returns:
         dict with TID for tracking report progress
@@ -343,7 +373,7 @@ async def run_report(
         >>> print(f"TID: {result['tid']}")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
 
         # Step 1: Determine layout_id
@@ -373,13 +403,16 @@ async def run_report(
         if schedule_created:
             logger.info(f"Created new schedule for layout-id {layout_id}")
 
-        # Step 3: Convert time range to API format
+        # Step 3: Resolve the time range. A custom "start|end" range is passed
+        # to the run's nested schedule-param as period-start/period-end; a
+        # preset uses the flat time-period string (see client.report_run).
         time_period = _convert_to_api_time_period(time_range)
+        period_start = period_end = None
+        if time_period == "other":
+            period_start, period_end = _custom_window_timedate(time_range)
 
-        # Step 4: Build device filter if specified
-        device_filter = None
-        if device:
-            device_filter = [{"devid": device}]
+        # Step 4: Build device filter if specified (serials -> devid, names -> devname)
+        device_filter = build_device_filter(device) if device else None
 
         # Step 5: Run the report
         logger.info(f"Running report with layout-id {layout_id}, time-period: {time_period}")
@@ -388,6 +421,8 @@ async def run_report(
             layout_id=layout_id,
             time_period=time_period,
             device=device_filter,
+            period_start=period_start,
+            period_end=period_end,
         )
 
         tid = result.get("tid") if isinstance(result, dict) else None
@@ -435,7 +470,7 @@ async def fetch_report(
         >>> print(f"Progress: {result.get('data', {}).get('percentage', 0)}%")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
 
         logger.info(f"Fetching report status for TID {tid}")
@@ -485,7 +520,7 @@ async def get_report_data(
         ...     f.write(base64.b64decode(data))
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
 
         logger.info(f"Downloading report data for TID {tid}")
@@ -524,7 +559,7 @@ async def get_running_reports(
         ...     print(f"TID: {report['tid']} - {report.get('percent', 0)}%")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
 
         logger.info(f"Getting running reports in ADOM {adom}")
@@ -570,7 +605,7 @@ async def get_report_history(
         ...     print(f"{report['title']}: {report['state']}")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
         tr = await _parse_time_range(time_range)
 
@@ -627,7 +662,13 @@ async def run_and_wait_report(
             - Short format: "1-hour", "6-hour", "12-hour", "24-hour",
               "1-day", "7-day", "30-day", "90-day"
             - API format: "last-7-days", "last-30-days", "last-4-weeks"
-            - Custom: "2024-01-01 00:00:00|2024-01-02 00:00:00"
+            - Custom: "2024-01-01 00:00:00|2024-01-02 00:00:00" — applied via
+              the layout's SHARED schedule config object, held in place until
+              generation completes, then restored. Concurrent custom-window
+              runs of the same layout race on that object. The result carries
+              requested_window plus a warning: verify the produced report
+              actually covers the window (generator consumption is still
+              being validated live).
         timeout: Maximum wait time in seconds (default: 300)
 
     Returns:
@@ -644,7 +685,7 @@ async def run_and_wait_report(
         ...     # Use get_report_data(tid=result['tid']) to download
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
 
         # Step 1: Determine layout_id
@@ -669,17 +710,27 @@ async def run_and_wait_report(
                 "message": f"Failed to ensure schedule exists: {schedule_result['error']}",
             }
 
-        # Step 3: Convert time range and build device filter
+        # Step 3: Resolve the time range and device filter. A custom "start|end"
+        # range is delivered to the run's nested schedule-param (period-start/
+        # period-end); FAZ scopes the report from that alone, so there is no
+        # shared schedule to mutate, hold, or restore.
         time_period = _convert_to_api_time_period(time_range)
-        device_filter = [{"devid": device}] if device else None
+        device_filter = build_device_filter(device) if device else None
+        period_start = period_end = None
+        requested_window: dict[str, str] | None = None
+        if time_period == "other":
+            period_start, period_end = _custom_window_timedate(time_range)
+            requested_window = {"period-start": period_start, "period-end": period_end}
 
-        # Step 4: Start the report
+        # Step 4/5: Start the report and poll to completion.
         logger.info(f"Running report with layout-id {layout_id}, time-period: {time_period}")
         run_result = await client.report_run(
             adom=adom,
             layout_id=layout_id,
             time_period=time_period,
             device=device_filter,
+            period_start=period_start,
+            period_end=period_end,
         )
 
         tid = run_result.get("tid") if isinstance(run_result, dict) else None
@@ -690,7 +741,8 @@ async def run_and_wait_report(
                 "api_response": run_result,
             }
 
-        # Step 5: Poll for completion using get_running_reports
+        # Bound the wait so one call can't pin the shared client for hours.
+        timeout = max(1, min(timeout, 3600))
         start_time = asyncio.get_running_loop().time()
         poll_interval = 3.0
 
@@ -702,7 +754,10 @@ async def run_and_wait_report(
                     "tid": tid,
                     "layout": layout,
                     "layout_id": layout_id,
-                    "message": f"Report timed out after {timeout}s. Use get_report_data(tid='{tid}') to check if it completed.",
+                    "message": (
+                        f"Report timed out after {timeout}s. Use "
+                        f"get_report_data(tid='{tid}') to check if it completed."
+                    ),
                 }
 
             # Check running reports to see if our TID is still in progress
@@ -721,12 +776,14 @@ async def run_and_wait_report(
                     break
 
             if our_report:
-                # Report is still running
-                percentage = our_report.get("percent", our_report.get("percentage", 0))
+                # Report is still running. FAZ may return the progress field
+                # as a string; coerce before comparing (an unusable value
+                # counts as not-finished and the loop keeps polling).
+                percentage = coerce_num(our_report.get("percent", our_report.get("percentage")))
                 logger.info(f"Report {tid} progress: {percentage}%")
 
-                if percentage >= 100:
-                    return {
+                if percentage is not None and percentage >= 100:
+                    response = {
                         "status": "success",
                         "tid": tid,
                         "layout": layout,
@@ -735,6 +792,9 @@ async def run_and_wait_report(
                         "time_period": time_period,
                         "message": "Report completed. Use get_report_data() to download.",
                     }
+                    if requested_window is not None:
+                        response["requested_window"] = requested_window
+                    return response
             else:
                 # Report not in running list - either completed or failed.
                 # Verify via report_fetch instead of assuming success
@@ -743,7 +803,7 @@ async def run_and_wait_report(
                 fetch_result = await client.report_fetch(adom=adom, tid=tid)
                 state = fetch_result.get("state") if isinstance(fetch_result, dict) else None
                 if state == "generated":
-                    return {
+                    response = {
                         "status": "success",
                         "tid": tid,
                         "layout": layout,
@@ -752,6 +812,9 @@ async def run_and_wait_report(
                         "time_period": time_period,
                         "message": "Report completed. Use get_report_data() to download.",
                     }
+                    if requested_window is not None:
+                        response["requested_window"] = requested_window
+                    return response
                 if state not in ("pending", "running"):
                     return {
                         "status": "error",

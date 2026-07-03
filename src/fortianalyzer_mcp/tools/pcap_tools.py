@@ -328,16 +328,27 @@ async def search_ips_logs(
         # Count how many have PCAP available
         pcap_available = sum(1 for log in logs if log.get("pcapurl"))
 
-        return {
+        # When FAZ omits total-count, report the unknown honestly instead of
+        # fabricating total=len(logs): a limit-capped page would otherwise be
+        # indistinguishable from "exactly N matches" (silent truncation).
+        response = {
             "status": "success",
             "count": len(logs),
             "pcap_available_count": pcap_available,
-            "total": total if total is not None else len(logs),
+            "total": total,
+            "total_is_known": total is not None,
             "logs": logs,
             "filter_applied": filter_str or "none",
             "tid": page["tid"],
             "time_range": time_range_dict,
         }
+        if total is None:
+            response["warning"] = (
+                "Total match count is unavailable from FortiAnalyzer for this "
+                "search; results are a single page and may be truncated. "
+                "Narrow the time window or filter to be sure of full coverage."
+            )
+        return response
 
     except ValidationError as e:
         return {"status": "error", "message": f"Validation error: {e}"}

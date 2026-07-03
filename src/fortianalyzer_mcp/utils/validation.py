@@ -128,6 +128,13 @@ DEVICE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]{1,64}$")
 # Device serial number pattern: starts with device type prefix, alphanumeric
 DEVICE_SERIAL_PATTERN = re.compile(r"^(FG|FM|FW|FA|FS|FD|FP|FC|FV)[A-Z0-9]{10,20}$")
 
+# VM appliance serials carry a hyphen before the VM marker (e.g.
+# "FMG-VM0000000001", "FAZ-VMTM23000001") and are not covered by the plain
+# serial pattern above.
+DEVICE_VM_SERIAL_PATTERN = re.compile(
+    r"^(FG|FM|FW|FA|FS|FD|FP|FC|FV)[A-Z0-9]{0,2}-VM[A-Z0-9]{4,18}$"
+)
+
 # Log type validation
 VALID_LOG_TYPES = {
     "traffic",
@@ -308,7 +315,6 @@ def validate_device_serial(serial: str) -> str:
 # Serial-number prefixes used to decide whether a device string is a serial
 # (devid) or a device name (devname). Kept here as the single source of truth so
 # every tool builds the FAZ device filter identically.
-_DEVICE_SERIAL_PREFIXES = ("FG", "FM", "FW", "FA", "FS", "FD", "FP", "FC", "FV")
 
 
 def build_device_filter(device: str | None) -> list[dict[str, str]]:
@@ -328,13 +334,16 @@ def build_device_filter(device: str | None) -> list[dict[str, str]]:
         ``[{"devname": ...}]``, ready to pass as the ``device`` parameter.
 
     Note:
-        Serial-looking values (``FG``/``FM``/... prefixes) and ``All_*`` groups
-        are sent as ``devid``; anything else is treated as a ``devname``.
+        Values matching the full serial shape (hardware or VM form) and
+        ``All_*`` groups are sent as ``devid``; anything else is treated as a
+        ``devname``. A bare prefix match is deliberately NOT enough: hostnames
+        like ``FGT-HQ-01`` start with a serial prefix, and sending them as
+        ``devid`` makes FAZ silently return zero results.
     """
     if not device:
         # FAZ rejects an empty device filter with 0 results; default to all FGTs.
         return [{"devid": "All_FortiGate"}]
-    if device.startswith(_DEVICE_SERIAL_PREFIXES):
+    if DEVICE_SERIAL_PATTERN.match(device) or DEVICE_VM_SERIAL_PATTERN.match(device):
         return [{"devid": device}]
     if device.startswith("All_"):
         return [{"devid": device}]
@@ -478,6 +487,36 @@ def validate_port(port: int, field: str = "port") -> int:
     if not 1 <= port <= 65535:
         raise ValidationError(f"Invalid {field} '{port}'. Must be in range 1-65535.")
     return port
+
+
+def validate_incident_id(incident_id: str) -> str:
+    """Validate a FortiAnalyzer incident ID.
+
+    Incident IDs are interpolated into the JSON-RPC url path
+    (``/incidentmgmt/adom/{adom}/incident/{incident_id}``), so restrict them
+    to the same safe character class as ADOM names to prevent path injection.
+
+    Args:
+        incident_id: Incident ID to validate (e.g. "IN00000001").
+
+    Returns:
+        Validated incident ID (stripped).
+
+    Raises:
+        ValidationError: If the incident ID is empty or contains unsafe characters.
+    """
+    if not incident_id:
+        raise ValidationError("Incident ID cannot be empty")
+
+    incident_id = incident_id.strip()
+
+    if not ADOM_PATTERN.match(incident_id):
+        raise ValidationError(
+            f"Invalid incident ID '{incident_id}'. "
+            "Must be 1-64 characters, alphanumeric, underscore, or hyphen only."
+        )
+
+    return incident_id
 
 
 def validate_session_id(session_id: int) -> int:

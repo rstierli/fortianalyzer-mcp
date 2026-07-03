@@ -59,7 +59,7 @@ async def list_device_groups(
         ...     print(f"Group: {group['name']}")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
         groups = await client.list_device_groups(adom)
 
@@ -100,7 +100,8 @@ async def list_device_vdoms(
         ...     print(f"VDOM: {vdom['name']}")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
+        device = validate_device_name(device)
         client = _get_client()
         vdoms = await client.list_device_vdoms(device, adom)
 
@@ -337,12 +338,21 @@ async def add_devices_bulk(
         sensitive_keys = {"adm_pass", "adm_passwd"}
         devices_safe = [{k: v for k, v in d.items() if k not in sensitive_keys} for d in devices]
 
-        return {
+        task_id = result.get("taskid") if isinstance(result, dict) else None
+        response: dict[str, Any] = {
             "status": "success",
+            # Count of devices submitted; with a task_id the adds complete
+            # asynchronously and per-device results live on the task.
             "added_count": len(devices),
             "devices": devices_safe,
-            "task_id": result.get("taskid"),
+            "task_id": task_id,
         }
+        if task_id:
+            response["warning"] = (
+                "Bulk add runs as a background task; per-device results are on "
+                f"the task. Verify with wait_for_task({task_id})."
+            )
+        return response
     except ValidationError as e:
         return {"status": "error", "message": f"Validation error: {e}"}
     except Exception as e:
@@ -393,11 +403,20 @@ async def delete_devices_bulk(
             flags=flags,
         )
 
-        return {
+        task_id = result.get("taskid") if isinstance(result, dict) else None
+        response = {
             "status": "success",
+            # Count of devices submitted; with a task_id the deletes complete
+            # asynchronously and per-device results live on the task.
             "deleted_count": len(devices),
-            "task_id": result.get("taskid"),
+            "task_id": task_id,
         }
+        if task_id:
+            response["warning"] = (
+                "Bulk delete runs as a background task; per-device results are "
+                f"on the task. Verify with wait_for_task({task_id})."
+            )
+        return response
     except ValidationError as e:
         return {"status": "error", "message": f"Validation error: {e}"}
     except Exception as e:
@@ -433,7 +452,8 @@ async def get_device_info(
         >>> print(f"Platform: {result['device']['platform_str']}")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
+        device = validate_device_name(device)
         client = _get_client()
         device_data = await client.get_device(device, adom, loadsub=1)
 
@@ -486,7 +506,7 @@ async def search_devices(
         >>> result = await search_devices(connection_status="down")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
         client = _get_client()
 
         # Build filter list
@@ -498,8 +518,18 @@ async def search_devices(
         if os_version_filter:
             filters.append(["os_ver", "contain", os_version_filter])
         if connection_status:
-            # Connection status is typically 1 (up) or 0 (down)
-            status_val = 1 if connection_status.lower() == "up" else 0
+            # DVMDB conn_status enum: 0=unknown, 1=up, 2=down. Reject anything
+            # else instead of silently coercing typos to a wrong filter.
+            conn_status_map = {"unknown": 0, "up": 1, "down": 2}
+            status_val = conn_status_map.get(connection_status.strip().lower())
+            if status_val is None:
+                valid = ", ".join(sorted(conn_status_map))
+                return {
+                    "status": "error",
+                    "message": (
+                        f"Invalid connection_status '{connection_status}'. Must be one of: {valid}"
+                    ),
+                }
             filters.append(["conn_status", "==", status_val])
 
         devices = await client.list_devices(

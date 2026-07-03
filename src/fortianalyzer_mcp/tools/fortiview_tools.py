@@ -10,10 +10,11 @@ from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.server import get_faz_client, mcp
-from fortianalyzer_mcp.utils.responses import redact
+from fortianalyzer_mcp.utils.responses import coerce_num, redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
+    build_device_filter,
     get_default_adom,
     validate_adom,
     validate_fortiview_view,
@@ -105,12 +106,18 @@ async def run_fortiview(
         # Validate inputs
         adom = validate_adom(adom or get_default_adom())
         view_name = validate_fortiview_view(view_name)
+        # FortiView accepts at most 1000 rows per fetch; keep offset sane.
+        limit = max(1, min(limit, 1000))
+        offset = max(0, offset)
 
         client = _get_client()
         tr = await _parse_time_range(time_range)
 
-        # Convert device string to API format
-        device_filter = [{"devname": device}] if device else [{"devname": "All_Device"}]
+        # Convert device string to API format. Serial-shaped values must go
+        # under devid (a serial under devname silently matches nothing);
+        # FortiView's own "all devices" group is All_Device, so keep that
+        # default instead of build_device_filter's logview All_FortiGate.
+        device_filter = build_device_filter(device) if device else [{"devname": "All_Device"}]
 
         # Build sort_by parameter in API format: [{"field": "...", "order": "..."}]
         sort_by_param = None
@@ -131,6 +138,13 @@ async def run_fortiview(
         )
 
         tid = result.get("tid") if isinstance(result, dict) else None
+        if not tid:
+            # Without a tid the caller cannot fetch anything; surface the
+            # failed launch instead of a success-shaped payload with tid=None.
+            return {
+                "status": "error",
+                "message": "Failed to get TID from FortiView query",
+            }
 
         return {
             "status": "success",
@@ -170,7 +184,8 @@ async def fetch_fortiview(
         ...     print(f"{item['srcip']}: {item['bytes']} bytes")
     """
     try:
-        adom = adom or get_default_adom()
+        adom = validate_adom(adom or get_default_adom())
+        view_name = validate_fortiview_view(view_name)
         client = _get_client()
 
         logger.info(f"Fetching FortiView results for TID {tid}")
@@ -185,13 +200,28 @@ async def fetch_fortiview(
         if not isinstance(data, list):
             data = [data] if data else []
 
-        return {
+        # Surface query progress: a fetch before the scan reaches 100% returns
+        # partial aggregates (wrong top-N), which callers must be able to see.
+        # A missing percentage is treated as complete (builds that omit it).
+        percentage = coerce_num(result.get("percentage")) if isinstance(result, dict) else None
+        complete = percentage is None or percentage >= 100
+
+        response: dict[str, Any] = {
             "status": "success",
             "tid": tid,
             "view_name": view_name,
             "count": len(data),
             "data": data,
+            "complete": complete,
         }
+        if percentage is not None:
+            response["percentage"] = percentage
+        if not complete:
+            response["warning"] = (
+                "Query is still running; data is a partial aggregate. "
+                "Fetch again until complete=true, or use get_fortiview_data."
+            )
+        return response
     except Exception as e:
         logger.error(f"Failed to fetch FortiView results: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -247,12 +277,17 @@ async def get_fortiview_data(
         # Validate inputs
         adom = validate_adom(adom or get_default_adom())
         view_name = validate_fortiview_view(view_name)
+        # FortiView accepts at most 1000 rows per fetch; keep offset sane.
+        limit = max(1, min(limit, 1000))
 
         client = _get_client()
         tr = await _parse_time_range(time_range)
 
-        # Convert device string to API format
-        device_filter = [{"devname": device}] if device else [{"devname": "All_Device"}]
+        # Convert device string to API format. Serial-shaped values must go
+        # under devid (a serial under devname silently matches nothing);
+        # FortiView's own "all devices" group is All_Device, so keep that
+        # default instead of build_device_filter's logview All_FortiGate.
+        device_filter = build_device_filter(device) if device else [{"devname": "All_Device"}]
 
         # Build sort_by parameter in API format
         sort_by_param = None
@@ -280,6 +315,8 @@ async def get_fortiview_data(
             }
 
         # Poll for results
+        # Bound the wait so one call can't pin the shared client for hours.
+        timeout = max(1, min(timeout, 3600))
         start_time = asyncio.get_running_loop().time()
         poll_interval = 0.5
 
@@ -300,13 +337,14 @@ async def get_fortiview_data(
 
             # Only return once the query is complete; returning on first
             # non-empty data hands back partial aggregates (wrong top-N).
-            # A missing percentage defaults to 100 so builds that omit it
-            # still return immediately.
+            # A missing/unparseable percentage is treated as complete so
+            # builds that omit it still return immediately; FAZ may return
+            # the field as a string, hence the coercion.
             if isinstance(fetch_result, dict):
                 data = fetch_result.get("data", [])
-                percentage = fetch_result.get("percentage", 100)
+                percentage = coerce_num(fetch_result.get("percentage"))
 
-                if percentage >= 100:
+                if percentage is None or percentage >= 100:
                     if not isinstance(data, list):
                         data = [data] if data else []
 

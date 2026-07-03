@@ -1,5 +1,13 @@
 # FortiAnalyzer MCP Server - Security & Stability Review
 
+> **HISTORICAL DOCUMENT — describes the 2024-12-05 codebase.** Line references
+> and code excerpts below no longer match the current sources, and several
+> findings listed as open have since been fixed (debug-log credential exposure,
+> session-in-URL). Controls added after this review — fail-closed HTTP auth,
+> timing-safe bearer comparison, SSRF-safe `validate_pcapurl`, zip-slip/zip-bomb
+> guards, uniform ADOM/identifier validation — are not covered here. Treat
+> `SECURITY.md` and the current source as authoritative.
+
 **Review Date:** 2024-12-05
 **Reviewer Role:** Senior QA Engineer
 **Review Scope:** Security, Stability, and Reliability Analysis
