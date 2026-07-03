@@ -533,6 +533,9 @@ def _aggregate_port_analysis(logs: list[dict[str, Any]]) -> dict[str, Any]:
         # FAZ logs encode ICMP info in service field, not icmptype/icmpcode:
         #   "PING" = echo request (type=8/code=0)
         #   "icmp/3/3" = type=3/code=3
+        # Anything else (e.g. an ICMP packet a FortiGate SD-WAN SLA probe tagged
+        # with the probed application service, "DNS") is not an ICMP encoding, so
+        # it is recorded as type=unknown rather than leaked into type_code.
         if proto_str == "1":
             service = str(log.get("service", ""))
             if service.upper() == "PING":
@@ -542,9 +545,12 @@ def _aggregate_port_analysis(logs: list[dict[str, Any]]) -> dict[str, Any]:
                 if len(parts) == 3:
                     icmp_types[f"type={parts[1]}/code={parts[2]}"] += 1
                 else:
-                    icmp_types[f"service={service}"] += 1
+                    # Malformed "icmp/..." value: don't leak the raw string.
+                    icmp_types["type=unknown"] += 1
             elif service:
-                icmp_types[f"service={service}"] += 1
+                # Service field holds an application name (e.g. "DNS"), not an
+                # ICMP type/code — record as unknown instead of service=<name>.
+                icmp_types["type=unknown"] += 1
 
     uncovered = total - port_hits
 

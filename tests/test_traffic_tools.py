@@ -381,6 +381,25 @@ class TestAggregatePortAnalysis:
         assert result["icmp"][1]["type_code"] == "type=3/code=3"
         assert result["icmp"][1]["hits"] == 1
 
+    def test_icmp_unrecognized_service_not_leaked(self) -> None:
+        """ICMP whose service field is an application name (not an ICMP
+        encoding) must be recorded as type=unknown, never leaked as
+        service=<name> into type_code.
+
+        Real case: a FortiGate SD-WAN SLA health-check pings a DNS server, so
+        the ICMP (proto=1) packet is logged with service="DNS".
+        """
+        logs = [
+            {"proto": "1", "dstport": 0, "service": "DNS"},
+            {"proto": "1", "dstport": 0, "service": "DNS"},
+            # Malformed icmp/ value falls back to unknown too.
+            {"proto": "1", "dstport": 0, "service": "icmp/bogus"},
+        ]
+        result = _aggregate_port_analysis(logs)
+        assert result["icmp"] == [{"type_code": "type=unknown", "hits": 3}]
+        # The raw service name is never leaked into type_code.
+        assert all("service=" not in e["type_code"] for e in result["icmp"])
+
     def test_portless_protocols(self) -> None:
         """Protocols without ports (GRE, ESP) should be tracked."""
         logs = [
