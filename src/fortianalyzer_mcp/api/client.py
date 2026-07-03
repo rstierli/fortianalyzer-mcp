@@ -1345,35 +1345,48 @@ class FortiAnalyzerClient:
             adom: ADOM name
             layout_id: Report layout ID (from get_report_layouts).
                        A schedule must exist for this layout before running.
-            time_period: Time period for report. Options:
-                - Predefined: "last-n-hours", "last-n-days", "last-n-weeks", "last-n-months"
-                  e.g., "last-1-hours", "last-7-days", "last-30-days", "last-4-weeks"
-                - "other": custom window semantics are still being validated
-                  live. Known so far (7.6.7/8.0.0): run-side period dates in
-                  date-first formats are silently ignored, and a schedule
-                  config window (time-period=16 + timedate dates) is stored
-                  but produced an empty report when the run passed "other".
-                - None: omit the time-period key from the run request
-                  entirely (mechanism-discovery knob).
-            device: Device filter list [{"devname": "myfw01"}, ...]
-            period_start: Optional run-side window start, passed verbatim
-                (discovery knob; use FortiOS timedate "HH:MM yyyy/mm/dd").
-            period_end: Optional run-side window end, passed verbatim.
+            time_period: Preset time period for the report, e.g. "last-1-hours",
+                "last-7-days", "last-30-days", "last-4-weeks". Ignored when a
+                custom window (period_start + period_end) is supplied.
+            device: Device filter list [{"devname": "myfw01"}, ...], or None.
+            period_start: Custom window start as a FortiOS ``timedate`` string
+                ("HH:MM yyyy/mm/dd"). When both period_start and period_end are
+                given, the run uses a custom window instead of ``time_period``.
+            period_end: Custom window end as a FortiOS ``timedate`` string.
+
+        A custom window is delivered inside the nested ``schedule-param`` object
+        with ``time-period="other"`` (the string form; the numeric schedule-
+        config code is rejected here) and the two ``timedate`` bounds — NOT as a
+        top-level ``schedule`` with flat period fields. Live-verified on 7.6.7
+        and 8.0.0: the flat run form and the schedule-config object both fail to
+        scope a custom window (ignored / empty report); only nested
+        ``schedule-param`` with ``"other"`` produces the requested period.
         """
-        # schedule parameter must be a string of the layout-id
-        params: dict[str, Any] = {
-            "apiver": API_VERSION,
-            "schedule": str(layout_id),
-            "runfrom": "GUI",
-        }
-        if time_period is not None:
-            params["time-period"] = time_period
-        if device:
-            params["device"] = device
-        if period_start:
-            params["period-start"] = period_start
-        if period_end:
-            params["period-end"] = period_end
+        if period_start and period_end:
+            # Custom window: nested schedule-param, no top-level "schedule".
+            schedule_param: dict[str, Any] = {
+                "layout-id": layout_id,
+                "device": device if device else "all",
+                "filter-logic": "all",
+                "time-period": "other",
+                "period-start": period_start,
+                "period-end": period_end,
+            }
+            params: dict[str, Any] = {
+                "apiver": API_VERSION,
+                "runfrom": "GUI",
+                "schedule-param": schedule_param,
+            }
+        else:
+            # Preset: flat form. schedule is the layout-id as a string.
+            params = {
+                "apiver": API_VERSION,
+                "schedule": str(layout_id),
+                "time-period": time_period,
+                "runfrom": "GUI",
+            }
+            if device:
+                params["device"] = device
 
         return await self._raw_request_dict("add", f"/report/adom/{adom}/run", **params)
 

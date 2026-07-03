@@ -181,47 +181,25 @@ class TestReportTimeRange:
         assert _format_period_timedate("2026-01-02 12:30:00") == "12:30 2026/01/02"
 
 
-class _ScheduleFakeClient:
-    """Fake FAZ client simulating the schedule config object for report runs.
+class _ReportRunFakeClient:
+    """Fake FAZ client recording report_run kwargs; completes immediately.
 
-    Records every call in ``events`` so tests can assert ordering — in
-    particular that the schedule window is restored only AFTER the report
-    left the running state (FAZ reads the schedule at generation time).
+    The custom-window mechanism writes nothing to the schedule config, so the
+    fake only needs the run + poll surface. ``run_calls`` captures how the
+    window reached client.report_run.
     """
 
-    def __init__(self, accept_window: bool = True) -> None:
-        self.accept_window = accept_window
-        self.schedule: dict[str, Any] = {
-            "name": "10002",
-            "time-period": 5,  # last-7-days
-            "period-opt": 1,
-            "period-start": None,
-            "period-end": None,
-        }
-        self.events: list[str] = []
-        self.update_calls: list[dict[str, Any]] = []
+    def __init__(self) -> None:
         self.run_calls: list[dict[str, Any]] = []
 
+    async def get_system_timezone(self) -> None:
+        return None
+
+    async def get_report_layouts(self, adom: str) -> dict[str, Any]:
+        return {"data": [{"layout-id": 10002, "title": "Bandwidth and Applications"}]}
+
     async def get_report_schedules(self, adom: str, layout_id: int | None = None) -> dict[str, Any]:
-        self.events.append("get_schedules")
-        return {"data": [{"name": str(layout_id)}]}
-
-    async def get_report_schedule(self, adom: str, layout_id: int) -> dict[str, Any]:
-        self.events.append("get_schedule")
-        return {"data": dict(self.schedule)}
-
-    async def update_report_schedule(
-        self, adom: str, layout_id: int, fields: dict[str, Any]
-    ) -> dict[str, Any]:
-        self.events.append(f"update:{fields.get('time-period')}")
-        self.update_calls.append(dict(fields))
-        applied = dict(fields)
-        if not self.accept_window and applied.get("time-period") == 16:
-            # Simulate FAZ silently nulling an unparseable timedate.
-            applied["period-start"] = None
-            applied["period-end"] = None
-        self.schedule.update(applied)
-        return {"status": {"code": 0}}
+        return {"data": [{"name": str(layout_id)}]}  # schedule already exists
 
     async def report_run(
         self,
@@ -232,7 +210,6 @@ class _ScheduleFakeClient:
         period_start: str | None = None,
         period_end: str | None = None,
     ) -> dict[str, Any]:
-        self.events.append("report_run")
         self.run_calls.append(
             {
                 "layout_id": layout_id,
@@ -245,97 +222,116 @@ class _ScheduleFakeClient:
         return {"tid": "tid-99"}
 
     async def get_running_reports(self, adom: str) -> dict[str, Any]:
-        self.events.append("get_running")
-        return {"data": []}  # never in the running list -> verify via fetch
+        return {"data": []}  # not in running list -> verify via fetch
 
     async def report_fetch(self, adom: str, tid: str) -> dict[str, Any]:
-        self.events.append("report_fetch")
         return {"tid": tid, "state": "generated"}
 
 
 class TestReportCustomWindow:
-    """Custom "start|end" ranges are configured on the schedule config object.
+    """Custom "start|end" ranges are delivered via the run's nested schedule-param.
 
-    The run endpoint's date-first period params are ignored by FAZ, and the
-    generator reads the schedule at GENERATION time — so the window must be
-    written to the schedule, verified by read-back, held through generation,
-    and only then restored.
+    Live-verified on FAZ 7.6.7 and 8.0.0: the flat run form and the schedule
+    config object both fail to scope a custom window (ignored / empty report);
+    only the run's ``schedule-param`` with ``time-period="other"`` + FortiOS
+    timedate bounds produces the requested period. No schedule config is written.
     """
 
     CUSTOM = "2026-06-27 00:00:00|2026-06-28 00:00:00"
 
-    async def test_custom_window_held_through_generation_then_restored(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        fake = _ScheduleFakeClient()
+    async def test_run_and_wait_passes_window_to_run(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = _ReportRunFakeClient()
         _patch_client(monkeypatch, report_tools, fake)
 
         result = await report_tools.run_and_wait_report(layout="10002", time_range=self.CUSTOM)
 
         assert result["status"] == "success"
         assert result["tid"] == "tid-99"
-        # Window applied: numeric enum 16 + timedate-formatted dates,
-        # preserving the existing clock basis.
-        assert fake.update_calls[0] == {
-            "time-period": 16,
-            "period-opt": 1,
-            "period-start": "00:00 2026/06/27",
-            "period-end": "00:00 2026/06/28",
-        }
-        # Run referenced the preset string only; no run-side window params.
-        assert fake.run_calls[0]["time_period"] == "other"
-        assert fake.run_calls[0]["period_start"] is None
-        # Restore is the LAST schedule write and happens only after the
-        # completion check (report_fetch), never right after report_run.
-        assert fake.update_calls[-1]["time-period"] == 5
-        assert "period-start" not in fake.update_calls[-1]
-        restore_idx = len(fake.events) - 1 - fake.events[::-1].index("update:5")
-        assert restore_idx > fake.events.index("report_fetch")
-        # The result is explicit about what was requested and what to verify.
+        call = fake.run_calls[0]
+        assert call["time_period"] == "other"
+        assert call["period_start"] == "00:00 2026/06/27"
+        assert call["period_end"] == "00:00 2026/06/28"
         assert result["requested_window"] == {
             "period-start": "00:00 2026/06/27",
             "period-end": "00:00 2026/06/28",
         }
-        assert "warning" in result
+        # Mechanism is confirmed, so no under-validation warning is attached.
+        assert "warning" not in result
 
-    async def test_rejected_window_errors_instead_of_wrong_period(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        fake = _ScheduleFakeClient(accept_window=False)
-        _patch_client(monkeypatch, report_tools, fake)
-
-        result = await report_tools.run_and_wait_report(layout="10002", time_range=self.CUSTOM)
-
-        assert result["status"] == "error"
-        assert "did not accept the custom report window" in result["message"]
-        # The report must NOT run over the layout's default period.
-        assert fake.run_calls == []
-        # Apply + restore both happened.
-        assert fake.update_calls[-1]["time-period"] == 5
-
-    async def test_run_report_rejects_custom_range(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        fake = _ScheduleFakeClient()
+    async def test_run_report_supports_custom_range(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = _ReportRunFakeClient()
         _patch_client(monkeypatch, report_tools, fake)
 
         result = await report_tools.run_report(layout="10002", time_range=self.CUSTOM)
 
-        assert result["status"] == "error"
-        assert "run_and_wait_report" in result["message"]
-        # Fire-and-forget path must not touch the schedule or start a run.
-        assert fake.update_calls == []
-        assert fake.run_calls == []
+        assert result["status"] == "success"
+        call = fake.run_calls[0]
+        assert call["time_period"] == "other"
+        assert call["period_start"] == "00:00 2026/06/27"
+        assert call["period_end"] == "00:00 2026/06/28"
 
-    async def test_preset_range_leaves_schedule_untouched(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        fake = _ScheduleFakeClient()
+    async def test_preset_range_sends_no_window(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = _ReportRunFakeClient()
         _patch_client(monkeypatch, report_tools, fake)
 
         result = await report_tools.run_report(layout="10002", time_range="7-day")
 
         assert result["status"] == "success"
-        assert fake.update_calls == []
-        assert fake.run_calls[0]["time_period"] == "last-7-days"
+        call = fake.run_calls[0]
+        assert call["time_period"] == "last-7-days"
+        assert call["period_start"] is None
+        assert call["period_end"] is None
+
+
+class TestReportRunPayload:
+    """client.report_run builds the JSON-RPC payload the FAZ mechanism requires."""
+
+    def _client_capturing(self, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, dict[str, Any]]:
+        from fortianalyzer_mcp.api.client import FortiAnalyzerClient
+
+        client = FortiAnalyzerClient(host="faz.example.com", api_token="t")
+        captured: dict[str, Any] = {}
+
+        async def fake_raw(method: str, url: str, **params: Any) -> dict[str, Any]:
+            captured["method"] = method
+            captured["url"] = url
+            captured["params"] = params
+            return {"tid": "x"}
+
+        monkeypatch.setattr(client, "_raw_request_dict", fake_raw)
+        return client, captured
+
+    async def test_custom_window_uses_nested_schedule_param(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client, captured = self._client_capturing(monkeypatch)
+
+        await client.report_run(
+            "root",
+            10002,
+            period_start="00:00 2026/06/27",
+            period_end="00:00 2026/06/28",
+        )
+
+        params = captured["params"]
+        # The window lives inside schedule-param, NOT a top-level schedule.
+        assert "schedule" not in params
+        sp = params["schedule-param"]
+        assert sp["time-period"] == "other"
+        assert sp["period-start"] == "00:00 2026/06/27"
+        assert sp["period-end"] == "00:00 2026/06/28"
+        assert sp["layout-id"] == 10002
+        assert params["runfrom"] == "GUI"
+
+    async def test_preset_uses_flat_form(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client, captured = self._client_capturing(monkeypatch)
+
+        await client.report_run("root", 10002, time_period="last-7-days")
+
+        params = captured["params"]
+        assert params["schedule"] == "10002"
+        assert params["time-period"] == "last-7-days"
+        assert "schedule-param" not in params
 
 
 class TestPercentageCoercion:
