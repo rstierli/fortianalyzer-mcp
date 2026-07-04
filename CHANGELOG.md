@@ -5,6 +5,11 @@ All notable changes to FortiAnalyzer MCP Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **ICMP rows with an empty `service` field are no longer omitted from the `get_policy_port_analysis` ICMP breakdown.** Follow-up to #37: proto=1 logs whose `service` field is empty or absent matched no parsing branch and were silently dropped from the `icmp` section (while still counted in `total_hits` and `protocols`), so the ICMP hit sum could undercount the proto=1 total. They are now recorded as `type=unknown`, keeping the `icmp` sum equal to the proto=1 count in `protocols`.
+
 ## [2.7.0] - 2026-07-03
 
 Full-codebase correctness and security-hardening review: uniform identifier validation, config/env parsing fix, task-state handling, device-filter classification, report custom time windows, and deployment hardening.

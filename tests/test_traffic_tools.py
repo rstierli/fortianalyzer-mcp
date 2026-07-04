@@ -400,6 +400,21 @@ class TestAggregatePortAnalysis:
         # The raw service name is never leaked into type_code.
         assert all("service=" not in e["type_code"] for e in result["icmp"])
 
+    def test_icmp_empty_service_counted_as_unknown(self) -> None:
+        """ICMP rows with an empty or missing service field must still appear
+        in the icmp breakdown (as type=unknown), so the icmp hit sum always
+        matches the proto=1 count in the protocols breakdown."""
+        logs = [
+            {"proto": "1", "dstport": 0, "service": ""},
+            {"proto": "1", "dstport": 0},  # service key absent entirely
+            {"proto": "1", "dstport": 0, "service": "PING"},
+        ]
+        result = _aggregate_port_analysis(logs)
+        icmp_total = sum(e["hits"] for e in result["icmp"])
+        proto1_hits = next(p["hits"] for p in result["protocols"] if p["protocol"] == "1")
+        assert icmp_total == proto1_hits == 3
+        assert {"type_code": "type=unknown", "hits": 2} in result["icmp"]
+
     def test_portless_protocols(self) -> None:
         """Protocols without ports (GRE, ESP) should be tracked."""
         logs = [
