@@ -547,9 +547,11 @@ def _aggregate_port_analysis(logs: list[dict[str, Any]]) -> dict[str, Any]:
                 else:
                     # Malformed "icmp/..." value: don't leak the raw string.
                     icmp_types["type=unknown"] += 1
-            elif service:
-                # Service field holds an application name (e.g. "DNS"), not an
-                # ICMP type/code — record as unknown instead of service=<name>.
+            else:
+                # Service field holds an application name (e.g. "DNS") or is
+                # empty; neither encodes ICMP type/code, so record as unknown.
+                # This keeps the icmp hit sum equal to the proto=1 count in
+                # the protocols breakdown.
                 icmp_types["type=unknown"] += 1
 
     uncovered = total - port_hits
