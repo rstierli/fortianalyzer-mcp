@@ -100,6 +100,35 @@ def _link_key(obj: dict[str, Any], keys: tuple[str, ...]) -> str | None:
     return next((k for k in keys if k in obj), None)
 
 
+def _records(payload: Any) -> list[dict[str, Any]]:
+    """Record list from a FAZ payload of varying nesting.
+
+    Tolerates a bare list of records or a dict wrapping a ``data`` list
+    (alertlogs comes back as the latter).
+    """
+    if isinstance(payload, dict):
+        payload = payload.get("data")
+    if isinstance(payload, list):
+        return [row for row in payload if isinstance(row, dict)]
+    return []
+
+
+def _first_record(payload: Any) -> dict[str, Any] | None:
+    """First record from a FAZ payload of varying nesting.
+
+    Tolerates the shapes seen live: a bare record dict, a list of
+    records, or a dict wrapping a ``data`` list (extra-details).
+    """
+    if isinstance(payload, dict):
+        inner = payload.get("data")
+        if isinstance(inner, list):
+            return inner[0] if inner and isinstance(inner[0], dict) else None
+        return payload
+    if isinstance(payload, list):
+        return payload[0] if payload and isinstance(payload[0], dict) else None
+    return None
+
+
 # --------------------------------------------------------------------- #
 # incidents                                                             #
 # --------------------------------------------------------------------- #
@@ -266,6 +295,10 @@ def _assess(subject: dict[str, Any], subject_type: str) -> TriageAssessment:
     if "acknowledged" in subject:
         acknowledged = bool(subject["acknowledged"])
         basis.append(f"alert acknowledged: {acknowledged}")
+    elif "ackflag" in subject:
+        # Live FAZ alerts carry "ackflag" instead; its value semantics are
+        # not documented, so it is reported verbatim, not interpreted.
+        basis.append(f"alert ackflag: {subject['ackflag']!r}")
     if subject.get("status"):
         basis.append(f"{subject_type} status: {subject['status']!r}")
 
@@ -293,20 +326,53 @@ async def run_triage(params: TriageParams) -> TriageResult:
 
     if params.alert_id:
         subject_type = "alert"
+
+        # Subject = the full alert row from the context window (it carries
+        # severity/status/ack). extra-details is entity enrichment only —
+        # live FAZ returns just {alertid, devs, epids, euids} there.
+        subject: dict[str, Any] = {}
+        alerts_res, err = await _call(
+            get_alerts, adom=params.adom, time_range=params.context_time_range, limit=500
+        )
+        if alerts_res is None:
+            warnings.append(f"alert window scan unavailable: {err}")
+        else:
+            subject = next(
+                (
+                    a
+                    for a in alerts_res.get("data") or []
+                    if str(a.get("alertid")) == str(params.alert_id)
+                ),
+                {},
+            )
+
         details_res, err = await _call(
             get_alert_details, alert_ids=[params.alert_id], adom=params.adom
         )
+        subject_details: dict[str, Any] | None = None
         if details_res is None:
-            raise SkillExecutionError(f"could not retrieve alert {params.alert_id} ({err})")
-        subject = details_res.get("data") or {}
-        if isinstance(subject, list):  # details come back as a list of alert objects
-            subject = subject[0] if subject else {}
+            warnings.append(f"alert entity details unavailable: {err}")
+        else:
+            subject_details = _first_record(details_res.get("data"))
+
+        if not subject:
+            if subject_details is None:
+                raise SkillExecutionError(
+                    f"alert {params.alert_id} not found in the "
+                    f"{params.context_time_range} window and details lookup failed ({err})"
+                )
+            subject = subject_details
+            warnings.append(
+                f"alert {params.alert_id} not in the {params.context_time_range} window; "
+                "subject is the entity-details record (no severity -> priority "
+                "'informational'). Widen context_time_range for a full assessment."
+            )
 
         logs_res, err = await _call(get_alert_logs, alert_ids=[params.alert_id], adom=params.adom)
         if logs_res is None:
             warnings.append(f"triggering logs unavailable: {err}")
         else:
-            triggering_logs = logs_res.get("data") or []
+            triggering_logs = _records(logs_res.get("data"))
 
         # Related incidents: best-effort via linkage ids on the alert.
         linked_incidents = _ids_of(subject, _ALERT_INCIDENT_KEYS)
@@ -333,12 +399,11 @@ async def run_triage(params: TriageParams) -> TriageResult:
                     )
     else:
         subject_type = "incident"
+        subject_details = None
         inc_res, err = await _call(get_incident, incident_id=params.incident_id, adom=params.adom)
         if inc_res is None:
             raise SkillExecutionError(f"could not retrieve incident {params.incident_id} ({err})")
-        subject = inc_res.get("data") or {}
-        if isinstance(subject, list):
-            subject = subject[0] if subject else {}
+        subject = _first_record(inc_res.get("data")) or {}
 
         alerts_res, err = await _call(
             get_alerts, adom=params.adom, time_range=params.context_time_range, limit=200
@@ -373,6 +438,7 @@ async def run_triage(params: TriageParams) -> TriageResult:
     return TriageResult(
         subject_type=subject_type,  # type: ignore[arg-type]
         subject=subject,
+        subject_details=subject_details,
         triggering_logs=triggering_logs,
         related=related,
         context_stats=context_stats,
@@ -473,7 +539,7 @@ async def run_investigation_report(params: InvestigationReportParams) -> Investi
                 if logs_res is None:
                     warnings.append(f"logs for alert {alert_id} unavailable: {err}")
                 else:
-                    logs = (logs_res.get("data") or [])[: params.max_logs_per_alert]
+                    logs = _records(logs_res.get("data"))[: params.max_logs_per_alert]
             evidence.append(AlertEvidence(alert=alert, logs=logs))
 
     # Threat landscape (context; degrades to a gap marker).

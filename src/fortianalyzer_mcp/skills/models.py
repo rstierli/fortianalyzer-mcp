@@ -219,6 +219,11 @@ class TriageResult(BaseModel):
 
     subject_type: Literal["alert", "incident"]
     subject: dict[str, Any] = Field(description="FAZ alert or incident object, verbatim")
+    subject_details: dict[str, Any] | None = Field(
+        default=None,
+        description="Entity enrichment for an alert subject (devs/epids/euids from "
+        "alerts/extra-details), verbatim; None for incident subjects",
+    )
     triggering_logs: list[dict[str, Any]] = Field(
         default_factory=list, description="Logs attached to the subject alert, verbatim"
     )

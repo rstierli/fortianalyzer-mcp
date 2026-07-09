@@ -267,6 +267,10 @@ class TestLogSearchSkill:
 
 
 class TestTriageSkill:
+    DETAILS = ok(
+        data={"data": [{"alertid": "alert-001", "devs": ["FGT-01"], "epids": [7], "euids": [3]}]}
+    )
+
     def test_requires_exactly_one_subject(self):
         with pytest.raises(ValidationError, match="exactly one"):
             TriageParams()
@@ -275,7 +279,8 @@ class TestTriageSkill:
 
     async def test_alert_path(self):
         with (
-            t(GET_ALERT_DETAILS, return_value=ok(data=[ALERT_LINKED])) as details_mock,
+            t(GET_ALERTS, return_value=ok(data=[ALERT_LINKED, ALERT_UNLINKED])),
+            t(GET_ALERT_DETAILS, return_value=self.DETAILS) as details_mock,
             t(GET_ALERT_LOGS, return_value=ok(data=[{"logid": "l-1"}])) as logs_mock,
             t(GET_INCIDENT, return_value=ok(data=INCIDENT)),
             t(GET_ALERT_INCIDENT_STATS, return_value=ok(data={"alerts": 5, "incidents": 1})),
@@ -284,7 +289,8 @@ class TestTriageSkill:
         details_mock.assert_awaited_once_with(alert_ids=["alert-001"], adom=None)
         logs_mock.assert_awaited_once_with(alert_ids=["alert-001"], adom=None)
         assert result.subject_type == "alert"
-        assert result.subject == ALERT_LINKED
+        assert result.subject == ALERT_LINKED  # full row from the window scan
+        assert result.subject_details == self.DETAILS["data"]["data"][0]
         assert result.triggering_logs == [{"logid": "l-1"}]
         assert result.related == [INCIDENT]  # via the alert's incids linkage
         assert result.context_stats == {"alerts": 5, "incidents": 1}
@@ -292,6 +298,27 @@ class TestTriageSkill:
         assert result.assessment.acknowledged is False
         assert isinstance(result.enrichment, FeatureGap)
         assert "Wave 2" in result.enrichment.reason
+
+    async def test_alert_not_in_window_falls_back_to_details(self):
+        with (
+            t(GET_ALERTS, return_value=ok(data=[ALERT_UNLINKED])),  # subject not in window
+            t(GET_ALERT_DETAILS, return_value=self.DETAILS),
+            t(GET_ALERT_LOGS, return_value=ok(data=[])),
+            t(GET_INCIDENTS, return_value=ok(data=[])),
+            t(GET_ALERT_INCIDENT_STATS, return_value=ok(data={})),
+        ):
+            result = await handlers.run_triage(TriageParams(alert_id="alert-001"))
+        assert result.subject == self.DETAILS["data"]["data"][0]
+        assert result.assessment.priority == "informational"  # no severity on details
+        assert any("not in the" in w for w in result.warnings)
+
+    async def test_alert_unresolvable_raises(self):
+        with (
+            t(GET_ALERTS, return_value=ok(data=[])),
+            t(GET_ALERT_DETAILS, side_effect=RuntimeError("down")),
+        ):
+            with pytest.raises(handlers.SkillExecutionError):
+                await handlers.run_triage(TriageParams(alert_id="alert-404"))
 
     async def test_incident_path_correlates_alerts(self):
         with (
@@ -301,35 +328,26 @@ class TestTriageSkill:
         ):
             result = await handlers.run_triage(TriageParams(incident_id="inc-001"))
         assert result.subject_type == "incident"
+        assert result.subject_details is None
         assert result.related == [ALERT_LINKED]
         assert result.assessment.priority == "high"
         assert any("status" in b for b in result.assessment.basis)
 
     async def test_context_failures_degrade_not_fail(self):
         with (
-            t(GET_ALERT_DETAILS, return_value=ok(data=[ALERT_UNLINKED])),
+            t(GET_ALERTS, return_value=ok(data=[ALERT_UNLINKED])),  # subject found
+            t(GET_ALERT_DETAILS, side_effect=RuntimeError("nope")),
             t(GET_ALERT_LOGS, side_effect=RuntimeError("nope")),
             t(GET_INCIDENTS, return_value={"status": "error", "error": "denied"}),
             t(GET_ALERT_INCIDENT_STATS, side_effect=RuntimeError("nope")),
         ):
             result = await handlers.run_triage(TriageParams(alert_id="alert-002"))
         assert result.subject == ALERT_UNLINKED
+        assert result.subject_details is None
         assert result.triggering_logs == []
         assert result.context_stats is None
-        assert len(result.warnings) == 3
+        assert len(result.warnings) == 4  # details, logs, incidents, stats
         assert result.assessment.priority == "medium"
-
-    async def test_severity_absent_maps_to_informational(self):
-        bare = {"alertid": "alert-x"}
-        with (
-            t(GET_ALERT_DETAILS, return_value=ok(data=[bare])),
-            t(GET_ALERT_LOGS, return_value=ok(data=[])),
-            t(GET_INCIDENTS, return_value=ok(data=[])),
-            t(GET_ALERT_INCIDENT_STATS, return_value=ok(data={})),
-        ):
-            result = await handlers.run_triage(TriageParams(alert_id="alert-x"))
-        assert result.assessment.priority == "informational"
-        assert result.assessment.severity is None
 
 
 # --------------------------------------------------------------------- #
