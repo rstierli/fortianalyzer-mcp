@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **FPE masking engine (`fortianalyzer_mcp.masking`) — Phase 0 of the reversible data-masking RFC [#40](https://github.com/rstierli/fortianalyzer-mcp/issues/40).** Format-preserving encryption (NIST FF3-1 via the `ff3` package) with per-type deterministic, key-reversible mask/unmask for IPv4/IPv6, MAC, hostname, username, domain, and email values. Tokens carry recognizable markers where reversibility allows (`host-`/`user-` prefixes, `.masked.invalid` suffix for domains/emails); short values are padded to satisfy the FF3-1 minimum domain size and over-length values are chunked with position-varied tweaks. Engine only — no tool output is masked yet; the tool-boundary wrapper, `MASKING_ENABLED` flag, and configuration wiring follow in later phases. Two RFC deviations found during verification are documented in the module: fully reversible MAC and email tokens cannot keep a fixed reserved OUI / replacement domain, so MACs share the RFC's "IP wrinkle".
 
+## [2.7.2] - 2026-07-09
+
+Patch release: two request-shape bugs in tools that had never worked against a live FAZ — both found by the skills-layer live validation (#44 / PR #46), spec-verified against the bundled 7.6.7/8.0.0 FNDN specs (which agree), confirmed by Roland against FNDN, and live-verified after the fix (PRs #48, #50).
+
+### Fixed
+- **`get_incident` works again: single-incident retrieval goes through the plural `incidents` endpoint.** `GET /incidentmgmt/adom/{adom}/incident/{incid}` does not exist — that path is update-only, and FAZ rejects a GET on it with `Not supported method`, so the tool had never returned data. Retrieval now uses `GET /incidentmgmt/adom/{adom}/incidents` with `incids=[incident_id]` (per the bundled 7.6.7/8.0.0 specs, which agree) at the default detail level — `extended` drops `severity`/`status` (verified live) — unwrapping the single record and raising a clear not-found error for an empty match. Verified live. Closes [#49](https://github.com/rstierli/fortianalyzer-mcp/issues/49).
+- **`get_alert_details` works again: the extra-details request now sends `alertids` (plural).** `GET /eventmgmt/adom/{adom}/alerts/extra-details` requires the `alertids` array parameter (per the bundled 7.6.7 and 8.0.0 specs), but the client sent `alertid` — the key `alertlogs` uses — so FAZ rejected every call with `Invalid params: No Params.` and the tool had never returned data. Verified live. Closes [#47](https://github.com/rstierli/fortianalyzer-mcp/issues/47).
+
 ## [2.7.1] - 2026-07-04
 
 ### Fixed

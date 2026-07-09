@@ -1169,7 +1169,8 @@ class FortiAnalyzerClient:
             "get",
             f"/eventmgmt/adom/{adom}/alerts/extra-details",
             apiver=API_VERSION,
-            alertid=alert_ids,
+            # Spec param is "alertids" (plural) — unlike alertlogs' "alertid".
+            alertids=alert_ids,
         )
 
     async def add_alert_comment(
@@ -1616,11 +1617,27 @@ class FortiAnalyzerClient:
     ) -> dict[str, Any]:
         """Get specific incident details.
 
-        FNDN: GET /incidentmgmt/adom/{adom}/incident/{incid}
+        FNDN: GET /incidentmgmt/adom/{adom}/incidents (incids=[...])
+
+        There is no single-incident GET endpoint — ``incident/{incid}``
+        exists only as an update path. Retrieval goes through the plural
+        ``incidents`` endpoint with an ``incids`` list at the default
+        (standard) detail level: "extended" adds eparr/euarr/attachments
+        but drops ``severity``/``status`` (verified live), which callers
+        need.
         """
-        return await self._raw_request_dict(
-            "get", f"/incidentmgmt/adom/{adom}/incident/{incident_id}", apiver=API_VERSION
+        result = await self._raw_request_dict(
+            "get",
+            f"/incidentmgmt/adom/{adom}/incidents",
+            apiver=API_VERSION,
+            incids=[incident_id],
         )
+        data = result.get("data") if isinstance(result, dict) else None
+        if isinstance(data, list):
+            if not data:
+                raise APIError(f"Incident {incident_id} not found")
+            return cast(dict[str, Any], data[0])
+        return result
 
     async def get_incidents_count(
         self,
