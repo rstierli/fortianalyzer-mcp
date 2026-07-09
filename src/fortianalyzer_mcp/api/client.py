@@ -1169,7 +1169,8 @@ class FortiAnalyzerClient:
             "get",
             f"/eventmgmt/adom/{adom}/alerts/extra-details",
             apiver=API_VERSION,
-            alertid=alert_ids,
+            # Spec param is "alertids" (plural) — unlike alertlogs' "alertid".
+            alertids=alert_ids,
         )
 
     async def add_alert_comment(
