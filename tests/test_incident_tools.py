@@ -79,6 +79,44 @@ class TestIncidentClient:
         assert incidents[0]["incid"] == "inc-001"
         assert incidents[0]["severity"] == "high"
 
+    async def test_get_incident_uses_incidents_endpoint_with_incids(
+        self, mock_client_with_incidents: FortiAnalyzerClient
+    ) -> None:
+        """Regression for #49: no single-incident GET endpoint exists.
+
+        Retrieval must go through the plural "incidents" endpoint with an
+        incids list; incident/{incid} is update-only and FAZ rejects a GET
+        on it with "Not supported method".
+        """
+        from unittest.mock import AsyncMock, patch
+
+        with patch.object(
+            mock_client_with_incidents,
+            "_raw_request",
+            AsyncMock(return_value={"data": [{"incid": "IN00000019"}]}),
+        ) as raw:
+            result = await mock_client_with_incidents.get_incident(
+                adom="root", incident_id="IN00000019"
+            )
+        url = raw.await_args.args[1]
+        assert url == "/incidentmgmt/adom/root/incidents"
+        assert raw.await_args.kwargs["incids"] == ["IN00000019"]
+        assert result == {"incid": "IN00000019"}
+
+    async def test_get_incident_not_found_raises(
+        self, mock_client_with_incidents: FortiAnalyzerClient
+    ) -> None:
+        """An empty incids match raises instead of returning an empty dict."""
+        from unittest.mock import AsyncMock, patch
+
+        from fortianalyzer_mcp.utils.errors import APIError
+
+        with patch.object(
+            mock_client_with_incidents, "_raw_request", AsyncMock(return_value={"data": []})
+        ):
+            with pytest.raises(APIError, match="IN00000404"):
+                await mock_client_with_incidents.get_incident(adom="root", incident_id="IN00000404")
+
     async def test_get_incidents_count_success(
         self, mock_client_with_incidents: FortiAnalyzerClient
     ) -> None:
