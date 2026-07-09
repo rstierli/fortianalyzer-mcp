@@ -5,6 +5,11 @@ All notable changes to FortiAnalyzer MCP Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **FPE masking engine (`fortianalyzer_mcp.masking`) — Phase 0 of the reversible data-masking RFC [#40](https://github.com/rstierli/fortianalyzer-mcp/issues/40).** Format-preserving encryption (NIST FF3-1 via the `ff3` package) with per-type deterministic, key-reversible mask/unmask for IPv4/IPv6, MAC, hostname, username, domain, and email values. Tokens carry recognizable markers where reversibility allows (`host-`/`user-` prefixes, `.masked.invalid` suffix for domains/emails); short values are padded to satisfy the FF3-1 minimum domain size and over-length values are chunked with position-varied tweaks. Engine only — no tool output is masked yet; the tool-boundary wrapper, `MASKING_ENABLED` flag, and configuration wiring follow in later phases. Two RFC deviations found during verification are documented in the module: fully reversible MAC and email tokens cannot keep a fixed reserved OUI / replacement domain, so MACs share the RFC's "IP wrinkle".
+
 ## [2.7.1] - 2026-07-04
 
 ### Fixed
