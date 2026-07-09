@@ -5,6 +5,11 @@ All notable changes to FortiAnalyzer MCP Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **`get_alert_details` works again: the extra-details request now sends `alertids` (plural).** `GET /eventmgmt/adom/{adom}/alerts/extra-details` requires the `alertids` array parameter (per the bundled 7.6.7 and 8.0.0 specs), but the client sent `alertid` — the key `alertlogs` uses — so FAZ rejected every call with `Invalid params: No Params.` and the tool had never returned data. Verified live. Closes [#47](https://github.com/rstierli/fortianalyzer-mcp/issues/47).
+
 ## [2.7.1] - 2026-07-04
 
 ### Fixed

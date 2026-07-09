@@ -88,6 +88,27 @@ class TestAlertClient:
         assert alerts[0]["alertid"] == "alert-001"
         assert alerts[0]["severity"] == "high"
 
+    async def test_get_alert_extra_details_sends_alertids_param(
+        self, mock_client_with_events: FortiAnalyzerClient
+    ) -> None:
+        """Regression for #47: extra-details requires "alertids" (plural).
+
+        Unlike alertlogs (whose spec param is "alertid"), the
+        alerts/extra-details request param is "alertids"; sending the
+        singular key makes FAZ reject every call with "No Params".
+        """
+        from unittest.mock import AsyncMock, patch
+
+        with patch.object(
+            mock_client_with_events, "_raw_request", AsyncMock(return_value={})
+        ) as raw:
+            await mock_client_with_events.get_alert_extra_details(
+                adom="root", alert_ids=["a-1", "a-2"]
+            )
+        kwargs = raw.await_args.kwargs
+        assert kwargs.get("alertids") == ["a-1", "a-2"]
+        assert "alertid" not in kwargs
+
     async def test_get_alerts_count_success(
         self, mock_client_with_events: FortiAnalyzerClient
     ) -> None:
