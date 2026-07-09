@@ -251,3 +251,16 @@ class TestUnmaskToken:
     def test_marker_with_garbage_payload_raises(self, engine: FPEEngine):
         with pytest.raises(MaskingError):
             engine.unmask_token("host-###")
+
+    def test_unmask_tolerates_uppercased_tokens(self, engine: FPEEngine):
+        # Tokens are lowercase by construction, but a model may title-case one
+        # at the start of a sentence before handing it back as an argument.
+        cases = {
+            engine.mask_hostname("edge-fw-01"): "edge-fw-01",
+            engine.mask_username("jdoe"): "jdoe",
+            engine.mask_domain("example.com"): "example.com",
+            engine.mask_email("alice@example.com"): "alice@example.com",
+        }
+        for token, real in cases.items():
+            assert engine.unmask_token(token.upper()) == real
+            assert engine.unmask_token(token.capitalize()) == real
