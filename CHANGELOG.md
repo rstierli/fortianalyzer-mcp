@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Skills layer (beta) — Wave 1 of the skills RFC [#44](https://github.com/rstierli/fortianalyzer-mcp/issues/44).** One new dispatcher tool, `faz_skill(skill, params)`, exposing opinionated multi-tool orchestrations with pydantic-validated, versioned output schemas: `incidents` (incidents + best-effort correlated alerts), `reports` (list/fetch generated reports), `log_search` (filter-based search, verbatim rows), `triage` (alert/incident evidence bundle + deterministic severity-derived assessment), and `investigation_report` (structured incident summary with evidence logs, threat landscape, and derived timeline). `skill="list"` returns the machine-readable catalogue including each skill's parameter and output JSON schema. Feature-flagged via `FAZ_SKILLS_ENABLED` (default **off** — no behavior change unless enabled), read-only, additive only (zero edits to existing tool modules), and slot-safe (at most one logview search per invocation, bounded by the existing logsearch semaphore). Not available in `FAZ_TOOL_MODE=dynamic` (beta limitation, logged as a warning). Triage's indicator-enrichment slot reports "unavailable" until the Wave-2 SOAR reader lands.
 
+## [2.7.2] - 2026-07-09
+
+Patch release: two request-shape bugs in tools that had never worked against a live FAZ — both found by the skills-layer live validation (#44 / PR #46), spec-verified against the bundled 7.6.7/8.0.0 FNDN specs (which agree), confirmed by Roland against FNDN, and live-verified after the fix (PRs #48, #50).
+
+### Fixed
+- **`get_incident` works again: single-incident retrieval goes through the plural `incidents` endpoint.** `GET /incidentmgmt/adom/{adom}/incident/{incid}` does not exist — that path is update-only, and FAZ rejects a GET on it with `Not supported method`, so the tool had never returned data. Retrieval now uses `GET /incidentmgmt/adom/{adom}/incidents` with `incids=[incident_id]` (per the bundled 7.6.7/8.0.0 specs, which agree) at the default detail level — `extended` drops `severity`/`status` (verified live) — unwrapping the single record and raising a clear not-found error for an empty match. Verified live. Closes [#49](https://github.com/rstierli/fortianalyzer-mcp/issues/49).
+- **`get_alert_details` works again: the extra-details request now sends `alertids` (plural).** `GET /eventmgmt/adom/{adom}/alerts/extra-details` requires the `alertids` array parameter (per the bundled 7.6.7 and 8.0.0 specs), but the client sent `alertid` — the key `alertlogs` uses — so FAZ rejected every call with `Invalid params: No Params.` and the tool had never returned data. Verified live. Closes [#47](https://github.com/rstierli/fortianalyzer-mcp/issues/47).
+
 ## [2.7.1] - 2026-07-04
 
 ### Fixed
