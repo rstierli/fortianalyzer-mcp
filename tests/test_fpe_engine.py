@@ -78,9 +78,7 @@ class TestIpMasking:
         assert engine.unmask_ip(masked) == ip
 
     def test_deterministic_across_instances(self):
-        assert FPEEngine(KEY_128).mask_ip("192.0.2.48") == FPEEngine(KEY_128).mask_ip(
-            "192.0.2.48"
-        )
+        assert FPEEngine(KEY_128).mask_ip("192.0.2.48") == FPEEngine(KEY_128).mask_ip("192.0.2.48")
 
     def test_different_key_different_token(self):
         assert FPEEngine(KEY_128).mask_ip("192.0.2.48") != FPEEngine(OTHER_KEY).mask_ip(
