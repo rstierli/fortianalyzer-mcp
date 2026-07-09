@@ -179,11 +179,22 @@ async def run_reports(params: ReportsParams) -> ReportsResult:
     from fortianalyzer_mcp.tools.report_tools import get_report_data, get_report_history
 
     if params.action == "list":
-        history_res, err = await _call(get_report_history, adom=params.adom, limit=params.limit)
+        history_res, err = await _call(
+            get_report_history,
+            adom=params.adom,
+            time_range=params.time_range,
+            title=params.title,
+        )
         if history_res is None:
             raise SkillExecutionError(f"could not retrieve report history ({err})")
         reports = history_res.get("data") or []
-        return ReportsResult(action="list", reports=reports, report_count=len(reports))
+        warnings: list[str] = []
+        if len(reports) > params.limit:
+            warnings.append(f"{len(reports)} history entries; returning the first {params.limit}")
+            reports = reports[: params.limit]
+        return ReportsResult(
+            action="list", reports=reports, report_count=len(reports), warnings=warnings
+        )
 
     fetched_res, err = await _call(
         get_report_data,
@@ -283,15 +294,15 @@ async def run_triage(params: TriageParams) -> TriageResult:
     if params.alert_id:
         subject_type = "alert"
         details_res, err = await _call(
-            get_alert_details, alert_id=params.alert_id, adom=params.adom
+            get_alert_details, alert_ids=[params.alert_id], adom=params.adom
         )
         if details_res is None:
             raise SkillExecutionError(f"could not retrieve alert {params.alert_id} ({err})")
         subject = details_res.get("data") or {}
-        if isinstance(subject, list):  # some FAZ builds wrap the object in a list
+        if isinstance(subject, list):  # details come back as a list of alert objects
             subject = subject[0] if subject else {}
 
-        logs_res, err = await _call(get_alert_logs, alert_id=params.alert_id, adom=params.adom)
+        logs_res, err = await _call(get_alert_logs, alert_ids=[params.alert_id], adom=params.adom)
         if logs_res is None:
             warnings.append(f"triggering logs unavailable: {err}")
         else:
@@ -453,7 +464,12 @@ async def run_investigation_report(params: InvestigationReportParams) -> Investi
             logs: list[dict[str, Any]] = []
             alert_id = next(iter(_ids_of(alert, ("alertid",))), None)
             if alert_id:
-                logs_res, err = await _call(get_alert_logs, alert_id=alert_id, adom=params.adom)
+                logs_res, err = await _call(
+                    get_alert_logs,
+                    alert_ids=[alert_id],
+                    adom=params.adom,
+                    limit=params.max_logs_per_alert,
+                )
                 if logs_res is None:
                     warnings.append(f"logs for alert {alert_id} unavailable: {err}")
                 else:

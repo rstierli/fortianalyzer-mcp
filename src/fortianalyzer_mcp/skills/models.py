@@ -103,7 +103,11 @@ class ReportsParams(BaseModel):
     action: Literal["list", "fetch"] = Field(
         default="list", description='"list" = report history; "fetch" = download one report'
     )
-    limit: int = Field(default=50, ge=1, le=500, description="Max history entries (list)")
+    time_range: str = Field(default="7-day", description="History window (list)")
+    title: str | None = Field(default=None, description="Filter history by report title (list)")
+    limit: int = Field(
+        default=50, ge=1, le=500, description="Max history entries returned (applied client-side)"
+    )
     tid: str | int | None = Field(default=None, description="Report task ID (fetch)")
     output_format: Literal["PDF", "HTML", "CSV", "XML"] = Field(
         default="PDF", description="Download format (fetch)"

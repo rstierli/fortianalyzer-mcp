@@ -2,13 +2,17 @@
 
 Handlers are tested by patching the underlying tool functions at their
 defining modules (the handlers import them lazily per call, so patching
-the module attribute is authoritative). Every assertion runs against the
-validated pydantic output models — the same contract the dispatcher
-enforces.
+the module attribute is authoritative). All patches use ``autospec=True``
+so a handler calling a tool with a signature the real function does not
+accept fails here, not against a live FAZ — the exact drift the first
+live validation run caught.
+
+Every assertion runs against the validated pydantic output models — the
+same contract the dispatcher enforces.
 """
 
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
@@ -27,6 +31,22 @@ from fortianalyzer_mcp.skills.models import (
 )
 
 WAVE1_SKILL_IDS = {"incidents", "reports", "log_search", "triage", "investigation_report"}
+
+GET_INCIDENTS = "fortianalyzer_mcp.tools.incident_tools.get_incidents"
+GET_INCIDENT = "fortianalyzer_mcp.tools.incident_tools.get_incident"
+GET_ALERTS = "fortianalyzer_mcp.tools.event_tools.get_alerts"
+GET_ALERT_DETAILS = "fortianalyzer_mcp.tools.event_tools.get_alert_details"
+GET_ALERT_LOGS = "fortianalyzer_mcp.tools.event_tools.get_alert_logs"
+GET_ALERT_INCIDENT_STATS = "fortianalyzer_mcp.tools.event_tools.get_alert_incident_stats"
+GET_REPORT_HISTORY = "fortianalyzer_mcp.tools.report_tools.get_report_history"
+GET_REPORT_DATA = "fortianalyzer_mcp.tools.report_tools.get_report_data"
+QUERY_LOGS = "fortianalyzer_mcp.tools.log_tools.query_logs"
+GET_TOP_THREATS = "fortianalyzer_mcp.tools.fortiview_tools.get_top_threats"
+
+
+def t(target: str, **kwargs: Any) -> Any:
+    """``patch`` a tool function with autospec (signature-validating)."""
+    return patch(target, autospec=True, **kwargs)
 
 
 def ok(**fields: Any) -> dict[str, Any]:
@@ -105,22 +125,15 @@ class TestDispatcher:
         assert result["skill"] == "triage"
 
     async def test_subject_failure_maps_to_skill_failed(self):
-        failing = AsyncMock(return_value={"status": "error", "message": "boom"})
-        with patch("fortianalyzer_mcp.tools.incident_tools.get_incidents", failing):
+        with t(GET_INCIDENTS, return_value={"status": "error", "message": "boom"}):
             result = await faz_skill(skill="incidents", params={"include_alerts": False})
         assert result["status"] == "error"
         assert result["error"] == "skill_failed"
 
     async def test_success_envelope(self):
         with (
-            patch(
-                "fortianalyzer_mcp.tools.incident_tools.get_incidents",
-                AsyncMock(return_value=ok(data=[INCIDENT])),
-            ),
-            patch(
-                "fortianalyzer_mcp.tools.event_tools.get_alerts",
-                AsyncMock(return_value=ok(data=[ALERT_LINKED])),
-            ),
+            t(GET_INCIDENTS, return_value=ok(data=[INCIDENT])),
+            t(GET_ALERTS, return_value=ok(data=[ALERT_LINKED])),
         ):
             result = await faz_skill(skill="incidents", params={})
         assert result["status"] == "success"
@@ -137,14 +150,8 @@ class TestDispatcher:
 class TestIncidentsSkill:
     async def test_correlates_alerts_by_linkage_field(self):
         with (
-            patch(
-                "fortianalyzer_mcp.tools.incident_tools.get_incidents",
-                AsyncMock(return_value=ok(data=[INCIDENT])),
-            ),
-            patch(
-                "fortianalyzer_mcp.tools.event_tools.get_alerts",
-                AsyncMock(return_value=ok(data=[ALERT_LINKED, ALERT_UNLINKED])),
-            ),
+            t(GET_INCIDENTS, return_value=ok(data=[INCIDENT])),
+            t(GET_ALERTS, return_value=ok(data=[ALERT_LINKED, ALERT_UNLINKED])),
         ):
             result = await handlers.run_incidents(IncidentsParams())
         assert result.incident_count == 1
@@ -156,14 +163,8 @@ class TestIncidentsSkill:
 
     async def test_no_linkage_fields_warns(self):
         with (
-            patch(
-                "fortianalyzer_mcp.tools.incident_tools.get_incidents",
-                AsyncMock(return_value=ok(data=[INCIDENT])),
-            ),
-            patch(
-                "fortianalyzer_mcp.tools.event_tools.get_alerts",
-                AsyncMock(return_value=ok(data=[ALERT_UNLINKED])),
-            ),
+            t(GET_INCIDENTS, return_value=ok(data=[INCIDENT])),
+            t(GET_ALERTS, return_value=ok(data=[ALERT_UNLINKED])),
         ):
             result = await handlers.run_incidents(IncidentsParams())
         assert result.incidents[0].correlated_alerts == []
@@ -171,14 +172,8 @@ class TestIncidentsSkill:
 
     async def test_alert_fetch_failure_degrades(self):
         with (
-            patch(
-                "fortianalyzer_mcp.tools.incident_tools.get_incidents",
-                AsyncMock(return_value=ok(data=[INCIDENT])),
-            ),
-            patch(
-                "fortianalyzer_mcp.tools.event_tools.get_alerts",
-                AsyncMock(side_effect=RuntimeError("faz down")),
-            ),
+            t(GET_INCIDENTS, return_value=ok(data=[INCIDENT])),
+            t(GET_ALERTS, side_effect=RuntimeError("faz down")),
         ):
             result = await handlers.run_incidents(IncidentsParams())
         assert result.incident_count == 1
@@ -186,23 +181,16 @@ class TestIncidentsSkill:
         assert any("correlation skipped" in w for w in result.warnings)
 
     async def test_include_alerts_false_skips_scan(self):
-        alerts_mock = AsyncMock()
         with (
-            patch(
-                "fortianalyzer_mcp.tools.incident_tools.get_incidents",
-                AsyncMock(return_value=ok(data=[INCIDENT])),
-            ),
-            patch("fortianalyzer_mcp.tools.event_tools.get_alerts", alerts_mock),
+            t(GET_INCIDENTS, return_value=ok(data=[INCIDENT])),
+            t(GET_ALERTS) as alerts_mock,
         ):
             result = await handlers.run_incidents(IncidentsParams(include_alerts=False))
         alerts_mock.assert_not_awaited()
         assert result.alerts_scanned == 0
 
     async def test_incidents_failure_raises(self):
-        with patch(
-            "fortianalyzer_mcp.tools.incident_tools.get_incidents",
-            AsyncMock(return_value={"status": "error", "error": "no_permission"}),
-        ):
+        with t(GET_INCIDENTS, return_value={"status": "error", "error": "no_permission"}):
             with pytest.raises(handlers.SkillExecutionError):
                 await handlers.run_incidents(IncidentsParams())
 
@@ -215,19 +203,23 @@ class TestIncidentsSkill:
 class TestReportsSkill:
     async def test_list(self):
         history = [{"tid": "t-1", "title": "Weekly"}, {"tid": "t-2", "title": "Monthly"}]
-        with patch(
-            "fortianalyzer_mcp.tools.report_tools.get_report_history",
-            AsyncMock(return_value=ok(data=history)),
-        ):
+        with t(GET_REPORT_HISTORY, return_value=ok(data=history)) as mock:
             result = await handlers.run_reports(ReportsParams())
         assert result.action == "list"
         assert result.report_count == 2
         assert result.reports == history
+        mock.assert_awaited_once_with(adom=None, time_range="7-day", title=None)
+
+    async def test_list_applies_client_side_limit(self):
+        history = [{"tid": f"t-{i}"} for i in range(5)]
+        with t(GET_REPORT_HISTORY, return_value=ok(data=history)):
+            result = await handlers.run_reports(ReportsParams(limit=2))
+        assert result.report_count == 2
+        assert any("first 2" in w for w in result.warnings)
 
     async def test_fetch(self):
         fetched = ok(tid="t-1", format="CSV", data="...")
-        mock = AsyncMock(return_value=fetched)
-        with patch("fortianalyzer_mcp.tools.report_tools.get_report_data", mock):
+        with t(GET_REPORT_DATA, return_value=fetched) as mock:
             result = await handlers.run_reports(
                 ReportsParams(action="fetch", tid="t-1", output_format="CSV")
             )
@@ -236,7 +228,7 @@ class TestReportsSkill:
         mock.assert_awaited_once_with(tid="t-1", adom=None, output_format="CSV")
 
     def test_fetch_requires_tid(self):
-        with pytest.raises(Exception, match="tid"):
+        with pytest.raises(ValidationError, match="tid"):
             ReportsParams(action="fetch")
 
 
@@ -248,12 +240,10 @@ class TestReportsSkill:
 class TestLogSearchSkill:
     async def test_rows_pass_through_verbatim(self):
         rows = [{"srcip": "192.0.2.1", "dstip": "198.51.100.2", "action": "deny"}]
-        with patch(
-            "fortianalyzer_mcp.tools.log_tools.query_logs",
-            AsyncMock(
-                return_value=ok(
-                    tid=99, logs=rows, total=1, total_is_known=True, has_more=False, warnings=[]
-                )
+        with t(
+            QUERY_LOGS,
+            return_value=ok(
+                tid=99, logs=rows, total=1, total_is_known=True, has_more=False, warnings=[]
             ),
         ) as mock:
             result = await handlers.run_log_search(
@@ -266,10 +256,7 @@ class TestLogSearchSkill:
         assert mock.await_args.kwargs["filter"] == "action==deny"
 
     async def test_search_failure_raises(self):
-        with patch(
-            "fortianalyzer_mcp.tools.log_tools.query_logs",
-            AsyncMock(return_value={"status": "error", "error": "search_timeout"}),
-        ):
+        with t(QUERY_LOGS, return_value={"status": "error", "error": "search_timeout"}):
             with pytest.raises(handlers.SkillExecutionError):
                 await handlers.run_log_search(LogSearchParams())
 
@@ -281,31 +268,21 @@ class TestLogSearchSkill:
 
 class TestTriageSkill:
     def test_requires_exactly_one_subject(self):
-        with pytest.raises(Exception, match="exactly one"):
+        with pytest.raises(ValidationError, match="exactly one"):
             TriageParams()
-        with pytest.raises(Exception, match="exactly one"):
+        with pytest.raises(ValidationError, match="exactly one"):
             TriageParams(alert_id="a", incident_id="i")
 
     async def test_alert_path(self):
         with (
-            patch(
-                "fortianalyzer_mcp.tools.event_tools.get_alert_details",
-                AsyncMock(return_value=ok(data=ALERT_LINKED)),
-            ),
-            patch(
-                "fortianalyzer_mcp.tools.event_tools.get_alert_logs",
-                AsyncMock(return_value=ok(data=[{"logid": "l-1"}])),
-            ),
-            patch(
-                "fortianalyzer_mcp.tools.incident_tools.get_incident",
-                AsyncMock(return_value=ok(data=INCIDENT)),
-            ),
-            patch(
-                "fortianalyzer_mcp.tools.event_tools.get_alert_incident_stats",
-                AsyncMock(return_value=ok(data={"alerts": 5, "incidents": 1})),
-            ),
+            t(GET_ALERT_DETAILS, return_value=ok(data=[ALERT_LINKED])) as details_mock,
+            t(GET_ALERT_LOGS, return_value=ok(data=[{"logid": "l-1"}])) as logs_mock,
+            t(GET_INCIDENT, return_value=ok(data=INCIDENT)),
+            t(GET_ALERT_INCIDENT_STATS, return_value=ok(data={"alerts": 5, "incidents": 1})),
         ):
             result = await handlers.run_triage(TriageParams(alert_id="alert-001"))
+        details_mock.assert_awaited_once_with(alert_ids=["alert-001"], adom=None)
+        logs_mock.assert_awaited_once_with(alert_ids=["alert-001"], adom=None)
         assert result.subject_type == "alert"
         assert result.subject == ALERT_LINKED
         assert result.triggering_logs == [{"logid": "l-1"}]
@@ -318,18 +295,9 @@ class TestTriageSkill:
 
     async def test_incident_path_correlates_alerts(self):
         with (
-            patch(
-                "fortianalyzer_mcp.tools.incident_tools.get_incident",
-                AsyncMock(return_value=ok(data=INCIDENT)),
-            ),
-            patch(
-                "fortianalyzer_mcp.tools.event_tools.get_alerts",
-                AsyncMock(return_value=ok(data=[ALERT_LINKED, ALERT_UNLINKED])),
-            ),
-            patch(
-                "fortianalyzer_mcp.tools.event_tools.get_alert_incident_stats",
-                AsyncMock(return_value=ok(data={"alerts": 5})),
-            ),
+            t(GET_INCIDENT, return_value=ok(data=INCIDENT)),
+            t(GET_ALERTS, return_value=ok(data=[ALERT_LINKED, ALERT_UNLINKED])),
+            t(GET_ALERT_INCIDENT_STATS, return_value=ok(data={"alerts": 5})),
         ):
             result = await handlers.run_triage(TriageParams(incident_id="inc-001"))
         assert result.subject_type == "incident"
@@ -339,22 +307,10 @@ class TestTriageSkill:
 
     async def test_context_failures_degrade_not_fail(self):
         with (
-            patch(
-                "fortianalyzer_mcp.tools.event_tools.get_alert_details",
-                AsyncMock(return_value=ok(data=ALERT_UNLINKED)),
-            ),
-            patch(
-                "fortianalyzer_mcp.tools.event_tools.get_alert_logs",
-                AsyncMock(side_effect=RuntimeError("nope")),
-            ),
-            patch(
-                "fortianalyzer_mcp.tools.incident_tools.get_incidents",
-                AsyncMock(return_value={"status": "error", "error": "denied"}),
-            ),
-            patch(
-                "fortianalyzer_mcp.tools.event_tools.get_alert_incident_stats",
-                AsyncMock(side_effect=RuntimeError("nope")),
-            ),
+            t(GET_ALERT_DETAILS, return_value=ok(data=[ALERT_UNLINKED])),
+            t(GET_ALERT_LOGS, side_effect=RuntimeError("nope")),
+            t(GET_INCIDENTS, return_value={"status": "error", "error": "denied"}),
+            t(GET_ALERT_INCIDENT_STATS, side_effect=RuntimeError("nope")),
         ):
             result = await handlers.run_triage(TriageParams(alert_id="alert-002"))
         assert result.subject == ALERT_UNLINKED
@@ -366,22 +322,10 @@ class TestTriageSkill:
     async def test_severity_absent_maps_to_informational(self):
         bare = {"alertid": "alert-x"}
         with (
-            patch(
-                "fortianalyzer_mcp.tools.event_tools.get_alert_details",
-                AsyncMock(return_value=ok(data=bare)),
-            ),
-            patch(
-                "fortianalyzer_mcp.tools.event_tools.get_alert_logs",
-                AsyncMock(return_value=ok(data=[])),
-            ),
-            patch(
-                "fortianalyzer_mcp.tools.incident_tools.get_incidents",
-                AsyncMock(return_value=ok(data=[])),
-            ),
-            patch(
-                "fortianalyzer_mcp.tools.event_tools.get_alert_incident_stats",
-                AsyncMock(return_value=ok(data={})),
-            ),
+            t(GET_ALERT_DETAILS, return_value=ok(data=[bare])),
+            t(GET_ALERT_LOGS, return_value=ok(data=[])),
+            t(GET_INCIDENTS, return_value=ok(data=[])),
+            t(GET_ALERT_INCIDENT_STATS, return_value=ok(data={})),
         ):
             result = await handlers.run_triage(TriageParams(alert_id="alert-x"))
         assert result.assessment.priority == "informational"
@@ -397,26 +341,17 @@ class TestInvestigationReportSkill:
     async def test_full_report(self):
         threats = [{"threat": "Backdoor.X", "threatweight": 900}]
         with (
-            patch(
-                "fortianalyzer_mcp.tools.incident_tools.get_incident",
-                AsyncMock(return_value=ok(data=INCIDENT)),
-            ),
-            patch(
-                "fortianalyzer_mcp.tools.event_tools.get_alerts",
-                AsyncMock(return_value=ok(data=[ALERT_LINKED, ALERT_UNLINKED])),
-            ),
-            patch(
-                "fortianalyzer_mcp.tools.event_tools.get_alert_logs",
-                AsyncMock(return_value=ok(data=[{"logid": "l-1"}, {"logid": "l-2"}])),
-            ),
-            patch(
-                "fortianalyzer_mcp.tools.fortiview_tools.get_top_threats",
-                AsyncMock(return_value=ok(data=threats)),
-            ),
+            t(GET_INCIDENT, return_value=ok(data=INCIDENT)),
+            t(GET_ALERTS, return_value=ok(data=[ALERT_LINKED, ALERT_UNLINKED])),
+            t(
+                GET_ALERT_LOGS, return_value=ok(data=[{"logid": "l-1"}, {"logid": "l-2"}])
+            ) as logs_mock,
+            t(GET_TOP_THREATS, return_value=ok(data=threats)),
         ):
             result = await handlers.run_investigation_report(
                 InvestigationReportParams(incident_id="inc-001")
             )
+        logs_mock.assert_awaited_once_with(alert_ids=["alert-001"], adom=None, limit=20)
         assert result.incident == INCIDENT
         assert len(result.alerts) == 1
         assert result.alerts[0].alert == ALERT_LINKED
@@ -428,18 +363,9 @@ class TestInvestigationReportSkill:
 
     async def test_threats_failure_becomes_gap(self):
         with (
-            patch(
-                "fortianalyzer_mcp.tools.incident_tools.get_incident",
-                AsyncMock(return_value=ok(data=INCIDENT)),
-            ),
-            patch(
-                "fortianalyzer_mcp.tools.event_tools.get_alerts",
-                AsyncMock(return_value=ok(data=[])),
-            ),
-            patch(
-                "fortianalyzer_mcp.tools.fortiview_tools.get_top_threats",
-                AsyncMock(side_effect=RuntimeError("fortiview down")),
-            ),
+            t(GET_INCIDENT, return_value=ok(data=INCIDENT)),
+            t(GET_ALERTS, return_value=ok(data=[])),
+            t(GET_TOP_THREATS, side_effect=RuntimeError("fortiview down")),
         ):
             result = await handlers.run_investigation_report(
                 InvestigationReportParams(incident_id="inc-001")
@@ -453,18 +379,9 @@ class TestInvestigationReportSkill:
             for i in range(5)
         ]
         with (
-            patch(
-                "fortianalyzer_mcp.tools.incident_tools.get_incident",
-                AsyncMock(return_value=ok(data=INCIDENT)),
-            ),
-            patch(
-                "fortianalyzer_mcp.tools.event_tools.get_alerts",
-                AsyncMock(return_value=ok(data=linked_alerts)),
-            ),
-            patch(
-                "fortianalyzer_mcp.tools.event_tools.get_alert_logs",
-                AsyncMock(return_value=ok(data=[])),
-            ),
+            t(GET_INCIDENT, return_value=ok(data=INCIDENT)),
+            t(GET_ALERTS, return_value=ok(data=linked_alerts)),
+            t(GET_ALERT_LOGS, return_value=ok(data=[])),
         ):
             result = await handlers.run_investigation_report(
                 InvestigationReportParams(
@@ -476,10 +393,7 @@ class TestInvestigationReportSkill:
         assert isinstance(result.threat_landscape, FeatureGap)
 
     async def test_incident_failure_raises(self):
-        with patch(
-            "fortianalyzer_mcp.tools.incident_tools.get_incident",
-            AsyncMock(return_value={"status": "error", "error": "not_found"}),
-        ):
+        with t(GET_INCIDENT, return_value={"status": "error", "error": "not_found"}):
             with pytest.raises(handlers.SkillExecutionError):
                 await handlers.run_investigation_report(
                     InvestigationReportParams(incident_id="inc-404")
