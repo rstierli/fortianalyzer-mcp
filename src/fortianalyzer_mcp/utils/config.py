@@ -125,6 +125,13 @@ class Settings(BaseSettings):
         description="Tool loading mode: 'full' loads all tools, 'dynamic' loads meta-tools only",
     )
 
+    # Skills layer (RFC #44) — additive, off by default
+    FAZ_SKILLS_ENABLED: bool = Field(
+        default=False,
+        description="Register the faz_skill dispatcher tool (beta). "
+        "Off by default; no behavior change unless enabled.",
+    )
+
     # Logging Configuration
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
         default="INFO",

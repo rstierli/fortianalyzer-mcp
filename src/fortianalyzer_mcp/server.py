@@ -385,6 +385,12 @@ if settings.FAZ_TOOL_MODE == "dynamic":
     logger.info("Loading in DYNAMIC mode - discovery tools only")
     register_dynamic_tools(mcp)
 
+    if settings.FAZ_SKILLS_ENABLED:
+        # Skills lazily import full tool modules per call, which would
+        # register raw tools mid-session and defeat dynamic mode's
+        # minimal surface — unsupported in the skills beta.
+        logger.warning("FAZ_SKILLS_ENABLED is ignored in dynamic mode (beta limitation)")
+
 else:
     # Full mode: Load all tools (default behavior)
     logger.info("Loading in FULL mode - all tools")
@@ -402,6 +408,11 @@ else:
         system_tools,
         traffic_tools,
     )
+
+    if settings.FAZ_SKILLS_ENABLED:
+        # Skills layer (RFC #44): one additional dispatcher tool, beta.
+        logger.info("FAZ_SKILLS_ENABLED - registering faz_skill dispatcher (beta)")
+        from fortianalyzer_mcp.skills import dispatcher  # noqa: E402, F401
 
 
 def main() -> None:
