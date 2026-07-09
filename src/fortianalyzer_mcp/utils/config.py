@@ -125,6 +125,13 @@ class Settings(BaseSettings):
         description="Tool loading mode: 'full' loads all tools, 'dynamic' loads meta-tools only",
     )
 
+    # Reversible data masking (RFC #40) — additive, off by default
+    MASKING_ENABLED: bool = Field(
+        default=False,
+        description="Mask IOC/PII fields in tool outputs via FPE (requires FAZ_MASKING_KEY). "
+        "Off by default; no behavior change unless enabled.",
+    )
+
     # Logging Configuration
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
         default="INFO",
