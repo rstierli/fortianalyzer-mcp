@@ -54,6 +54,26 @@ def ok(**fields: Any) -> dict[str, Any]:
     return {"status": "success", **fields}
 
 
+def attachment_client(records: list[dict[str, Any]]) -> Any:
+    """Patch get_faz_client with a client whose GET returns attachments."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    client = MagicMock()
+    client.get = AsyncMock(return_value={"data": records})
+    return patch("fortianalyzer_mcp.server.get_faz_client", return_value=client)
+
+
+def alertevent_attachment(alertid: str, snapshot: dict[str, Any]) -> dict[str, Any]:
+    import json as _json
+
+    return {
+        "attachtype": "alertevent",
+        "attachsrcid": alertid,
+        "attachsrc": "manual",
+        "data": _json.dumps(snapshot),
+    }
+
+
 ALERT_LINKED = {
     "alertid": "alert-001",
     "name": "Malware C2 traffic",
@@ -168,7 +188,7 @@ class TestIncidentsSkill:
         ):
             result = await handlers.run_incidents(IncidentsParams())
         assert result.incidents[0].correlated_alerts == []
-        assert any("best-effort" in w for w in result.warnings)
+        assert any("correlated_alerts are empty" in w for w in result.warnings)
 
     async def test_alert_fetch_failure_degrades(self):
         with (
@@ -193,6 +213,62 @@ class TestIncidentsSkill:
         with t(GET_INCIDENTS, return_value={"status": "error", "error": "no_permission"}):
             with pytest.raises(handlers.SkillExecutionError):
                 await handlers.run_incidents(IncidentsParams())
+
+
+class TestAttachmentCorrelation:
+    """Attachment-based alert<->incident correlation (the authoritative
+    linkage on live FAZ — alerts/incidents carry no linkage fields)."""
+
+    SNAPSHOT = {"severity": "critical", "alerttime": "1704067300", "subject": "C2 traffic"}
+
+    async def test_incidents_prefers_attachments(self):
+        with (
+            t(GET_INCIDENTS, return_value=ok(data=[INCIDENT])),
+            t(GET_ALERTS, return_value=ok(data=[ALERT_UNLINKED])),
+            attachment_client([alertevent_attachment("alert-001", self.SNAPSHOT)]),
+        ):
+            result = await handlers.run_incidents(IncidentsParams())
+        rec = result.incidents[0]
+        assert rec.correlation_basis == "incident.attachments.alertevent"
+        assert rec.correlated_alerts == [{**self.SNAPSHOT, "alertid": "alert-001"}]
+        assert result.warnings == []
+
+    async def test_incidents_falls_back_when_attachments_unavailable(self):
+        # No get_faz_client patch -> reader reports the client as missing.
+        with (
+            t(GET_INCIDENTS, return_value=ok(data=[INCIDENT])),
+            t(GET_ALERTS, return_value=ok(data=[ALERT_LINKED])),
+        ):
+            result = await handlers.run_incidents(IncidentsParams())
+        rec = result.incidents[0]
+        assert rec.correlation_basis == "alert.incids"
+        assert rec.correlated_alerts == [ALERT_LINKED]
+        assert any("attachment-based correlation unavailable" in w for w in result.warnings)
+
+    async def test_triage_incident_related_from_attachments(self):
+        with (
+            t(GET_INCIDENT, return_value=ok(data=INCIDENT)),
+            t(GET_ALERT_INCIDENT_STATS, return_value=ok(data={})),
+            attachment_client([alertevent_attachment("alert-001", self.SNAPSHOT)]),
+        ):
+            result = await handlers.run_triage(TriageParams(incident_id="inc-001"))
+        assert result.related == [{**self.SNAPSHOT, "alertid": "alert-001"}]
+        assert not any("fell back" in w for w in result.warnings)
+
+    async def test_investigation_report_evidence_from_attachments(self):
+        with (
+            t(GET_INCIDENT, return_value=ok(data=INCIDENT)),
+            t(GET_ALERT_LOGS, return_value=ok(data=[{"logid": "l-9"}])),
+            attachment_client([alertevent_attachment("alert-001", self.SNAPSHOT)]),
+        ):
+            result = await handlers.run_investigation_report(
+                InvestigationReportParams(incident_id="inc-001", include_top_threats=False)
+            )
+        assert len(result.alerts) == 1
+        assert result.alerts[0].alert["alertid"] == "alert-001"
+        assert result.alerts[0].logs == [{"logid": "l-9"}]
+        # Timeline picks up the snapshot's alerttime.
+        assert any(e.source == "alert" for e in result.timeline)
 
 
 # --------------------------------------------------------------------- #

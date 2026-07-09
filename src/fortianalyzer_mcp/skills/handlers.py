@@ -15,6 +15,7 @@ to the shared FastMCP instance on import), which must not happen before
 the server's tool-mode branch has run.
 """
 
+import json
 import logging
 from typing import Any
 
@@ -129,6 +130,60 @@ def _first_record(payload: Any) -> dict[str, Any] | None:
     return None
 
 
+async def _fetch_attached_alerts(
+    adom: str | None, incid: str, limit: int = 200
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Alerts attached to an incident, via incident attachments.
+
+    FAZ associates alerts with incidents through incident *attachments*
+    (``attachtype="alertevent"``) — not through fields on either object
+    (verified live; alert and incident records carry no linkage keys).
+    Each attachment's ``attachsrcid`` is the alertid and ``data`` holds a
+    verbatim alert-event snapshot.
+
+    This is a thin read-only ``client.get()`` wrapper as sanctioned by
+    RFC #44's constraints; it lives here pending the RFC's open question
+    on reader placement. Returns ``(alerts, None)`` or ``([], reason)``.
+    """
+    from fortianalyzer_mcp.api.client import API_VERSION
+    from fortianalyzer_mcp.server import get_faz_client
+    from fortianalyzer_mcp.utils.validation import get_default_adom, validate_adom
+
+    try:
+        adom_validated = validate_adom(adom or get_default_adom())
+        client = get_faz_client()
+        if client is None:
+            return [], "FortiAnalyzer client not initialized"
+        res = await client.get(
+            f"/incidentmgmt/adom/{adom_validated}/attachments",
+            apiver=API_VERSION,
+            incid=incid,
+            attachtype="alertevent",
+            limit=limit,
+        )
+    except Exception as exc:
+        return [], f"attachments lookup: {exc}"
+
+    alerts: list[dict[str, Any]] = []
+    for rec in _records(res):
+        if rec.get("attachtype") != "alertevent":
+            continue
+        snapshot: dict[str, Any] = {}
+        raw = rec.get("data")
+        if isinstance(raw, str) and raw:
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    snapshot = parsed
+            except ValueError:
+                pass
+        elif isinstance(raw, dict):
+            snapshot = raw
+        snapshot.setdefault("alertid", rec.get("attachsrcid"))
+        alerts.append(snapshot)
+    return alerts, None
+
+
 # --------------------------------------------------------------------- #
 # incidents                                                             #
 # --------------------------------------------------------------------- #
@@ -166,27 +221,46 @@ async def run_incidents(params: IncidentsParams) -> IncidentsResult:
             alerts = alerts_res.get("data") or []
 
     records: list[IncidentRecord] = []
+    attachments_failed: str | None = None
     for incident in incidents:
-        incident_ids = _ids_of(incident, ("incid",))
-        declared_alert_ids = _ids_of(incident, _INCIDENT_ALERT_KEYS)
         correlated: list[dict[str, Any]] = []
         basis: str | None = None
-        for alert in alerts:
-            alert_id = next(iter(_ids_of(alert, ("alertid",))), None)
-            if declared_alert_ids and alert_id in declared_alert_ids:
-                correlated.append(alert)
-                basis = f"incident.{_link_key(incident, _INCIDENT_ALERT_KEYS)}"
-            elif incident_ids & _ids_of(alert, _ALERT_INCIDENT_KEYS):
-                correlated.append(alert)
-                basis = f"alert.{_link_key(alert, _ALERT_INCIDENT_KEYS)}"
+
+        # Authoritative source: incident attachments (attachtype=alertevent).
+        incid = incident.get("incid")
+        if params.include_alerts and incid and attachments_failed is None:
+            attached, err = await _fetch_attached_alerts(params.adom, str(incid))
+            if err is not None:
+                attachments_failed = err
+            elif attached:
+                correlated = attached
+                basis = "incident.attachments.alertevent"
+
+        # Fallback: candidate linkage keys against the window scan.
+        if not correlated:
+            incident_ids = _ids_of(incident, ("incid",))
+            declared_alert_ids = _ids_of(incident, _INCIDENT_ALERT_KEYS)
+            for alert in alerts:
+                alert_id = next(iter(_ids_of(alert, ("alertid",))), None)
+                if declared_alert_ids and alert_id in declared_alert_ids:
+                    correlated.append(alert)
+                    basis = f"incident.{_link_key(incident, _INCIDENT_ALERT_KEYS)}"
+                elif incident_ids & _ids_of(alert, _ALERT_INCIDENT_KEYS):
+                    correlated.append(alert)
+                    basis = f"alert.{_link_key(alert, _ALERT_INCIDENT_KEYS)}"
         records.append(
             IncidentRecord(incident=incident, correlated_alerts=correlated, correlation_basis=basis)
         )
 
-    if params.include_alerts and alerts and not any(r.correlated_alerts for r in records):
+    if attachments_failed is not None:
         warnings.append(
-            "no alert<->incident linkage fields found in this window; "
-            "correlated_alerts are empty (correlation is best-effort by shared identifiers)"
+            f"attachment-based correlation unavailable ({attachments_failed}); "
+            "fell back to linkage-key matching"
+        )
+    if params.include_alerts and incidents and not any(r.correlated_alerts for r in records):
+        warnings.append(
+            "no attached or linkage-matched alerts found for these incidents; "
+            "correlated_alerts are empty"
         )
 
     return IncidentsResult(
@@ -405,22 +479,28 @@ async def run_triage(params: TriageParams) -> TriageResult:
             raise SkillExecutionError(f"could not retrieve incident {params.incident_id} ({err})")
         subject = _first_record(inc_res.get("data")) or {}
 
-        alerts_res, err = await _call(
-            get_alerts, adom=params.adom, time_range=params.context_time_range, limit=200
-        )
-        if alerts_res is None:
-            warnings.append(f"alert context unavailable: {err}")
-        else:
-            incident_ids = _ids_of(subject, ("incid",)) or (
-                {str(params.incident_id)} if params.incident_id else set()
+        incid = str(subject.get("incid") or params.incident_id)
+        related, attach_err = await _fetch_attached_alerts(params.adom, incid)
+        if attach_err is not None or not related:
+            if attach_err is not None:
+                warnings.append(
+                    f"attachment-based correlation unavailable ({attach_err}); "
+                    "fell back to linkage-key matching"
+                )
+            alerts_res, err = await _call(
+                get_alerts, adom=params.adom, time_range=params.context_time_range, limit=200
             )
-            declared = _ids_of(subject, _INCIDENT_ALERT_KEYS)
-            for alert in alerts_res.get("data") or []:
-                alert_id = next(iter(_ids_of(alert, ("alertid",))), None)
-                if (declared and alert_id in declared) or (
-                    incident_ids & _ids_of(alert, _ALERT_INCIDENT_KEYS)
-                ):
-                    related.append(alert)
+            if alerts_res is None:
+                warnings.append(f"alert context unavailable: {err}")
+            else:
+                incident_ids = _ids_of(subject, ("incid",)) or {incid}
+                declared = _ids_of(subject, _INCIDENT_ALERT_KEYS)
+                for alert in alerts_res.get("data") or []:
+                    alert_id = next(iter(_ids_of(alert, ("alertid",))), None)
+                    if (declared and alert_id in declared) or (
+                        incident_ids & _ids_of(alert, _ALERT_INCIDENT_KEYS)
+                    ):
+                        related.append(alert)
 
     stats_res, err = await _call(
         get_alert_incident_stats, adom=params.adom, time_range=params.context_time_range
@@ -456,7 +536,7 @@ async def run_triage(params: TriageParams) -> TriageResult:
 def _timeline(incident: dict[str, Any], evidence: list[AlertEvidence]) -> list[TimelineEntry]:
     """Chronological entries from whatever timestamp fields are present."""
     entries: list[TimelineEntry] = []
-    ts = incident.get("timestamp") or incident.get("createtime")
+    ts = incident.get("timestamp") or incident.get("createtime") or incident.get("lastupdate")
     if ts is not None:
         entries.append(
             TimelineEntry(
@@ -467,7 +547,11 @@ def _timeline(incident: dict[str, Any], evidence: list[AlertEvidence]) -> list[T
             )
         )
     for item in evidence:
-        alert_ts = item.alert.get("timestamp") or item.alert.get("createtime")
+        alert_ts = (
+            item.alert.get("timestamp")
+            or item.alert.get("alerttime")
+            or item.alert.get("createtime")
+        )
         if alert_ts is None:
             continue
         entries.append(
@@ -497,34 +581,37 @@ async def run_investigation_report(params: InvestigationReportParams) -> Investi
     if isinstance(incident, list):
         incident = incident[0] if incident else {}
 
-    # Related alerts (same linkage strategy as the incidents skill).
+    # Related alerts: incident attachments first, linkage keys as fallback.
     evidence: list[AlertEvidence] = []
-    alerts_res, err = await _call(
-        get_alerts, adom=params.adom, time_range=params.time_range, limit=500
-    )
-    if alerts_res is None:
-        warnings.append(f"related alerts unavailable: {err}")
-    else:
-        incident_ids = _ids_of(incident, ("incid",)) or {str(params.incident_id)}
-        declared = _ids_of(incident, _INCIDENT_ALERT_KEYS)
-        linked: list[dict[str, Any]] = []
-        for alert in alerts_res.get("data") or []:
-            alert_id = next(iter(_ids_of(alert, ("alertid",))), None)
-            if (declared and alert_id in declared) or (
-                incident_ids & _ids_of(alert, _ALERT_INCIDENT_KEYS)
-            ):
-                linked.append(alert)
+    incid = str(incident.get("incid") or params.incident_id)
+    linked, attach_err = await _fetch_attached_alerts(params.adom, incid)
+    if attach_err is not None or not linked:
+        if attach_err is not None:
+            warnings.append(
+                f"attachment-based correlation unavailable ({attach_err}); "
+                "fell back to linkage-key matching"
+            )
+        alerts_res, err = await _call(
+            get_alerts, adom=params.adom, time_range=params.time_range, limit=500
+        )
+        if alerts_res is None:
+            warnings.append(f"related alerts unavailable: {err}")
+        else:
+            incident_ids = _ids_of(incident, ("incid",)) or {incid}
+            declared = _ids_of(incident, _INCIDENT_ALERT_KEYS)
+            for alert in alerts_res.get("data") or []:
+                alert_id = next(iter(_ids_of(alert, ("alertid",))), None)
+                if (declared and alert_id in declared) or (
+                    incident_ids & _ids_of(alert, _ALERT_INCIDENT_KEYS)
+                ):
+                    linked.append(alert)
+    if linked:
         if len(linked) > params.max_alerts:
             warnings.append(
                 f"{len(linked)} linked alerts found; only the first "
                 f"{params.max_alerts} include evidence logs"
             )
             linked = linked[: params.max_alerts]
-        if not linked:
-            warnings.append(
-                "no alerts in the window carry a linkage field for this incident; "
-                "the alerts section is empty (correlation is best-effort)"
-            )
 
         for alert in linked:
             logs: list[dict[str, Any]] = []
@@ -541,6 +628,11 @@ async def run_investigation_report(params: InvestigationReportParams) -> Investi
                 else:
                     logs = _records(logs_res.get("data"))[: params.max_logs_per_alert]
             evidence.append(AlertEvidence(alert=alert, logs=logs))
+    else:
+        warnings.append(
+            "no attached or linkage-matched alerts found for this incident; "
+            "the alerts section is empty"
+        )
 
     # Threat landscape (context; degrades to a gap marker).
     threat_landscape: list[dict[str, Any]] | FeatureGap
