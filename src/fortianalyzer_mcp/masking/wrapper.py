@@ -74,6 +74,14 @@ class OutputMasker:
     def _mask_scalar(self, vtype: str, value: str) -> str:
         if value.strip() in SKIP_VALUES:
             return value
+        if vtype != TEXT and "," in value:
+            # FAZ packs multi-valued fields into one comma-joined string
+            # (live example: the dns ``ipaddr`` answer list). Mask each
+            # element; an unmaskable element still fails closed on its own.
+            return ",".join(
+                part if part.strip() in SKIP_VALUES or not part else self._mask_scalar(vtype, part)
+                for part in value.split(",")
+            )
         try:
             if vtype == IP:
                 return self._engine.mask_ip(value)

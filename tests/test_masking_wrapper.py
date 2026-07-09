@@ -96,6 +96,15 @@ class TestStructureWalk:
             assert item not in ("192.0.2.1", "192.0.2.2")
             ipaddress.IPv4Address(item)
 
+    def test_comma_joined_ip_string(self, masker: OutputMasker, engine: FPEEngine):
+        # Live FAZ packs dns answers into one comma-joined string.
+        masked = masker.mask_result({"ipaddr": "192.0.2.1,192.0.2.2,2001:db8::1"})
+        parts = masked["ipaddr"].split(",")
+        assert len(parts) == 3
+        assert "192.0.2.1" not in parts and "2001:db8::1" not in parts
+        assert engine.unmask_ip(parts[0]) == "192.0.2.1"
+        assert engine.unmask_ip(parts[2]) == "2001:db8::1"
+
     def test_skip_values_pass_through(self, masker: OutputMasker):
         masked = masker.mask_result({"user": "N/A", "srcip": "", "dstuser": "unknown"})
         assert masked == {"user": "N/A", "srcip": "", "dstuser": "unknown"}
