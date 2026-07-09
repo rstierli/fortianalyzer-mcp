@@ -233,6 +233,16 @@ class TestAttachmentCorrelation:
         assert rec.correlated_alerts == [{**self.SNAPSHOT, "alertid": "alert-001"}]
         assert result.warnings == []
 
+    async def test_full_attachment_page_warns_about_truncation(self):
+        page = [alertevent_attachment(f"alert-{i}", self.SNAPSHOT) for i in range(200)]
+        with (
+            t(GET_INCIDENTS, return_value=ok(data=[INCIDENT])),
+            t(GET_ALERTS, return_value=ok(data=[])),
+            attachment_client(page),
+        ):
+            result = await handlers.run_incidents(IncidentsParams())
+        assert any("may be incomplete" in w for w in result.warnings)
+
     async def test_incidents_falls_back_when_attachments_unavailable(self):
         # No get_faz_client patch -> reader reports the client as missing.
         with (
@@ -492,6 +502,46 @@ class TestInvestigationReportSkill:
                 await handlers.run_investigation_report(
                     InvestigationReportParams(incident_id="inc-404")
                 )
+
+    async def test_timeline_orders_mixed_timestamp_formats(self):
+        """Live data mixes epoch-digit strings with FAZ datetime strings.
+
+        A lexicographic sort puts every "17..." epoch string before every
+        "2026-..." datetime string regardless of real order; both forms must
+        normalize to epoch seconds first.
+        """
+        incident = {
+            "incid": "inc-001",
+            "name": "Late incident",
+            "createtime": "2026-07-08 10:22:41",
+        }
+        alerts = [
+            {"alertid": "a-early", "incids": ["inc-001"], "alerttime": "1704067300"},  # 2024
+            {"alertid": "a-late", "incids": ["inc-001"], "alerttime": "1783629554"},  # 2026, after
+        ]
+        with (
+            t(GET_INCIDENT, return_value=ok(data=incident)),
+            t(GET_ALERTS, return_value=ok(data=alerts)),
+            t(GET_ALERT_LOGS, return_value=ok(data=[])),
+        ):
+            result = await handlers.run_investigation_report(
+                InvestigationReportParams(incident_id="inc-001", include_top_threats=False)
+            )
+        # 2024 alert, then the 2026-07-08 incident, then the 2026-07-09 alert.
+        assert [e.source for e in result.timeline] == ["alert", "incident", "alert"]
+
+    async def test_timeline_unparseable_timestamp_sorts_last(self):
+        incident = {"incid": "inc-001", "timestamp": 1704067200}
+        alerts = [{"alertid": "a-1", "incids": ["inc-001"], "alerttime": "not-a-time"}]
+        with (
+            t(GET_INCIDENT, return_value=ok(data=incident)),
+            t(GET_ALERTS, return_value=ok(data=alerts)),
+            t(GET_ALERT_LOGS, return_value=ok(data=[])),
+        ):
+            result = await handlers.run_investigation_report(
+                InvestigationReportParams(incident_id="inc-001", include_top_threats=False)
+            )
+        assert [e.source for e in result.timeline] == ["incident", "alert"]
 
 
 # --------------------------------------------------------------------- #
