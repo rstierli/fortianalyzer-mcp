@@ -36,11 +36,12 @@ Because FPE is deterministic, a re-masked echo of an unmasked argument
 yields exactly the token the caller sent, so follow-up turns stay
 consistent.
 
-Scope (deliberately Phase 1 only): tool OUTPUT masking. Unmasking of
-tool-call arguments (Phase 2) and URL handling are not here. Device
-identity (``devname``, ``devid``, ``sn``, ``csf``, ``fortigate``,
-``devvds``, ``detectkey``) is out of the default allowlist, so a masked
-record still fingerprints the reporting device.
+This module is the OUTPUT side. Argument unmasking (Phase 2) lives in
+``unmask.py`` and is applied by the same registration patch. URL masking
+and IPv6-in-text scanning are not yet handled. Device identity
+(``devname``, ``devid``, ``sn``, ``csf``, ``fortigate``, ``devvds``,
+``detectkey``) is masked only when ``FAZ_MASK_DEVICE_IDENTITY`` is set, so
+by default a masked record still fingerprints the reporting device.
 """
 
 import hashlib
@@ -73,6 +74,7 @@ from fortianalyzer_mcp.masking.fields import (
     USERNAME,
 )
 from fortianalyzer_mcp.masking.fpe_engine import MASKING_KEY_ENV, FPEEngine, MaskingError
+from fortianalyzer_mcp.masking.unmask import ArgUnmasker
 
 logger = logging.getLogger(__name__)
 
@@ -365,8 +367,12 @@ class OutputMasker:
             }
 
 
-def install_masking(mcp: Any) -> OutputMasker:
-    """Patch ``mcp.tool`` so every tool registered afterwards masks its output.
+def install_masking(mcp: Any) -> tuple[OutputMasker, ArgUnmasker]:
+    """Patch ``mcp.tool`` so every tool registered afterwards is masked.
+
+    Wrapped tools unmask their keyword arguments on the way in (Phase 2,
+    before the tool body reaches any validator) and mask their result on
+    the way out (Phase 1).
 
     Must run BEFORE the tool modules are imported (they register at import
     time). Raises MaskingError at startup if ``FAZ_MASKING_KEY`` is absent
@@ -376,6 +382,7 @@ def install_masking(mcp: Any) -> OutputMasker:
 
     engine = FPEEngine.from_env()
     masker = OutputMasker(engine, mask_device_identity=get_settings().FAZ_MASK_DEVICE_IDENTITY)
+    unmasker = ArgUnmasker(engine)
     original_tool = mcp.tool
 
     def patched_tool(*args: Any, **kwargs: Any) -> Any:
@@ -386,18 +393,20 @@ def install_masking(mcp: Any) -> OutputMasker:
 
                 @wraps(fn)
                 async def async_wrapped(*fa: Any, **fk: Any) -> Any:
-                    return masker.mask_tool_result(await fn(*fa, **fk), fn.__name__)
+                    return masker.mask_tool_result(
+                        await fn(*fa, **unmasker.unmask_args(fk)), fn.__name__
+                    )
 
                 return decorator(async_wrapped)
 
             @wraps(fn)
             def sync_wrapped(*fa: Any, **fk: Any) -> Any:
-                return masker.mask_tool_result(fn(*fa, **fk), fn.__name__)
+                return masker.mask_tool_result(fn(*fa, **unmasker.unmask_args(fk)), fn.__name__)
 
             return decorator(sync_wrapped)
 
         return register
 
     mcp.tool = patched_tool
-    logger.info("output masking installed: all tools registered from now on are wrapped")
-    return masker
+    logger.info("masking installed: tools registered from now on unmask args and mask output")
+    return masker, unmasker
