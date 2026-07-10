@@ -225,10 +225,10 @@ async def create_incident(
     Args:
         endpoint: What the incident is about - an endpoint name or a
             plain IP address. Required by the FAZ API.
-        category: FAZ incident category value. Required by the FAZ API.
-            The valid set is defined on the appliance (numeric strings
-            like "1"), not by the API spec, so it is passed through
-            unvalidated.
+        category: FAZ incident category value (e.g. "CAT1".."CAT3" on
+            auto-raised incidents; a plain "1" is also accepted). Required
+            by the FAZ API. The valid set is defined on the appliance, not
+            by the API spec, so it is passed through unvalidated.
         severity: Incident severity: "high", "medium" or "low"
             (default: "medium").
         adom: ADOM name (default: from config DEFAULT_ADOM)
