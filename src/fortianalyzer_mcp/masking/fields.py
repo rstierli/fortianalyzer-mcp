@@ -59,8 +59,8 @@ Known gaps, recorded rather than guessed at:
   masks whatever allowlisted keys it turns out to hold. Revisit with a
   populated sample.
 - ``threat``/``obf_url`` (fortiview ``top-threats``) hold a browsed domain
-  on webfilter rows (``mask.icloud.com``, obfuscated as
-  ``mask[dot]icloud[dot]com``) but a signature label on ips/virus rows,
+  on webfilter rows (``threat.example.net``, obfuscated as
+  ``threat[dot]example[dot]net``) but a signature label on ips/virus rows,
   where a name like ``Adobe.Flash.Exploit`` is indistinguishable from a
   domain by shape alone. The sibling ``logtype`` almost certainly
   disambiguates them, but the reference estate produced no ips/virus row
