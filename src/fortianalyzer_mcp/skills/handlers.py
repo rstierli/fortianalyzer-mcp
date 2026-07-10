@@ -15,8 +15,10 @@ to the shared FastMCP instance on import), which must not happen before
 the server's tool-mode branch has run.
 """
 
+import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Coroutine
 from datetime import datetime
 from typing import Any
 
@@ -53,8 +55,32 @@ _SEVERITY_TO_PRIORITY = {
     "low": "low",
 }
 
+# Concurrent attachment lookups per skill invocation. Attachments are
+# plain incidentmgmt GETs (no logview search slots), so the bound exists
+# to keep FAZ comfortable, not to protect the slot pool.
+_ATTACH_CONCURRENCY = 5
+
+# Window for the filter-first triage subject lookup. get_alerts filtering
+# on alertid is live-verified on 7.6.7 and 8.0.0 over a 30-day window
+# (exact match; a missing id returns a clean empty success).
+_SUBJECT_LOOKUP_WINDOW = "30-day"
+
+
+async def _gather_bounded[T](
+    coros: list[Coroutine[Any, Any, T]], limit: int = _ATTACH_CONCURRENCY
+) -> list[T]:
+    """Run coroutines concurrently, at most ``limit`` at a time, in order."""
+    semaphore = asyncio.Semaphore(limit)
+
+    async def _bounded(coro: Awaitable[T]) -> T:
+        async with semaphore:
+            return await coro
+
+    return list(await asyncio.gather(*(_bounded(c) for c in coros)))
+
+
 _WAVE2_ENRICHMENT_GAP = FeatureGap(
-    reason="Indicator enrichment requires the SOAR reader planned for Wave 2 (3.0.0-beta.2)."
+    reason="Indicator enrichment requires the SOAR reader planned for Wave 2."
 )
 
 
@@ -218,8 +244,36 @@ async def run_incidents(params: IncidentsParams) -> IncidentsResult:
         raise SkillExecutionError(f"could not retrieve incidents ({err})")
     incidents: list[dict[str, Any]] = incidents_res.get("data") or []
 
-    alerts: list[dict[str, Any]] = []
+    # Authoritative source: incident attachments (attachtype=alertevent),
+    # fetched with a bounded concurrent fan-out (one GET per incident).
+    correlated_by_index: dict[int, list[dict[str, Any]]] = {}
+    basis_by_index: dict[int, str] = {}
+    attachments_failed: str | None = None
     if params.include_alerts and incidents:
+        attach_results = await _gather_bounded(
+            [
+                _fetch_attached_alerts(params.adom, str(incident.get("incid")), warnings=warnings)
+                for incident in incidents
+                if incident.get("incid")
+            ]
+        )
+        indices_with_incid = [i for i, inc in enumerate(incidents) if inc.get("incid")]
+        for index, (attached, attach_err) in zip(indices_with_incid, attach_results, strict=True):
+            if attach_err is not None:
+                attachments_failed = attach_err
+            elif attached:
+                correlated_by_index[index] = attached
+                basis_by_index[index] = "incident.attachments.alertevent"
+
+    # The window scan exists only for the linkage-key fallback, and
+    # attachments are the authoritative path (live-verified) — so the scan
+    # is deferred until an incident actually lacks attachment correlation.
+    alerts: list[dict[str, Any]] = []
+    scan_ran = False
+    needs_fallback = params.include_alerts and any(
+        i not in correlated_by_index for i in range(len(incidents))
+    )
+    if needs_fallback:
         alerts_res, err = await _call(
             get_alerts,
             adom=params.adom,
@@ -230,22 +284,12 @@ async def run_incidents(params: IncidentsParams) -> IncidentsResult:
             warnings.append(f"alert correlation skipped: {err}")
         else:
             alerts = alerts_res.get("data") or []
+            scan_ran = True
 
     records: list[IncidentRecord] = []
-    attachments_failed: str | None = None
-    for incident in incidents:
-        correlated: list[dict[str, Any]] = []
-        basis: str | None = None
-
-        # Authoritative source: incident attachments (attachtype=alertevent).
-        incid = incident.get("incid")
-        if params.include_alerts and incid and attachments_failed is None:
-            attached, err = await _fetch_attached_alerts(params.adom, str(incid), warnings=warnings)
-            if err is not None:
-                attachments_failed = err
-            elif attached:
-                correlated = attached
-                basis = "incident.attachments.alertevent"
+    for index, incident in enumerate(incidents):
+        correlated = correlated_by_index.get(index, [])
+        basis = basis_by_index.get(index)
 
         # Fallback: candidate linkage keys against the window scan.
         if not correlated:
@@ -277,7 +321,7 @@ async def run_incidents(params: IncidentsParams) -> IncidentsResult:
     return IncidentsResult(
         incidents=records,
         incident_count=len(records),
-        alerts_scanned=len(alerts),
+        alerts_scanned=len(alerts) if scan_ran else 0,
         time_range=params.time_range,
         warnings=warnings,
     )
@@ -412,24 +456,48 @@ async def run_triage(params: TriageParams) -> TriageResult:
     if params.alert_id:
         subject_type = "alert"
 
-        # Subject = the full alert row from the context window (it carries
-        # severity/status/ack). extra-details is entity enrichment only —
-        # live FAZ returns just {alertid, devs, epids, euids} there.
+        # Subject = the full alert row (it carries severity/status/ack).
+        # Filter-first: get_alerts filtering on alertid over a wide window
+        # is live-verified on both supported versions and avoids the
+        # degraded no-severity path for alerts older than the context
+        # window. The window scan stays as the fallback. extra-details is
+        # entity enrichment only — live FAZ returns just {alertid, devs,
+        # epids, euids} there.
         subject: dict[str, Any] = {}
-        alerts_res, err = await _call(
-            get_alerts, adom=params.adom, time_range=params.context_time_range, limit=500
-        )
-        if alerts_res is None:
-            warnings.append(f"alert window scan unavailable: {err}")
-        else:
-            subject = next(
-                (
-                    a
-                    for a in alerts_res.get("data") or []
-                    if str(a.get("alertid")) == str(params.alert_id)
-                ),
-                {},
+        if '"' not in params.alert_id:
+            lookup_res, err = await _call(
+                get_alerts,
+                adom=params.adom,
+                time_range=_SUBJECT_LOOKUP_WINDOW,
+                filter=f'alertid=="{params.alert_id}"',
+                limit=5,
             )
+            if lookup_res is None:
+                warnings.append(f"alert filter lookup unavailable: {err}")
+            else:
+                subject = next(
+                    (
+                        a
+                        for a in lookup_res.get("data") or []
+                        if str(a.get("alertid")) == str(params.alert_id)
+                    ),
+                    {},
+                )
+        if not subject:
+            alerts_res, err = await _call(
+                get_alerts, adom=params.adom, time_range=params.context_time_range, limit=500
+            )
+            if alerts_res is None:
+                warnings.append(f"alert window scan unavailable: {err}")
+            else:
+                subject = next(
+                    (
+                        a
+                        for a in alerts_res.get("data") or []
+                        if str(a.get("alertid")) == str(params.alert_id)
+                    ),
+                    {},
+                )
 
         details_res, err = await _call(
             get_alert_details, alert_ids=[params.alert_id], adom=params.adom
@@ -443,14 +511,15 @@ async def run_triage(params: TriageParams) -> TriageResult:
         if not subject:
             if subject_details is None:
                 raise SkillExecutionError(
-                    f"alert {params.alert_id} not found in the "
-                    f"{params.context_time_range} window and details lookup failed ({err})"
+                    f"alert {params.alert_id} not found in the {_SUBJECT_LOOKUP_WINDOW} "
+                    f"filter lookup or the {params.context_time_range} window, and the "
+                    f"details lookup failed ({err})"
                 )
             subject = subject_details
             warnings.append(
-                f"alert {params.alert_id} not in the {params.context_time_range} window; "
-                "subject is the entity-details record (no severity -> priority "
-                "'informational'). Widen context_time_range for a full assessment."
+                f"alert {params.alert_id} not in the {_SUBJECT_LOOKUP_WINDOW} filter lookup "
+                f"or the {params.context_time_range} window; subject is the entity-details "
+                "record (no severity -> priority 'informational')."
             )
 
         logs_res, err = await _call(get_alert_logs, alert_ids=[params.alert_id], adom=params.adom)
@@ -470,18 +539,55 @@ async def run_triage(params: TriageParams) -> TriageResult:
                     data = inc_res.get("data")
                     related.extend(data if isinstance(data, list) else [data] if data else [])
         else:
+            # No linkage fields on live alerts (verified) — resolve the
+            # authoritative relation by checking each context incident's
+            # attachments for this alertid. A pure reverse attachment query
+            # (attachsrcid without incid) is rejected by FAZ, and with incid
+            # present the attachsrcid param is ignored (both live-verified
+            # on 7.6.7), so membership is checked per candidate incident.
             inc_res, err = await _call(
                 get_incidents, adom=params.adom, time_range=params.context_time_range, limit=50
             )
             if inc_res is None:
                 warnings.append(f"incident context unavailable: {err}")
             else:
-                related = inc_res.get("data") or []
-                if related:
-                    warnings.append(
-                        "alert carries no incident linkage field; 'related' lists all "
-                        "incidents in the context window instead"
+                candidates = [
+                    c for c in inc_res.get("data") or [] if isinstance(c, dict) and c.get("incid")
+                ]
+                if candidates:
+                    checks = await _gather_bounded(
+                        [_fetch_attached_alerts(params.adom, str(c["incid"])) for c in candidates]
                     )
+                    failed = sum(1 for _, check_err in checks if check_err is not None)
+                    if failed == len(candidates):
+                        # Attachments wholly unavailable: keep the old
+                        # (noisy but honest) fallback.
+                        related = candidates
+                        warnings.append(
+                            "alert carries no incident linkage field and attachment "
+                            "lookups failed; 'related' lists all incidents in the "
+                            "context window instead"
+                        )
+                    else:
+                        related = [
+                            candidate
+                            for candidate, (attached, check_err) in zip(
+                                candidates, checks, strict=True
+                            )
+                            if check_err is None
+                            and any(str(a.get("alertid")) == str(params.alert_id) for a in attached)
+                        ]
+                        if failed:
+                            warnings.append(
+                                f"attachment check failed for {failed} of "
+                                f"{len(candidates)} context incidents; membership "
+                                "for those is unknown"
+                            )
+                        if not related:
+                            warnings.append(
+                                f"alert {params.alert_id} is not attached to any of the "
+                                f"{len(candidates)} incidents in the context window"
+                            )
     else:
         subject_type = "incident"
         subject_details = None

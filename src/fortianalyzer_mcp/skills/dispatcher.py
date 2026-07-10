@@ -36,10 +36,10 @@ async def faz_skill(skill: str, params: dict[str, Any] | None = None) -> dict[st
     (alert/incident evidence bundle + deterministic assessment),
     ``incident_summary`` (structured incident investigation summary).
 
-    Pass ``skill="list"`` to get the full catalogue including each
-    skill's parameter and output JSON schema. Skill parameters go in
-    ``params`` (a dict validated against the skill's schema; unknown
-    keys are rejected).
+    Pass ``skill="list"`` (alias: ``skill="describe"``) to get the full
+    catalogue including each skill's parameter and output JSON schema.
+    Skill parameters go in ``params`` (a dict validated against the
+    skill's schema; unknown keys are rejected).
 
     All skills are read-only. Output schemas are versioned
     (``schema_version`` in every response) and stable across releases.

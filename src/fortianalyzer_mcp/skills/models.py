@@ -84,7 +84,10 @@ class IncidentsResult(BaseModel):
 
     incidents: list[IncidentRecord]
     incident_count: int
-    alerts_scanned: int = Field(description="Alerts examined for correlation (0 if disabled)")
+    alerts_scanned: int = Field(
+        description="Alerts examined by the linkage-key fallback scan (0 when correlation "
+        "is disabled or attachments already correlated every incident)"
+    )
     time_range: str
     warnings: list[str] = Field(default_factory=list)
 

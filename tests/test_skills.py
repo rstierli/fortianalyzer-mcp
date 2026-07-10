@@ -63,6 +63,18 @@ def attachment_client(records: list[dict[str, Any]]) -> Any:
     return patch("fortianalyzer_mcp.server.get_faz_client", return_value=client)
 
 
+def attachment_client_by_incid(mapping: dict[str, list[dict[str, Any]]]) -> Any:
+    """Like ``attachment_client`` but answering per requested ``incid``."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    async def _get(path: str, **kwargs: Any) -> dict[str, Any]:
+        return {"data": mapping.get(str(kwargs.get("incid")), [])}
+
+    client = MagicMock()
+    client.get = AsyncMock(side_effect=_get)
+    return patch("fortianalyzer_mcp.server.get_faz_client", return_value=client)
+
+
 def alertevent_attachment(alertid: str, snapshot: dict[str, Any]) -> dict[str, Any]:
     import json as _json
 
@@ -161,6 +173,45 @@ class TestDispatcher:
         assert result["schema_version"] == SCHEMA_VERSION
         assert result["result"]["incident_count"] == 1
 
+    async def test_describe_alias(self):
+        result = await faz_skill(skill="describe")
+        assert result["status"] == "success"
+        assert {s["id"] for s in result["skills"]} == WAVE1_SKILL_IDS
+
+    async def test_invalid_output_maps_to_skill_output_invalid(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # A handler whose output violates the documented contract must
+        # surface as an error, never as a malformed passthrough.
+        import dataclasses
+
+        from fortianalyzer_mcp.skills.models import IncidentsResult
+
+        async def bad_handler(parsed: Any) -> Any:
+            return IncidentsResult()  # type: ignore[call-arg]  # missing required fields
+
+        monkeypatch.setitem(
+            SKILLS, "incidents", dataclasses.replace(SKILLS["incidents"], handler=bad_handler)
+        )
+        result = await faz_skill(skill="incidents", params={})
+        assert result["status"] == "error"
+        assert result["error"] == "skill_output_invalid"
+        assert result["skill"] == "incidents"
+
+    async def test_unexpected_exception_maps_to_skill_error(self, monkeypatch: pytest.MonkeyPatch):
+        import dataclasses
+
+        async def exploding_handler(parsed: Any) -> Any:
+            raise RuntimeError("kaboom")
+
+        monkeypatch.setitem(
+            SKILLS, "incidents", dataclasses.replace(SKILLS["incidents"], handler=exploding_handler)
+        )
+        result = await faz_skill(skill="incidents", params={})
+        assert result["status"] == "error"
+        assert result["error"] == "skill_error"
+        assert result["skill"] == "incidents"
+
 
 # --------------------------------------------------------------------- #
 # incidents                                                             #
@@ -254,6 +305,44 @@ class TestAttachmentCorrelation:
         assert rec.correlation_basis == "alert.incids"
         assert rec.correlated_alerts == [ALERT_LINKED]
         assert any("attachment-based correlation unavailable" in w for w in result.warnings)
+
+    async def test_scan_deferred_when_attachments_cover_all_incidents(self):
+        # The window scan exists only for the fallback: when attachments
+        # correlate every incident it must not run, and alerts_scanned
+        # reports 0 rather than a count that never influenced anything.
+        with (
+            t(GET_INCIDENTS, return_value=ok(data=[INCIDENT])),
+            t(GET_ALERTS) as alerts_mock,
+            attachment_client([alertevent_attachment("alert-001", self.SNAPSHOT)]),
+        ):
+            result = await handlers.run_incidents(IncidentsParams())
+        alerts_mock.assert_not_awaited()
+        assert result.alerts_scanned == 0
+        assert result.incidents[0].correlation_basis == "incident.attachments.alertevent"
+
+    async def test_attachment_fanout_covers_every_incident_in_order(self):
+        # The bounded gather must query each incident and keep results
+        # aligned with the incident order.
+        incidents = [
+            {"incid": "inc-001", "severity": "high"},
+            {"incid": "inc-002", "severity": "low"},
+            {"incid": "inc-003", "severity": "medium"},
+        ]
+        mapping = {
+            "inc-001": [alertevent_attachment("alert-a", self.SNAPSHOT)],
+            "inc-002": [],
+            "inc-003": [alertevent_attachment("alert-c", self.SNAPSHOT)],
+        }
+        with (
+            t(GET_INCIDENTS, return_value=ok(data=incidents)),
+            t(GET_ALERTS, return_value=ok(data=[])),
+            attachment_client_by_incid(mapping),
+        ):
+            result = await handlers.run_incidents(IncidentsParams())
+        first, second, third = result.incidents
+        assert first.correlated_alerts[0]["alertid"] == "alert-a"
+        assert second.correlated_alerts == []
+        assert third.correlated_alerts[0]["alertid"] == "alert-c"
 
     async def test_triage_incident_related_from_attachments(self):
         with (
@@ -434,6 +523,109 @@ class TestTriageSkill:
         assert result.context_stats is None
         assert len(result.warnings) == 4  # details, logs, incidents, stats
         assert result.assessment.priority == "medium"
+
+    async def test_alert_subject_found_by_filter_first(self):
+        # The subject must come from the alertid filter lookup over the
+        # wide window (live-verified on both versions), with no 500-row
+        # window scan when the filter hits.
+        with (
+            t(GET_ALERTS, return_value=ok(data=[ALERT_LINKED])) as alerts_mock,
+            t(GET_ALERT_DETAILS, return_value=self.DETAILS),
+            t(GET_ALERT_LOGS, return_value=ok(data=[])),
+            t(GET_INCIDENT, return_value=ok(data=INCIDENT)),
+            t(GET_ALERT_INCIDENT_STATS, return_value=ok(data={})),
+        ):
+            result = await handlers.run_triage(TriageParams(alert_id="alert-001"))
+        assert result.subject == ALERT_LINKED
+        alerts_mock.assert_awaited_once()
+        kwargs = alerts_mock.await_args.kwargs
+        assert kwargs["filter"] == 'alertid=="alert-001"'
+        assert kwargs["time_range"] == "30-day"
+
+    async def test_alert_filter_miss_falls_back_to_window_scan(self):
+        with (
+            t(
+                GET_ALERTS,
+                side_effect=[ok(data=[]), ok(data=[ALERT_LINKED, ALERT_UNLINKED])],
+            ) as alerts_mock,
+            t(GET_ALERT_DETAILS, return_value=self.DETAILS),
+            t(GET_ALERT_LOGS, return_value=ok(data=[])),
+            t(GET_INCIDENT, return_value=ok(data=INCIDENT)),
+            t(GET_ALERT_INCIDENT_STATS, return_value=ok(data={})),
+        ):
+            result = await handlers.run_triage(TriageParams(alert_id="alert-001"))
+        assert result.subject == ALERT_LINKED
+        assert alerts_mock.await_count == 2
+        scan_kwargs = alerts_mock.await_args_list[1].kwargs
+        assert "filter" not in scan_kwargs
+        assert scan_kwargs["time_range"] == "24-hour"
+
+    async def test_alert_id_with_quote_skips_filter_lookup(self):
+        # A quote in the id cannot be embedded safely in a filter
+        # expression; the subject lookup must go straight to the scan.
+        with (
+            t(GET_ALERTS, return_value=ok(data=[])) as alerts_mock,
+            t(GET_ALERT_DETAILS, return_value=self.DETAILS),
+            t(GET_ALERT_LOGS, return_value=ok(data=[])),
+            t(GET_INCIDENTS, return_value=ok(data=[])),
+            t(GET_ALERT_INCIDENT_STATS, return_value=ok(data={})),
+        ):
+            await handlers.run_triage(TriageParams(alert_id='alert"-x'))
+        alerts_mock.assert_awaited_once()
+        assert "filter" not in alerts_mock.await_args.kwargs
+
+    async def test_alert_related_incidents_by_attachment_membership(self):
+        # Live alerts carry no incident-linkage fields; the authoritative
+        # relation is which context incidents attach this alertid.
+        candidates = [
+            {"incid": "inc-001", "name": "one"},
+            {"incid": "inc-002", "name": "two"},
+        ]
+        snapshot = {"severity": "medium"}
+        mapping = {
+            "inc-001": [alertevent_attachment("alert-002", snapshot)],
+            "inc-002": [alertevent_attachment("alert-999", snapshot)],
+        }
+        with (
+            t(GET_ALERTS, return_value=ok(data=[ALERT_UNLINKED])),
+            t(GET_ALERT_DETAILS, return_value=self.DETAILS),
+            t(GET_ALERT_LOGS, return_value=ok(data=[])),
+            t(GET_INCIDENTS, return_value=ok(data=candidates)),
+            t(GET_ALERT_INCIDENT_STATS, return_value=ok(data={})),
+            attachment_client_by_incid(mapping),
+        ):
+            result = await handlers.run_triage(TriageParams(alert_id="alert-002"))
+        assert result.related == [candidates[0]]
+        assert not any("lists all incidents" in w for w in result.warnings)
+
+    async def test_alert_not_attached_to_any_context_incident(self):
+        candidates = [{"incid": "inc-001", "name": "one"}]
+        with (
+            t(GET_ALERTS, return_value=ok(data=[ALERT_UNLINKED])),
+            t(GET_ALERT_DETAILS, return_value=self.DETAILS),
+            t(GET_ALERT_LOGS, return_value=ok(data=[])),
+            t(GET_INCIDENTS, return_value=ok(data=candidates)),
+            t(GET_ALERT_INCIDENT_STATS, return_value=ok(data={})),
+            attachment_client_by_incid({"inc-001": []}),
+        ):
+            result = await handlers.run_triage(TriageParams(alert_id="alert-002"))
+        assert result.related == []
+        assert any("not attached to any" in w for w in result.warnings)
+
+    async def test_alert_related_falls_back_noisy_when_attachments_unavailable(self):
+        # No get_faz_client patch -> every membership check fails; the old
+        # honest-but-noisy fallback (all context incidents) is preserved.
+        candidates = [{"incid": "inc-001"}, {"incid": "inc-002"}]
+        with (
+            t(GET_ALERTS, return_value=ok(data=[ALERT_UNLINKED])),
+            t(GET_ALERT_DETAILS, return_value=self.DETAILS),
+            t(GET_ALERT_LOGS, return_value=ok(data=[])),
+            t(GET_INCIDENTS, return_value=ok(data=candidates)),
+            t(GET_ALERT_INCIDENT_STATS, return_value=ok(data={})),
+        ):
+            result = await handlers.run_triage(TriageParams(alert_id="alert-002"))
+        assert result.related == candidates
+        assert any("lists all incidents" in w for w in result.warnings)
 
 
 # --------------------------------------------------------------------- #
