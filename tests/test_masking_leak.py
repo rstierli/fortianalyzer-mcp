@@ -42,9 +42,12 @@ DEV_SERIAL = "fgtserial0001"
 DETECT_KEY = "fazserial0001"
 FABRIC = "fabric-alpha"
 VDOM = "root"
-# Left clear by design; see the "known gaps" note in fields.py.
+# Masked as a pair: a non-empty obf_url marks threat as a browsed domain
+# (#40). Signature/filename rows carry an empty obf_url and stay clear.
 THREAT_DOMAIN = "threat.example.net"
 OBF_URL = "threat[dot]example[dot]net"
+THREAT_SIGNATURE = "Adobe.Flash.Exploit"
+THREAT_FILENAME = "Microsoft.MixedReality.Portal_2000.21051.1282.0_neutral_8wekyb3d8bbwe.AppxBundle"
 
 ALERT: dict[str, Any] = {
     "alertid": "202607101000000020",
@@ -94,6 +97,18 @@ FORTIVIEW_THREAT: dict[str, Any] = {
     "obf_url": OBF_URL,
     "threatlevel": 4,
 }
+# Signature and malware rows: threat is an app signature or a dotted
+# filename, obf_url is empty, and the value must stay readable.
+FORTIVIEW_SIGNATURE: dict[str, Any] = {
+    "threat": THREAT_SIGNATURE,
+    "obf_url": "",
+    "threatlevel": 3,
+}
+FORTIVIEW_MALWARE: dict[str, Any] = {
+    "threat": THREAT_FILENAME,
+    "obf_url": "",
+    "threattype": "malware-detected",
+}
 FORTIVIEW_COUNTRY: dict[str, Any] = {
     "fortigate": f"{DEV_NAME},{DEV_PEER}",
     "devvds": f"{DEV_NAME}[{VDOM}],{DEV_PEER}[{VDOM}]",
@@ -122,6 +137,8 @@ RECORDS = [
     INCIDENT,
     TRAFFIC,
     FORTIVIEW_THREAT,
+    FORTIVIEW_SIGNATURE,
+    FORTIVIEW_MALWARE,
     FORTIVIEW_COUNTRY,
     UEBA_ENDUSER,
     UEBA_ENDPOINT,
@@ -132,6 +149,8 @@ RECORD_IDS = [
     "incident",
     "traffic",
     "fv-threat",
+    "fv-signature",
+    "fv-malware",
     "fv-country",
     "ueba-enduser",
     "ueba-endpoint",
@@ -147,6 +166,8 @@ PERSONAL = [
     SRC_NAME,
     ANALYST,
     SOC_EMAIL,
+    THREAT_DOMAIN,
+    OBF_URL,
 ]
 DEVICE_IDENTITY = [DEV_NAME, DEV_PEER, DEV_SERIAL, DETECT_KEY, FABRIC]
 
@@ -318,17 +339,97 @@ class TestFortiViewDeviceVdom:
         assert masked["devvds"] == f"{masked['fortigate']}[{VDOM}]"
 
 
+def _looks_like_web_domain(value: str) -> bool:
+    """Test-only tripwire heuristic, NOT dispatch logic: lowercase dotted
+    labels ending in an alphabetic TLD. Signatures (``Adobe.Flash.Exploit``)
+    and filenames carry uppercase or non-label characters and do not match.
+    """
+    import re
+
+    return re.fullmatch(r"(?:[a-z0-9-]+\.)+[a-z]{2,24}", value.strip()) is not None
+
+
+class TestThreatObfUrlPair:
+    """#40: a non-empty ``obf_url`` marks ``threat`` as a browsed domain and
+    both mask as a consistent pair; an empty one leaves ``threat`` clear."""
+
+    def test_domain_threat_masks_and_does_not_leak(self, masker: OutputMasker):
+        masked = masker.mask_result(FORTIVIEW_THREAT)
+        assert THREAT_DOMAIN not in str(masked)
+        assert OBF_URL not in str(masked)
+        assert masked["threat"].endswith(".masked.invalid")
+
+    def test_pair_stays_consistent(self, masker: OutputMasker):
+        """obf_url must remain the [dot]-escaped twin of threat after
+        masking, or a reader diffing the two would see two identities."""
+        masked = masker.mask_result(FORTIVIEW_THREAT)
+        assert masked["obf_url"] == masked["threat"].replace(".", "[dot]")
+
+    def test_signature_row_stays_clear(self, masker: OutputMasker):
+        """Empty obf_url: an app signature keeps its analytic value."""
+        assert masker.mask_result(FORTIVIEW_SIGNATURE)["threat"] == THREAT_SIGNATURE
+
+    def test_malware_filename_stays_clear(self, masker: OutputMasker):
+        """Dotted filenames would fool any shape test; the sibling rule
+        leaves them readable."""
+        assert masker.mask_result(FORTIVIEW_MALWARE)["threat"] == THREAT_FILENAME
+
+    def test_threat_without_obf_url_key_stays_clear(self, masker: OutputMasker):
+        record = {"threat": "udp_flood", "count": 3}
+        assert masker.mask_result(record) == record
+
+    def test_obf_url_alone_still_masks(self, masker: OutputMasker):
+        masked = masker.mask_result({"obf_url": OBF_URL})
+        assert OBF_URL not in str(masked)
+        assert masked["obf_url"].endswith("[dot]masked[dot]invalid")
+
+    def test_mismatched_pair_leaks_neither(self, masker: OutputMasker):
+        """Defensive: if threat and obf_url ever disagree, each masks on its
+        own value; determinism keeps twins twins, disagreement stays safe."""
+        masked = masker.mask_result({"threat": "other.example.org", "obf_url": OBF_URL})
+        assert "other.example.org" not in str(masked)
+        assert OBF_URL not in str(masked)
+
+    def test_threat_token_resolves_back_as_an_argument(self, masker: OutputMasker):
+        """The threat token is a standard marked domain token, so Phase 2
+        resolves it anywhere. The escaped obf_url form is display-only."""
+        from fortianalyzer_mcp.masking.unmask import ArgUnmasker
+
+        masked = masker.mask_result(FORTIVIEW_THREAT)
+        unmasker = ArgUnmasker(FPEEngine(KEY))
+        assert unmasker.resolve_scalar(masked["threat"]) == THREAT_DOMAIN
+
+    def test_domain_from_the_pair_is_substituted_in_prose(self, masker: OutputMasker):
+        masked = masker.mask_result(
+            {
+                "threat": THREAT_DOMAIN,
+                "obf_url": OBF_URL,
+                "extrainfo": f"endpoint browsed {THREAT_DOMAIN} twice",
+            }
+        )
+        assert THREAT_DOMAIN not in masked["extrainfo"]
+        assert masked["threat"] in masked["extrainfo"]
+
+    @pytest.mark.parametrize("record", RECORDS, ids=RECORD_IDS)
+    def test_tripwire_no_domain_threat_with_empty_obf_url(self, record: dict[str, Any]):
+        """The rule's one assumption, asserted so a counterexample fails a
+        test instead of leaking silently: any fixture row whose ``threat``
+        looks like a web domain must carry a non-empty ``obf_url``. Add
+        live-captured rows to RECORDS and this trips on the day a build
+        emits a domain threat without its escaped twin."""
+        threat = record.get("threat")
+        if not isinstance(threat, str) or not _looks_like_web_domain(threat):
+            return
+        obf = record.get("obf_url")
+        assert isinstance(obf, str) and obf.strip(), (
+            f"domain-shaped threat {threat!r} with empty obf_url would leak; "
+            "the #40 sibling rule assumption no longer holds"
+        )
+
+
 class TestDocumentedGaps:
     """Pins for limits we chose not to close. A pin failing means someone
     changed the behavior, and the reasoning in fields.py needs revisiting."""
-
-    def test_threat_and_obf_url_are_left_clear(self, full_masker: OutputMasker):
-        """A browsed domain leaks here. ``threat`` also holds signature names
-        like ``Adobe.Flash.Exploit`` on ips rows, which no shape test can tell
-        from a domain, and the reference estate produced no such row."""
-        masked = full_masker.mask_result(FORTIVIEW_THREAT)
-        assert masked["threat"] == THREAT_DOMAIN
-        assert masked["obf_url"] == OBF_URL
 
     def test_bare_username_in_prose_is_not_masked(self, masker: OutputMasker):
         """Free text is only as good as the response it sits in: a username
