@@ -141,7 +141,7 @@ class TestNameMasking:
     def test_chunked_tokens_do_not_repeat_for_repeating_plaintext(self, engine: FPEEngine):
         # 72 = two full 36-char blocks of identical plaintext; the
         # position-varied tweak must yield different ciphertext blocks.
-        masked = engine.mask_hostname("a" * 72).removeprefix("host-")
+        masked = engine.mask_hostname("a" * 72).removeprefix(f"host-{engine.key_id}-")
         assert masked[:36] != masked[36:72]
 
     def test_username_roundtrip_with_underscore(self, engine: FPEEngine):
@@ -151,12 +151,22 @@ class TestNameMasking:
 
     def test_hostname_and_username_tweaks_differ(self, engine: FPEEngine):
         # Same raw value masked as different types must not collide.
-        host_ct = engine.mask_hostname("admin").removeprefix("host-")
-        user_ct = engine.mask_username("admin").removeprefix("user-")
+        host_ct = engine.mask_hostname("admin").removeprefix(f"host-{engine.key_id}-")
+        user_ct = engine.mask_username("admin").removeprefix(f"user-{engine.key_id}-")
         assert host_ct != user_ct
 
     def test_normalizes_to_lowercase(self, engine: FPEEngine):
         assert engine.unmask_hostname(engine.mask_hostname("EDGE-FW-01")) == "edge-fw-01"
+
+    @pytest.mark.parametrize("name", ["Admin", "JDoe", "SVC_Backup", "A", "X" * 30, "y" * 31])
+    def test_username_preserves_case(self, engine: FPEEngine, name: str):
+        # Usernames are case-sensitive principals: the round-trip must
+        # return the exact casing, across padding and chunking edges
+        # (mixed-case alphabet -> single-block max is 30, not 36).
+        assert engine.unmask_username(engine.mask_username(name)) == name
+
+    def test_username_case_variants_get_distinct_tokens(self, engine: FPEEngine):
+        assert engine.mask_username("Admin") != engine.mask_username("admin")
 
     def test_empty_value_raises(self, engine: FPEEngine):
         with pytest.raises(MaskingError):
@@ -244,7 +254,7 @@ class TestUnmaskToken:
     def test_suffix_marker_wins_over_prefix(self, engine: FPEEngine):
         # A token that looks like both must route by suffix (the stronger
         # marker) — a domain payload can start with "host-" by chance.
-        token = "host-abcd.masked.invalid"
+        token = f"host-abcd.{engine.key_id}.masked.invalid"
         result = engine.unmask_token(token)
         assert result == engine.unmask_domain(token)
 
@@ -255,12 +265,73 @@ class TestUnmaskToken:
     def test_unmask_tolerates_uppercased_tokens(self, engine: FPEEngine):
         # Tokens are lowercase by construction, but a model may title-case one
         # at the start of a sentence before handing it back as an argument.
+        # Usernames are excluded: their ciphertext is case-sensitive (see
+        # test_username_recasing_is_a_documented_residual).
         cases = {
             engine.mask_hostname("edge-fw-01"): "edge-fw-01",
-            engine.mask_username("jdoe"): "jdoe",
             engine.mask_domain("example.com"): "example.com",
             engine.mask_email("alice@example.com"): "alice@example.com",
         }
         for token, real in cases.items():
             assert engine.unmask_token(token.upper()) == real
             assert engine.unmask_token(token.capitalize()) == real
+
+    def test_username_token_prefix_and_key_id_tolerate_recasing(self, engine: FPEEngine):
+        token = engine.mask_username("jdoe")
+        prefix_len = len(f"user-{engine.key_id}-")
+        recased = token[:prefix_len].upper() + token[prefix_len:]
+        assert engine.unmask_token(recased) == "jdoe"
+        assert engine.unmask_username(recased) == "jdoe"
+
+    def test_username_recasing_is_a_documented_residual(self, engine: FPEEngine):
+        # FF3 has no integrity check: re-casing the mixed-case username
+        # ciphertext decrypts to a wrong value instead of failing. This
+        # test pins the residual so a future fix shows up as a diff.
+        token = engine.mask_username("jdoe")
+        mangled = engine.unmask_token(token.upper())
+        assert mangled != "jdoe"
+
+
+# --------------------------------------------------------------------- #
+# Key id                                                                #
+# --------------------------------------------------------------------- #
+
+
+class TestKeyId:
+    def test_key_id_is_stable_and_key_bound(self):
+        assert FPEEngine(KEY_128).key_id == FPEEngine(KEY_128).key_id
+        assert FPEEngine(KEY_128).key_id == FPEEngine(KEY_128.lower()).key_id
+        assert FPEEngine(KEY_128).key_id != FPEEngine(OTHER_KEY).key_id
+
+    def test_marked_tokens_carry_the_key_id(self, engine: FPEEngine):
+        kid = engine.key_id
+        assert engine.mask_hostname("edge-fw-01").startswith(f"host-{kid}-")
+        assert engine.mask_username("jdoe").startswith(f"user-{kid}-")
+        assert engine.mask_domain("example.com").endswith(f".{kid}.masked.invalid")
+        assert engine.mask_email("a@example.com").endswith(f".{kid}.masked.invalid")
+
+    def test_unmask_under_rotated_key_fails_loudly(self, engine: FPEEngine):
+        # Without the key id this decrypts to a plausible wrong value —
+        # the silent-lie failure mode the key id exists to prevent.
+        rotated = FPEEngine(OTHER_KEY)
+        tokens = [
+            engine.mask_hostname("edge-fw-01"),
+            engine.mask_username("jdoe"),
+            engine.mask_domain("example.com"),
+            engine.mask_email("alice@example.com"),
+        ]
+        for token in tokens:
+            with pytest.raises(MaskingError, match="different masking key"):
+                rotated.unmask_token(token)
+
+    def test_ip_and_mac_tokens_have_no_key_id(self, engine: FPEEngine):
+        # Documented residual: full-codomain types cannot carry a marker,
+        # so cross-key decryption of these stays silent.
+        rotated = FPEEngine(OTHER_KEY)
+        assert rotated.unmask_ip(engine.mask_ip("192.0.2.48")) != "192.0.2.48"
+
+    def test_pre_key_id_token_forms_are_rejected(self, engine: FPEEngine):
+        with pytest.raises(MaskingError, match="key id"):
+            engine.unmask_hostname("host-abcdef")
+        with pytest.raises(MaskingError, match="key id"):
+            engine.unmask_domain("abcdef.masked.invalid")

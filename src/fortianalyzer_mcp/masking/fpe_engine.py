@@ -13,17 +13,30 @@ username yields different tokens (domain separation).
 
 Token conventions per type (the marker doubles as a fail-safe: a missed
 unmask shows an obviously fake value, and the prose companion can pattern
-match it):
+match it). ``<kid>`` is a 4-hex-char key id derived one-way from the
+masking key: without it, decrypting a token minted under a rotated key
+yields a silently wrong but plausible-looking value; with it, the
+mismatch fails loudly. IP and MAC tokens have no room for a key id (the
+whole address space is the codomain), so they keep that residual risk —
+documented, same family as the IP wrinkle below.
 
-    email     ``<ct-local>@<ct-domain>.<mask_suffix>``
-    domain    ``<ct>.<mask_suffix>``
-    hostname  ``host-<ct>``
-    username  ``user-<ct>``
+    email     ``<ct-local>@<ct-domain>.<kid>.<mask_suffix>``
+    domain    ``<ct>.<kid>.<mask_suffix>``
+    hostname  ``host-<kid>-<ct>``
+    username  ``user-<kid>-<ct>``
     ipv4/ipv6 valid-looking address, FPE over the full 32/128 bits
     mac       valid-looking MAC, FPE over the full 48 bits
 
 ``mask_suffix`` defaults to ``masked.invalid`` — the ``.invalid`` TLD is
 reserved (RFC 2606), so a leaked token can never resolve to a real host.
+
+Usernames are the one case-sensitive type: ``Admin`` and ``admin`` can be
+distinct principals, so the username cipher uses a mixed-case alphabet
+(radix 66, single-block max 30 chars) and preserves case through the
+round-trip. Residual: a model that re-cases a username token's ciphertext
+in prose (e.g. title-casing it) corrupts the payload, and FF3 has no
+integrity check to catch that — the other string types stay
+case-insensitive and tolerate re-casing.
 
 Two RFC deviations discovered while verifying reversibility (both are
 "IP wrinkle"-class: the token carries no recognizable marker, so the
@@ -54,11 +67,17 @@ import re
 
 from ff3 import FF3Cipher
 
-# Alphabet for string-typed values (hostnames, usernames, domains, email
-# parts). 40 chars -> FF3-1 bounds are minLen 4 / maxLen 36. ``~`` is the
-# pad sentinel and must never appear in a real value.
+# Alphabet for string-typed values (hostnames, domains, email parts).
+# 40 chars -> FF3-1 bounds are minLen 4 / maxLen 36. ``~`` is the pad
+# sentinel and must never appear in a real value.
 _STR_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789-._~"
+# Usernames are case-sensitive (Admin != admin), so their alphabet adds
+# the uppercase letters. 66 chars -> FF3-1 bounds are minLen 4 / maxLen 30.
+_USERNAME_ALPHABET = _STR_ALPHABET + "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 _PAD_CHAR = "~"
+
+_KEY_ID_LEN = 4
+_KEY_ID_RE = re.compile(r"^[0-9a-f]{4}$")
 
 _HEX_KEY_RE = re.compile(r"^[0-9a-fA-F]+$")
 _VALID_KEY_LENGTHS = {32, 48, 64}  # hex chars: AES-128 / 192 / 256
@@ -104,7 +123,9 @@ class FPEEngine:
     All ``mask_*`` / ``unmask_*`` pairs are deterministic for a given key
     and reversible from the key alone. String-typed values are normalized
     to lowercase before encryption (hostnames, domains and emails are
-    case-insensitive anyway), so unmasking returns the lowercase form.
+    case-insensitive anyway), so unmasking returns the lowercase form —
+    except usernames, which are case-sensitive principals and round-trip
+    with their casing preserved.
     """
 
     def __init__(self, key: str, mask_suffix: str = DEFAULT_MASK_SUFFIX) -> None:
@@ -121,15 +142,31 @@ class FPEEngine:
             # Deliberately does not echo the offending value: the key is a secret.
             raise MaskingError("masking key must be 32, 48 or 64 hex characters (AES-128/192/256)")
         self._mask_suffix = mask_suffix.lower().lstrip(".")
+        # One-way key fingerprint carried in marked tokens so a token minted
+        # under a different key fails loudly instead of decrypting to a
+        # plausible wrong value. Key hex is case-normalized first: it is the
+        # same AES key either way. 4 hex chars = 16 bits, plenty to tell two
+        # rotation generations apart; not meant to be collision-proof.
+        self._key_id = hashlib.sha256(f"faz-mcp-fpe:v1:keyid:{key.lower()}".encode()).hexdigest()[
+            :_KEY_ID_LEN
+        ]
         self._hex_ciphers = {
             vtype: FF3Cipher(key, _derive_tweak(label), radix=16)
             for vtype, label in _TWEAK_LABELS.items()
             if vtype in ("ipv4", "ipv6", "mac")
         }
         self._str_ciphers = {
-            vtype: FF3Cipher.withCustomAlphabet(key, _derive_tweak(label), _STR_ALPHABET)
+            vtype: FF3Cipher.withCustomAlphabet(
+                key,
+                _derive_tweak(label),
+                _USERNAME_ALPHABET if vtype == "username" else _STR_ALPHABET,
+            )
             for vtype, label in _TWEAK_LABELS.items()
             if vtype not in ("ipv4", "ipv6", "mac")
+        }
+        self._alphabets = {
+            vtype: _USERNAME_ALPHABET if vtype == "username" else _STR_ALPHABET
+            for vtype in self._str_ciphers
         }
         self._tweak_labels = dict(_TWEAK_LABELS)
 
@@ -149,6 +186,11 @@ class FPEEngine:
     def mask_suffix(self) -> str:
         """Marker suffix used for domain and email tokens."""
         return self._mask_suffix
+
+    @property
+    def key_id(self) -> str:
+        """4-hex-char one-way fingerprint of the key, embedded in marked tokens."""
+        return self._key_id
 
     # ------------------------------------------------------------------ #
     # IP addresses                                                       #
@@ -214,37 +256,44 @@ class FPEEngine:
     # ------------------------------------------------------------------ #
 
     def mask_hostname(self, value: str) -> str:
-        """Mask a hostname into a ``host-<ct>`` token."""
-        return "host-" + self._encrypt_str("hostname", value)
+        """Mask a hostname into a ``host-<kid>-<ct>`` token."""
+        return f"host-{self._key_id}-{self._encrypt_str('hostname', value)}"
 
     def unmask_hostname(self, token: str) -> str:
         """Reverse :meth:`mask_hostname`."""
-        return self._decrypt_str("hostname", self._strip_prefix(token, "host-"))
+        payload = self._strip_prefix(token, "host-")
+        return self._decrypt_str("hostname", self._split_key_id(payload, token))
 
     def mask_username(self, value: str) -> str:
-        """Mask a user/login name into a ``user-<ct>`` token."""
-        return "user-" + self._encrypt_str("username", value)
+        """Mask a user/login name into a ``user-<kid>-<ct>`` token (case-preserving)."""
+        return f"user-{self._key_id}-{self._encrypt_str('username', value)}"
 
     def unmask_username(self, token: str) -> str:
-        """Reverse :meth:`mask_username`."""
-        return self._decrypt_str("username", self._strip_prefix(token, "user-"))
+        """Reverse :meth:`mask_username`.
+
+        The ciphertext is case-sensitive (mixed-case alphabet); only the
+        ``user-`` prefix and the key id tolerate re-casing.
+        """
+        payload = self._strip_prefix(token, "user-", lower_payload=False)
+        return self._decrypt_str("username", self._split_key_id(payload, token))
 
     def mask_domain(self, value: str) -> str:
-        """Mask a DNS domain into ``<ct>.<mask_suffix>``."""
-        return f"{self._encrypt_str('domain', value)}.{self._mask_suffix}"
+        """Mask a DNS domain into ``<ct>.<kid>.<mask_suffix>``."""
+        return f"{self._encrypt_str('domain', value)}.{self._key_id}.{self._mask_suffix}"
 
     def unmask_domain(self, token: str) -> str:
         """Reverse :meth:`mask_domain`."""
-        return self._decrypt_str("domain", self._strip_domain_suffix(token))
+        payload = self._strip_domain_suffix(token)
+        return self._decrypt_str("domain", self._split_key_id_suffix(payload, token))
 
     def mask_email(self, value: str) -> str:
-        """Mask an email address into ``<ct-local>@<ct-domain>.<mask_suffix>``."""
+        """Mask an email address into ``<ct-local>@<ct-domain>.<kid>.<mask_suffix>``."""
         local, _, domain = value.strip().partition("@")
         if not local or not domain:
             raise MaskingError(f"not a valid email address: {value!r}")
         return (
             f"{self._encrypt_str('email_local', local)}"
-            f"@{self._encrypt_str('domain', domain)}.{self._mask_suffix}"
+            f"@{self._encrypt_str('domain', domain)}.{self._key_id}.{self._mask_suffix}"
         )
 
     def unmask_email(self, token: str) -> str:
@@ -252,10 +301,8 @@ class FPEEngine:
         local, _, domain = token.strip().lower().partition("@")
         if not local or not domain:
             raise MaskingError(f"not a masked email token: {token!r}")
-        return (
-            f"{self._decrypt_str('email_local', local)}"
-            f"@{self._decrypt_str('domain', self._strip_domain_suffix(domain))}"
-        )
+        domain_ct = self._split_key_id_suffix(self._strip_domain_suffix(domain), token)
+        return f"{self._decrypt_str('email_local', local)}@{self._decrypt_str('domain', domain_ct)}"
 
     # ------------------------------------------------------------------ #
     # Generic token recognition (marked types only)                      #
@@ -275,9 +322,12 @@ class FPEEngine:
         Raises:
             MaskingError: If a marker matches but the payload does not decrypt.
         """
-        # Tokens are lowercase by construction, so lowercasing the input is
-        # lossless and tolerates a model title-casing a token in prose.
-        candidate = token.strip().lower()
+        # Every token form except the username ciphertext is lowercase by
+        # construction, so lowercasing those is lossless and tolerates a
+        # model title-casing a token in prose. The username payload must be
+        # kept verbatim (mixed-case alphabet).
+        stripped = token.strip()
+        candidate = stripped.lower()
         # Suffix first: it is the strongest marker. A domain-token payload
         # may itself start with "host-"/"user-" by chance, but a prefix
         # token ending in ".<mask_suffix>" is astronomically unlikely.
@@ -288,7 +338,7 @@ class FPEEngine:
         if candidate.startswith("host-"):
             return self.unmask_hostname(candidate)
         if candidate.startswith("user-"):
-            return self.unmask_username(candidate)
+            return self.unmask_username(stripped)
         return None
 
     # ------------------------------------------------------------------ #
@@ -297,12 +347,15 @@ class FPEEngine:
 
     def _encrypt_str(self, vtype: str, value: str) -> str:
         cipher = self._str_ciphers[vtype]
-        normalized = value.strip().lower()
+        alphabet = self._alphabets[vtype]
+        # Usernames are case-sensitive principals; every other string type
+        # is case-insensitive by definition and normalizes to lowercase.
+        normalized = value.strip() if vtype == "username" else value.strip().lower()
         if not normalized:
             raise MaskingError(f"cannot mask empty {vtype} value")
         if _PAD_CHAR in normalized:
             raise MaskingError(f"{vtype} value contains the reserved pad character {_PAD_CHAR!r}")
-        if any(ch not in _STR_ALPHABET for ch in normalized):
+        if any(ch not in alphabet for ch in normalized):
             raise MaskingError(f"{vtype} value contains characters outside the maskable alphabet")
         if len(normalized) < cipher.minLen:
             normalized = normalized.ljust(cipher.minLen, _PAD_CHAR)
@@ -310,7 +363,8 @@ class FPEEngine:
 
     def _decrypt_str(self, vtype: str, payload: str) -> str:
         cipher = self._str_ciphers[vtype]
-        if not payload or any(ch not in _STR_ALPHABET for ch in payload):
+        alphabet = self._alphabets[vtype]
+        if not payload or any(ch not in alphabet for ch in payload):
             raise MaskingError(f"not a valid masked {vtype} token payload")
         try:
             plain = self._apply_chunked(cipher, vtype, payload, encrypt=False)
@@ -351,13 +405,15 @@ class FPEEngine:
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _strip_prefix(token: str, prefix: str) -> str:
-        # Lowercased for the same reason as _strip_domain_suffix: tokens are
-        # emitted lowercase, so any casing we get back is safe to normalize.
-        candidate = token.strip().lower()
-        if not candidate.startswith(prefix):
+    def _strip_prefix(token: str, prefix: str, lower_payload: bool = True) -> str:
+        # The prefix always tolerates re-casing. The payload is lowercased
+        # for the case-insensitive types (tokens are emitted lowercase) but
+        # kept verbatim for the mixed-case username ciphertext.
+        stripped = token.strip()
+        if not stripped.lower().startswith(prefix):
             raise MaskingError(f"not a {prefix}* token: {token!r}")
-        return candidate[len(prefix) :]
+        payload = stripped[len(prefix) :]
+        return payload.lower() if lower_payload else payload
 
     def _strip_domain_suffix(self, token: str) -> str:
         candidate = token.strip().lower()
@@ -365,3 +421,36 @@ class FPEEngine:
         if not candidate.endswith(suffix):
             raise MaskingError(f"token does not carry the {suffix!r} marker: {token!r}")
         return candidate[: -len(suffix)]
+
+    def _split_key_id(self, payload: str, token: str) -> str:
+        """Split ``<kid>-<ct>``, verify the key id, return the ciphertext."""
+        kid, sep, ct = (
+            payload[:_KEY_ID_LEN],
+            payload[_KEY_ID_LEN : _KEY_ID_LEN + 1],
+            payload[_KEY_ID_LEN + 1 :],
+        )
+        if not _KEY_ID_RE.match(kid.lower()) or sep != "-" or not ct:
+            raise MaskingError(f"token carries no key id: {token!r}")
+        self._check_key_id(kid.lower(), token)
+        return ct
+
+    def _split_key_id_suffix(self, payload: str, token: str) -> str:
+        """Split ``<ct>.<kid>``, verify the key id, return the ciphertext."""
+        ct, sep, kid = (
+            payload[: -(_KEY_ID_LEN + 1)],
+            payload[-(_KEY_ID_LEN + 1) : -_KEY_ID_LEN],
+            payload[-_KEY_ID_LEN:],
+        )
+        if not _KEY_ID_RE.match(kid) or sep != "." or not ct:
+            raise MaskingError(f"token carries no key id: {token!r}")
+        self._check_key_id(kid, token)
+        return ct
+
+    def _check_key_id(self, kid: str, token: str) -> None:
+        if kid != self._key_id:
+            # Key ids are one-way fingerprints, not secrets: naming both
+            # sides makes the rotation mismatch diagnosable from the error.
+            raise MaskingError(
+                f"token was minted under a different masking key "
+                f"(token key id {kid!r}, engine key id {self._key_id!r}): {token!r}"
+            )
