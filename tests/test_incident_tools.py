@@ -40,16 +40,21 @@ class TestIncidentHelpers:
         assert range_map["7-day"] == timedelta(days=7)
 
     def test_severity_values(self) -> None:
-        """Test valid severity values."""
-        valid_severities = ["critical", "high", "medium", "low"]
-        for sev in valid_severities:
-            assert sev in valid_severities
+        """The incident spec's severity enum: high/medium/low only."""
+        from fortianalyzer_mcp.tools.incident_tools import _VALID_INCIDENT_SEVERITIES
+
+        assert _VALID_INCIDENT_SEVERITIES == {"high", "medium", "low"}
 
     def test_status_values(self) -> None:
-        """Test valid incident status values."""
-        valid_statuses = ["new", "investigating", "contained", "resolved", "closed"]
-        for status in valid_statuses:
-            assert status in valid_statuses
+        """The incident spec's status enum, verified live on 7.6.7/8.0.0.
+
+        FAZ rejects anything else with "not a valid enum value for
+        'status'" - the old invented set (new/investigating/contained/
+        resolved) never worked against a real appliance.
+        """
+        from fortianalyzer_mcp.tools.incident_tools import _VALID_INCIDENT_STATUSES
+
+        assert _VALID_INCIDENT_STATUSES == {"draft", "analysis", "response", "closed", "cancelled"}
 
 
 class TestIncidentClient:
@@ -187,9 +192,70 @@ class TestIncidentClient:
         with pytest.raises(ConnectionError, match="Not connected"):
             await client.create_incident(
                 adom="root",
-                name="Test Incident",
+                endpoint="192.0.2.10",
+                category="1",
                 severity="high",
             )
+
+    async def test_create_incident_sends_required_params(
+        self, mock_client_with_incidents: FortiAnalyzerClient
+    ) -> None:
+        """Regression for #54: the create payload must carry reporter,
+        endpoint and category - FAZ rejects the request without all three.
+        Optional params stay out of the payload when not given."""
+        from unittest.mock import AsyncMock, patch
+
+        with patch.object(
+            mock_client_with_incidents,
+            "_raw_request",
+            AsyncMock(return_value={"incid": "IN00000042", "revision": "0"}),
+        ) as raw:
+            result = await mock_client_with_incidents.create_incident(
+                adom="root",
+                endpoint="192.0.2.10",
+                category="1",
+            )
+        assert raw.await_args.args[0] == "add"
+        assert raw.await_args.args[1] == "/incidentmgmt/adom/root/incident"
+        sent = raw.await_args.kwargs
+        assert sent["reporter"] == "faz-mcp"
+        assert sent["endpoint"] == "192.0.2.10"
+        assert sent["category"] == "1"
+        assert sent["severity"] == "medium"
+        for absent in ("status", "description", "epid", "euid", "name"):
+            assert absent not in sent
+        # The ADD response carries incid at the TOP level, no data wrapper
+        # (asymmetric with get_incident, which unwraps data). Keep it raw.
+        assert result["incid"] == "IN00000042"
+
+    async def test_create_incident_sends_optional_params_when_given(
+        self, mock_client_with_incidents: FortiAnalyzerClient
+    ) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        with patch.object(
+            mock_client_with_incidents,
+            "_raw_request",
+            AsyncMock(return_value={"incid": "IN00000043"}),
+        ) as raw:
+            await mock_client_with_incidents.create_incident(
+                adom="root",
+                endpoint="host-14",
+                category="2",
+                reporter="analyst1",
+                severity="high",
+                status="draft",
+                description="probe",
+                epid=7,
+                euid=9,
+                name="Suspicious Login Activity",
+            )
+        sent = raw.await_args.kwargs
+        assert sent["reporter"] == "analyst1"
+        assert sent["status"] == "draft"
+        assert sent["epid"] == 7
+        assert sent["euid"] == 9
+        assert sent["name"] == "Suspicious Login Activity"
 
     async def test_update_incident_not_connected(self) -> None:
         """Test update_incident raises when not connected."""
@@ -204,7 +270,7 @@ class TestIncidentClient:
             await client.update_incident(
                 adom="root",
                 incident_id="inc-001",
-                status="investigating",
+                status="analysis",
             )
 
     async def test_get_incident_stats_not_connected(self) -> None:
