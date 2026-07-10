@@ -249,7 +249,7 @@ class FPEEngine:
 
     def unmask_email(self, token: str) -> str:
         """Reverse :meth:`mask_email`."""
-        local, _, domain = token.strip().partition("@")
+        local, _, domain = token.strip().lower().partition("@")
         if not local or not domain:
             raise MaskingError(f"not a masked email token: {token!r}")
         return (
@@ -275,11 +275,13 @@ class FPEEngine:
         Raises:
             MaskingError: If a marker matches but the payload does not decrypt.
         """
-        candidate = token.strip()
+        # Tokens are lowercase by construction, so lowercasing the input is
+        # lossless and tolerates a model title-casing a token in prose.
+        candidate = token.strip().lower()
         # Suffix first: it is the strongest marker. A domain-token payload
         # may itself start with "host-"/"user-" by chance, but a prefix
         # token ending in ".<mask_suffix>" is astronomically unlikely.
-        if candidate.lower().endswith("." + self._mask_suffix):
+        if candidate.endswith("." + self._mask_suffix):
             if "@" in candidate:
                 return self.unmask_email(candidate)
             return self.unmask_domain(candidate)
@@ -350,7 +352,9 @@ class FPEEngine:
 
     @staticmethod
     def _strip_prefix(token: str, prefix: str) -> str:
-        candidate = token.strip()
+        # Lowercased for the same reason as _strip_domain_suffix: tokens are
+        # emitted lowercase, so any casing we get back is safe to normalize.
+        candidate = token.strip().lower()
         if not candidate.startswith(prefix):
             raise MaskingError(f"not a {prefix}* token: {token!r}")
         return candidate[len(prefix) :]
