@@ -24,13 +24,13 @@ from fortianalyzer_mcp.skills.models import (
     SCHEMA_VERSION,
     FeatureGap,
     IncidentsParams,
-    InvestigationReportParams,
+    IncidentSummaryParams,
     LogSearchParams,
     ReportsParams,
     TriageParams,
 )
 
-WAVE1_SKILL_IDS = {"incidents", "reports", "log_search", "triage", "investigation_report"}
+WAVE1_SKILL_IDS = {"incidents", "reports", "log_search", "triage", "incident_summary"}
 
 GET_INCIDENTS = "fortianalyzer_mcp.tools.incident_tools.get_incidents"
 GET_INCIDENT = "fortianalyzer_mcp.tools.incident_tools.get_incident"
@@ -265,14 +265,14 @@ class TestAttachmentCorrelation:
         assert result.related == [{**self.SNAPSHOT, "alertid": "alert-001"}]
         assert not any("fell back" in w for w in result.warnings)
 
-    async def test_investigation_report_evidence_from_attachments(self):
+    async def test_incident_summary_evidence_from_attachments(self):
         with (
             t(GET_INCIDENT, return_value=ok(data=INCIDENT)),
             t(GET_ALERT_LOGS, return_value=ok(data=[{"logid": "l-9"}])),
             attachment_client([alertevent_attachment("alert-001", self.SNAPSHOT)]),
         ):
-            result = await handlers.run_investigation_report(
-                InvestigationReportParams(incident_id="inc-001", include_top_threats=False)
+            result = await handlers.run_incident_summary(
+                IncidentSummaryParams(incident_id="inc-001", include_top_threats=False)
             )
         assert len(result.alerts) == 1
         assert result.alerts[0].alert["alertid"] == "alert-001"
@@ -437,11 +437,11 @@ class TestTriageSkill:
 
 
 # --------------------------------------------------------------------- #
-# investigation_report                                                  #
+# incident_summary                                                  #
 # --------------------------------------------------------------------- #
 
 
-class TestInvestigationReportSkill:
+class TestIncidentSummarySkill:
     async def test_full_report(self):
         threats = [{"threat": "Backdoor.X", "threatweight": 900}]
         with (
@@ -452,8 +452,8 @@ class TestInvestigationReportSkill:
             ) as logs_mock,
             t(GET_TOP_THREATS, return_value=ok(data=threats)),
         ):
-            result = await handlers.run_investigation_report(
-                InvestigationReportParams(incident_id="inc-001")
+            result = await handlers.run_incident_summary(
+                IncidentSummaryParams(incident_id="inc-001")
             )
         logs_mock.assert_awaited_once_with(alert_ids=["alert-001"], adom=None, limit=20)
         assert result.incident == INCIDENT
@@ -471,8 +471,8 @@ class TestInvestigationReportSkill:
             t(GET_ALERTS, return_value=ok(data=[])),
             t(GET_TOP_THREATS, side_effect=RuntimeError("fortiview down")),
         ):
-            result = await handlers.run_investigation_report(
-                InvestigationReportParams(incident_id="inc-001")
+            result = await handlers.run_incident_summary(
+                IncidentSummaryParams(incident_id="inc-001")
             )
         assert isinstance(result.threat_landscape, FeatureGap)
         assert "unavailable" in result.threat_landscape.reason
@@ -487,8 +487,8 @@ class TestInvestigationReportSkill:
             t(GET_ALERTS, return_value=ok(data=linked_alerts)),
             t(GET_ALERT_LOGS, return_value=ok(data=[])),
         ):
-            result = await handlers.run_investigation_report(
-                InvestigationReportParams(
+            result = await handlers.run_incident_summary(
+                IncidentSummaryParams(
                     incident_id="inc-001", max_alerts=2, include_top_threats=False
                 )
             )
@@ -499,9 +499,7 @@ class TestInvestigationReportSkill:
     async def test_incident_failure_raises(self):
         with t(GET_INCIDENT, return_value={"status": "error", "error": "not_found"}):
             with pytest.raises(handlers.SkillExecutionError):
-                await handlers.run_investigation_report(
-                    InvestigationReportParams(incident_id="inc-404")
-                )
+                await handlers.run_incident_summary(IncidentSummaryParams(incident_id="inc-404"))
 
     async def test_timeline_orders_int_and_string_timestamps(self):
         """The shape this repo's own fixtures produce: int + epoch string.
@@ -519,8 +517,8 @@ class TestInvestigationReportSkill:
             t(GET_ALERTS, return_value=ok(data=alerts)),
             t(GET_ALERT_LOGS, return_value=ok(data=[])),
         ):
-            result = await handlers.run_investigation_report(
-                InvestigationReportParams(incident_id="inc-001", include_top_threats=False)
+            result = await handlers.run_incident_summary(
+                IncidentSummaryParams(incident_id="inc-001", include_top_threats=False)
             )
         # The alert (1704067100) precedes the incident (1704067200).
         assert [e.source for e in result.timeline] == ["alert", "incident"]
@@ -545,8 +543,8 @@ class TestInvestigationReportSkill:
             t(GET_ALERTS, return_value=ok(data=alerts)),
             t(GET_ALERT_LOGS, return_value=ok(data=[])),
         ):
-            result = await handlers.run_investigation_report(
-                InvestigationReportParams(incident_id="inc-001", include_top_threats=False)
+            result = await handlers.run_incident_summary(
+                IncidentSummaryParams(incident_id="inc-001", include_top_threats=False)
             )
         # 2024 alert, then the 2026-07-08 incident, then the 2026-07-09 alert.
         assert [e.source for e in result.timeline] == ["alert", "incident", "alert"]
@@ -559,8 +557,8 @@ class TestInvestigationReportSkill:
             t(GET_ALERTS, return_value=ok(data=alerts)),
             t(GET_ALERT_LOGS, return_value=ok(data=[])),
         ):
-            result = await handlers.run_investigation_report(
-                InvestigationReportParams(incident_id="inc-001", include_top_threats=False)
+            result = await handlers.run_incident_summary(
+                IncidentSummaryParams(incident_id="inc-001", include_top_threats=False)
             )
         assert [e.source for e in result.timeline] == ["incident", "alert"]
 

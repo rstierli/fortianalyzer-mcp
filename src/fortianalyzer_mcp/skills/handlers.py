@@ -26,8 +26,8 @@ from fortianalyzer_mcp.skills.models import (
     IncidentRecord,
     IncidentsParams,
     IncidentsResult,
-    InvestigationReport,
-    InvestigationReportParams,
+    IncidentSummary,
+    IncidentSummaryParams,
     LogSearchParams,
     LogSearchResult,
     ReportsParams,
@@ -540,7 +540,7 @@ async def run_triage(params: TriageParams) -> TriageResult:
 
 
 # --------------------------------------------------------------------- #
-# investigation_report                                                  #
+# incident_summary                                                  #
 # --------------------------------------------------------------------- #
 
 
@@ -602,7 +602,7 @@ def _timeline(incident: dict[str, Any], evidence: list[AlertEvidence]) -> list[T
     return sorted(entries, key=lambda e: _sort_key(e.timestamp))
 
 
-async def run_investigation_report(params: InvestigationReportParams) -> InvestigationReport:
+async def run_incident_summary(params: IncidentSummaryParams) -> IncidentSummary:
     """Structured investigation summary for one incident."""
     from fortianalyzer_mcp.tools.event_tools import get_alert_logs, get_alerts
     from fortianalyzer_mcp.tools.fortiview_tools import get_top_threats
@@ -683,7 +683,7 @@ async def run_investigation_report(params: InvestigationReportParams) -> Investi
     else:
         threat_landscape = FeatureGap(reason="disabled by include_top_threats=false")
 
-    return InvestigationReport(
+    return IncidentSummary(
         incident=incident,
         alerts=evidence,
         threat_landscape=threat_landscape,

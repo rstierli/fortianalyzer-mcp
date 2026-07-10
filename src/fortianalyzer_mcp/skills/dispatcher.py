@@ -34,7 +34,7 @@ async def faz_skill(skill: str, params: dict[str, Any] | None = None) -> dict[st
     correlated alerts), ``reports`` (list/fetch generated reports),
     ``log_search`` (filter-based search, verbatim rows), ``triage``
     (alert/incident evidence bundle + deterministic assessment),
-    ``investigation_report`` (structured incident investigation summary).
+    ``incident_summary`` (structured incident investigation summary).
 
     Pass ``skill="list"`` to get the full catalogue including each
     skill's parameter and output JSON schema. Skill parameters go in

@@ -242,12 +242,12 @@ class TriageResult(BaseModel):
 
 
 # --------------------------------------------------------------------- #
-# investigation_report (Analysis)                                       #
+# incident_summary (Analysis)                                       #
 # --------------------------------------------------------------------- #
 
 
-class InvestigationReportParams(BaseModel):
-    """Parameters for the ``investigation_report`` skill."""
+class IncidentSummaryParams(BaseModel):
+    """Parameters for the ``incident_summary`` skill."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -280,8 +280,8 @@ class TimelineEntry(BaseModel):
     description: str
 
 
-class InvestigationReport(BaseModel):
-    """Output of the ``investigation_report`` skill."""
+class IncidentSummary(BaseModel):
+    """Output of the ``incident_summary`` skill."""
 
     model_config = ConfigDict(extra="forbid")
 

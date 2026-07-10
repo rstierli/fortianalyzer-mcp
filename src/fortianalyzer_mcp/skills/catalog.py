@@ -15,8 +15,8 @@ from fortianalyzer_mcp.skills import handlers
 from fortianalyzer_mcp.skills.models import (
     IncidentsParams,
     IncidentsResult,
-    InvestigationReport,
-    InvestigationReportParams,
+    IncidentSummary,
+    IncidentSummaryParams,
     LogSearchParams,
     LogSearchResult,
     ReportsParams,
@@ -79,13 +79,13 @@ SKILLS: dict[str, SkillSpec] = {
             handler=handlers.run_triage,
         ),
         SkillSpec(
-            id="investigation_report",
+            id="incident_summary",
             tier="analysis",
             description="Structured investigation summary for one incident: related "
             "alerts with evidence logs, threat landscape, and a derived timeline.",
-            params_model=InvestigationReportParams,
-            output_model=InvestigationReport,
-            handler=handlers.run_investigation_report,
+            params_model=IncidentSummaryParams,
+            output_model=IncidentSummary,
+            handler=handlers.run_incident_summary,
         ),
     )
 }
