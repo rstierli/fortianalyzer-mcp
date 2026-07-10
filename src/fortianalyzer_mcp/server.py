@@ -52,6 +52,16 @@ mcp = FastMCP(
     transport_security=_transport_security,
 )
 
+if settings.MASKING_ENABLED:
+    # RFC #40 Phase 1: wrap tool registration BEFORE any tool module is
+    # imported (tools self-register at import). Raises at startup if
+    # FAZ_MASKING_KEY is missing/invalid: a deployment that asked for
+    # masking must not run without it.
+    from fortianalyzer_mcp.masking.wrapper import install_masking  # noqa: E402
+
+    install_masking(mcp)
+    logger.info("MASKING_ENABLED - tool outputs are masked (RFC #40 Phase 1)")
+
 
 # Health check resource
 @mcp.resource("health://status")
