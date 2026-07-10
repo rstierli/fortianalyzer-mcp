@@ -17,6 +17,7 @@ the server's tool-mode branch has run.
 
 import json
 import logging
+from datetime import datetime
 from typing import Any
 
 from fortianalyzer_mcp.skills.models import (
@@ -131,7 +132,7 @@ def _first_record(payload: Any) -> dict[str, Any] | None:
 
 
 async def _fetch_attached_alerts(
-    adom: str | None, incid: str, limit: int = 200
+    adom: str | None, incid: str, limit: int = 200, warnings: list[str] | None = None
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Alerts attached to an incident, via incident attachments.
 
@@ -144,6 +145,8 @@ async def _fetch_attached_alerts(
     This is a thin read-only ``client.get()`` wrapper as sanctioned by
     RFC #44's constraints; it lives here pending the RFC's open question
     on reader placement. Returns ``(alerts, None)`` or ``([], reason)``.
+    When ``warnings`` is given, a full attachment page appends a truncation
+    warning to it.
     """
     from fortianalyzer_mcp.api.client import API_VERSION
     from fortianalyzer_mcp.server import get_faz_client
@@ -164,8 +167,9 @@ async def _fetch_attached_alerts(
     except Exception as exc:
         return [], f"attachments lookup: {exc}"
 
+    records = _records(res)
     alerts: list[dict[str, Any]] = []
-    for rec in _records(res):
+    for rec in records:
         if rec.get("attachtype") != "alertevent":
             continue
         snapshot: dict[str, Any] = {}
@@ -181,6 +185,13 @@ async def _fetch_attached_alerts(
             snapshot = raw
         snapshot.setdefault("alertid", rec.get("attachsrcid"))
         alerts.append(snapshot)
+    if warnings is not None and len(records) >= limit:
+        # A full page means FAZ may hold more attachments than we asked for;
+        # say so rather than presenting a truncated set as complete.
+        warnings.append(
+            f"incident {incid}: attachment page filled at limit {limit}; "
+            "correlated alerts may be incomplete"
+        )
     return alerts, None
 
 
@@ -229,7 +240,7 @@ async def run_incidents(params: IncidentsParams) -> IncidentsResult:
         # Authoritative source: incident attachments (attachtype=alertevent).
         incid = incident.get("incid")
         if params.include_alerts and incid and attachments_failed is None:
-            attached, err = await _fetch_attached_alerts(params.adom, str(incid))
+            attached, err = await _fetch_attached_alerts(params.adom, str(incid), warnings=warnings)
             if err is not None:
                 attachments_failed = err
             elif attached:
@@ -480,7 +491,7 @@ async def run_triage(params: TriageParams) -> TriageResult:
         subject = _first_record(inc_res.get("data")) or {}
 
         incid = str(subject.get("incid") or params.incident_id)
-        related, attach_err = await _fetch_attached_alerts(params.adom, incid)
+        related, attach_err = await _fetch_attached_alerts(params.adom, incid, warnings=warnings)
         if attach_err is not None or not related:
             if attach_err is not None:
                 warnings.append(
@@ -533,6 +544,32 @@ async def run_triage(params: TriageParams) -> TriageResult:
 # --------------------------------------------------------------------- #
 
 
+def _sort_key(timestamp: int | str) -> tuple[int, float, str]:
+    """Total order over the timestamp shapes FAZ actually returns.
+
+    Live data mixes epoch ints, epoch-digit strings ("1704067300", from the
+    attachment alert snapshots) and FAZ datetime strings ("2026-07-08
+    10:22:41", from an incident's createtime/lastupdate). Comparing those
+    lexicographically puts every epoch string before every datetime string
+    regardless of when the events happened, so both forms are normalized to
+    epoch seconds first. Datetimes are read as FAZ-local wall-clock, which
+    is the same clock the epoch values come from. Anything unparseable sorts
+    last, in stable string order, rather than corrupting the ordering of the
+    entries that are parseable.
+    """
+    if isinstance(timestamp, int):
+        return (0, float(timestamp), "")
+    text = timestamp.strip()
+    if text.isdigit():
+        return (0, float(text), "")
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return (0, datetime.strptime(text, fmt).timestamp(), "")
+        except ValueError:
+            continue
+    return (1, 0.0, text)
+
+
 def _timeline(incident: dict[str, Any], evidence: list[AlertEvidence]) -> list[TimelineEntry]:
     """Chronological entries from whatever timestamp fields are present."""
     entries: list[TimelineEntry] = []
@@ -562,8 +599,7 @@ def _timeline(incident: dict[str, Any], evidence: list[AlertEvidence]) -> list[T
                 f"{item.alert.get('name') or item.alert.get('description') or 'raised'}",
             )
         )
-    # Mixed int/str timestamps sort as strings of their repr to stay total.
-    return sorted(entries, key=lambda e: (isinstance(e.timestamp, str), str(e.timestamp)))
+    return sorted(entries, key=lambda e: _sort_key(e.timestamp))
 
 
 async def run_investigation_report(params: InvestigationReportParams) -> InvestigationReport:
@@ -584,7 +620,7 @@ async def run_investigation_report(params: InvestigationReportParams) -> Investi
     # Related alerts: incident attachments first, linkage keys as fallback.
     evidence: list[AlertEvidence] = []
     incid = str(incident.get("incid") or params.incident_id)
-    linked, attach_err = await _fetch_attached_alerts(params.adom, incid)
+    linked, attach_err = await _fetch_attached_alerts(params.adom, incid, warnings=warnings)
     if attach_err is not None or not linked:
         if attach_err is not None:
             warnings.append(

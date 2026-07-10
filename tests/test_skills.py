@@ -233,6 +233,16 @@ class TestAttachmentCorrelation:
         assert rec.correlated_alerts == [{**self.SNAPSHOT, "alertid": "alert-001"}]
         assert result.warnings == []
 
+    async def test_full_attachment_page_warns_about_truncation(self):
+        page = [alertevent_attachment(f"alert-{i}", self.SNAPSHOT) for i in range(200)]
+        with (
+            t(GET_INCIDENTS, return_value=ok(data=[INCIDENT])),
+            t(GET_ALERTS, return_value=ok(data=[])),
+            attachment_client(page),
+        ):
+            result = await handlers.run_incidents(IncidentsParams())
+        assert any("may be incomplete" in w for w in result.warnings)
+
     async def test_incidents_falls_back_when_attachments_unavailable(self):
         # No get_faz_client patch -> reader reports the client as missing.
         with (
@@ -492,6 +502,67 @@ class TestInvestigationReportSkill:
                 await handlers.run_investigation_report(
                     InvestigationReportParams(incident_id="inc-404")
                 )
+
+    async def test_timeline_orders_int_and_string_timestamps(self):
+        """The shape this repo's own fixtures produce: int + epoch string.
+
+        The old key sorted on (isinstance(ts, str), str(ts)), which groups
+        every int before every string regardless of when the events happened.
+        An incident with an int ``timestamp`` therefore always preceded an
+        alert whose snapshot carries ``alerttime`` as a string, even when the
+        alert came first.
+        """
+        incident = {"incid": "inc-001", "name": "Later incident", "timestamp": 1704067200}
+        alerts = [{"alertid": "a-early", "incids": ["inc-001"], "alerttime": "1704067100"}]
+        with (
+            t(GET_INCIDENT, return_value=ok(data=incident)),
+            t(GET_ALERTS, return_value=ok(data=alerts)),
+            t(GET_ALERT_LOGS, return_value=ok(data=[])),
+        ):
+            result = await handlers.run_investigation_report(
+                InvestigationReportParams(incident_id="inc-001", include_top_threats=False)
+            )
+        # The alert (1704067100) precedes the incident (1704067200).
+        assert [e.source for e in result.timeline] == ["alert", "incident"]
+
+    async def test_timeline_orders_datetime_strings_defensively(self):
+        """Defensive: a datetime string sorts lexicographically against an
+        epoch string. Not observed on live FAZ (7.6.7 and 8.0.0 return epoch
+        strings for createtime/lastupdate), but the key must not depend on
+        that remaining true.
+        """
+        incident = {
+            "incid": "inc-001",
+            "name": "Late incident",
+            "createtime": "2026-07-08 10:22:41",
+        }
+        alerts = [
+            {"alertid": "a-early", "incids": ["inc-001"], "alerttime": "1704067300"},  # 2024
+            {"alertid": "a-late", "incids": ["inc-001"], "alerttime": "1783629554"},  # 2026, after
+        ]
+        with (
+            t(GET_INCIDENT, return_value=ok(data=incident)),
+            t(GET_ALERTS, return_value=ok(data=alerts)),
+            t(GET_ALERT_LOGS, return_value=ok(data=[])),
+        ):
+            result = await handlers.run_investigation_report(
+                InvestigationReportParams(incident_id="inc-001", include_top_threats=False)
+            )
+        # 2024 alert, then the 2026-07-08 incident, then the 2026-07-09 alert.
+        assert [e.source for e in result.timeline] == ["alert", "incident", "alert"]
+
+    async def test_timeline_unparseable_timestamp_sorts_last(self):
+        incident = {"incid": "inc-001", "timestamp": 1704067200}
+        alerts = [{"alertid": "a-1", "incids": ["inc-001"], "alerttime": "not-a-time"}]
+        with (
+            t(GET_INCIDENT, return_value=ok(data=incident)),
+            t(GET_ALERTS, return_value=ok(data=alerts)),
+            t(GET_ALERT_LOGS, return_value=ok(data=[])),
+        ):
+            result = await handlers.run_investigation_report(
+                InvestigationReportParams(incident_id="inc-001", include_top_threats=False)
+            )
+        assert [e.source for e in result.timeline] == ["incident", "alert"]
 
 
 # --------------------------------------------------------------------- #
