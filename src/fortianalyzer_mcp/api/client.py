@@ -1662,24 +1662,46 @@ class FortiAnalyzerClient:
     async def create_incident(
         self,
         adom: str,
-        name: str,
+        endpoint: str,
+        category: str,
+        reporter: str = "faz-mcp",
         severity: str = "medium",
-        category: str | None = None,
+        status: str | None = None,
         description: str | None = None,
+        epid: int | None = None,
+        euid: int | None = None,
+        name: str | None = None,
     ) -> dict[str, Any]:
         """Create a new incident.
 
         FNDN: ADD /incidentmgmt/adom/{adom}/incident
+
+        ``reporter``, ``endpoint`` and ``category`` are required by the API
+        on 7.6.7 and 8.0.0. ``name`` is absent from the spec but the
+        appliance persists it on the incident record, so it stays exposed.
+
+        The ADD success response carries ``incid`` at the TOP level (no
+        ``data`` wrapper), unlike get_incident where the record arrives
+        under ``data``. Asymmetric on purpose; do not "fix" one to match
+        the other.
         """
         params: dict[str, Any] = {
             "apiver": API_VERSION,
-            "name": name,
+            "reporter": reporter,
+            "endpoint": endpoint,
+            "category": category,
             "severity": severity,
         }
-        if category:
-            params["category"] = category
+        if status:
+            params["status"] = status
         if description:
             params["description"] = description
+        if epid is not None:
+            params["epid"] = epid
+        if euid is not None:
+            params["euid"] = euid
+        if name:
+            params["name"] = name
 
         return await self._raw_request_dict("add", f"/incidentmgmt/adom/{adom}/incident", **params)
 

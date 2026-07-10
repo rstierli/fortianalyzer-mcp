@@ -100,7 +100,25 @@ class TestIncidentInputValidation:
     """create_incident/update_incident must reject invalid severity/status."""
 
     async def test_create_incident_rejects_invalid_severity(self) -> None:
-        result = await incident_tools.create_incident(name="Test", severity="catastrophic")
+        result = await incident_tools.create_incident(
+            endpoint="192.0.2.10", category="1", severity="catastrophic"
+        )
+        assert result["status"] == "error"
+        assert "Validation error" in result["message"]
+
+    async def test_create_incident_rejects_severity_outside_incident_enum(self) -> None:
+        """The incident spec allows high/medium/low only; "critical" is an
+        alert severity, not an incident one."""
+        result = await incident_tools.create_incident(
+            endpoint="192.0.2.10", category="1", severity="critical"
+        )
+        assert result["status"] == "error"
+        assert "Validation error" in result["message"]
+
+    async def test_create_incident_rejects_invalid_status(self) -> None:
+        result = await incident_tools.create_incident(
+            endpoint="192.0.2.10", category="1", status="investigating"
+        )
         assert result["status"] == "error"
         assert "Validation error" in result["message"]
 
@@ -119,13 +137,36 @@ class TestIncidentInputValidation:
     ) -> None:
         class FakeClient:
             async def create_incident(self, **kwargs: Any) -> dict[str, Any]:
-                return {"id": "INC-9"}
+                return {"incid": "IN00000009"}
 
         monkeypatch.setattr(incident_tools, "get_faz_client", lambda: FakeClient())
 
-        result = await incident_tools.create_incident(name="Test", severity="High")
+        result = await incident_tools.create_incident(
+            endpoint="192.0.2.10", category="1", severity="High"
+        )
         assert result["status"] == "success"
         assert result["severity"] == "high"
+
+    async def test_create_incident_normalizes_status_and_forwards_args(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: dict[str, Any] = {}
+
+        class FakeClient:
+            async def create_incident(self, **kwargs: Any) -> dict[str, Any]:
+                seen.update(kwargs)
+                return {"incid": "IN00000009"}
+
+        monkeypatch.setattr(incident_tools, "get_faz_client", lambda: FakeClient())
+
+        result = await incident_tools.create_incident(
+            endpoint="192.0.2.10", category="1", status="Draft", reporter="analyst1"
+        )
+        assert result["status"] == "success"
+        assert seen["status"] == "draft"
+        assert seen["endpoint"] == "192.0.2.10"
+        assert seen["category"] == "1"
+        assert seen["reporter"] == "analyst1"
 
 
 class TestDvmMutationValidation:
