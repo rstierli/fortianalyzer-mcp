@@ -5,6 +5,12 @@ All notable changes to FortiAnalyzer MCP Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **`create_incident` works again: the create request now sends the required `reporter` and `endpoint` params.** `ADD /incidentmgmt/adom/{adom}/incident` requires `reporter`, `endpoint` and `category` (per the bundled 7.6.7/8.0.0 specs, which agree; confirmed live on both), but the client sent neither of the first two and the tool exposed no way to provide them, so every create had always failed. The tool now requires `endpoint` and `category` (`category` is passed through unvalidated, since the spec types it as a free string and the valid set is appliance-defined), defaults `reporter` to `"faz-mcp"`, validates `severity` against the incident enum (`high`/`medium`/`low`, narrower than the alert set), and exposes the optional spec params `status` (validated), `epid` and `euid`. `name` is absent from the spec but verified live to persist on the incident record, so it stays exposed as optional. The ADD success response carries `incid` at the top level with no `data` wrapper, asymmetric with `get_incident`; documented in the client so nobody "fixes" one to match the other. Verified live on 7.6.7 and 8.0.0. Closes [#54](https://github.com/rstierli/fortianalyzer-mcp/issues/54).
+- **Incident status values match the spec enum.** `_VALID_INCIDENT_STATUSES` listed `new`/`investigating`/`contained`/`resolved`, values the appliance rejects with `not a valid enum value for 'status'` (verified live on both versions), while blocking the legal ones, so `update_incident` could never move an incident to any real non-closed state. The set is now the spec enum: `draft`/`analysis`/`response`/`closed`/`cancelled`.
+
 ## [2.7.2] - 2026-07-09
 
 Patch release: two request-shape bugs in tools that had never worked against a live FAZ — both found by the skills-layer live validation (#44 / PR #46), spec-verified against the bundled 7.6.7/8.0.0 FNDN specs (which agree), confirmed by Roland against FNDN, and live-verified after the fix (PRs #48, #50).
