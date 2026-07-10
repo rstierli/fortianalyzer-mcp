@@ -12,9 +12,9 @@ to strip out of free text once we know what it masks to:
 1. **Structured pass.** Allowlisted keys are masked by type at any nesting
    depth, and composite keys are parsed and masked part by part
    (``groupby1``/``groupby2`` are ``"<field>:<value>"``, ``grpby`` is an
-   embedded JSON blob, ``target`` is a list of ``{name, value}``). Every
-   real value masked here is recorded in a response-scoped raw-to-token
-   map.
+   embedded JSON blob, ``target`` is a list of ``{name, value}``,
+   ``devvds`` is ``"<devname>[<vdom>]"``). Every real value masked here is
+   recorded in a response-scoped raw-to-token map.
 2. **Free-text pass.** ``msg``, ``logdesc``, ``subject``, ``extrainfo``,
    the echoed ``filter`` strings and friends get an in-place scan for
    embedded IPv4s, MACs and emails, then every raw value from pass 1 is
@@ -38,8 +38,9 @@ consistent.
 
 Scope (deliberately Phase 1 only): tool OUTPUT masking. Unmasking of
 tool-call arguments (Phase 2) and URL handling are not here. Device
-identity (``devname``, ``devid``, ``sn``, ``csf``) is out of the default
-allowlist, so a masked record still fingerprints the reporting device.
+identity (``devname``, ``devid``, ``sn``, ``csf``, ``fortigate``,
+``devvds``, ``detectkey``) is out of the default allowlist, so a masked
+record still fingerprints the reporting device.
 """
 
 import hashlib
@@ -54,6 +55,7 @@ from functools import wraps
 from typing import Any
 
 from fortianalyzer_mcp.masking.fields import (
+    COMPOSITE_DEVICE_VDOM,
     COMPOSITE_JSON,
     COMPOSITE_PREFIXED,
     COMPOSITE_TARGET,
@@ -77,6 +79,7 @@ logger = logging.getLogger(__name__)
 _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 _MAC_RE = re.compile(r"\b[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}\b")
 _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+_DEVVDS_RE = re.compile(r"^(?P<dev>[^\[\]]+)\[(?P<vdom>[^\[\]]*)\]$")
 
 #: Values shorter than this are not substituted into free text: a two or
 #: three character username would match inside unrelated words.
@@ -94,6 +97,7 @@ class OutputMasker:
         # brute-forceable from a leaked transcript. The env var is present
         # because the engine was just built from it.
         self._placeholder_key = os.environ.get(MASKING_KEY_ENV, "").encode()
+        self._mask_device_identity = mask_device_identity
         self._field_types = dict(FIELD_TYPES)
         if mask_device_identity:
             self._field_types.update(DEVICE_IDENTITY_TYPES)
@@ -184,6 +188,26 @@ class OutputMasker:
             # Not JSON after all: at least strip the IOCs a regex can see.
             return self.mask_text(value, mapping)
         return json.dumps(self._mask_structured(parsed, mapping))
+
+    def _mask_device_vdom(self, value: str, mapping: dict[str, str]) -> str:
+        """``"<devname>[<vdom>]"``, comma-joined (fortiview ``devvds``).
+
+        The vdom stays clear, like the flat ``vd`` log field. Only the
+        device name is estate identity, so the whole key follows
+        ``FAZ_MASK_DEVICE_IDENTITY``.
+        """
+        if not self._mask_device_identity:
+            return value
+        out: list[str] = []
+        for part in value.split(","):
+            match = _DEVVDS_RE.match(part.strip())
+            if match is None:
+                # Bare device name, or a shape we have not seen: mask whole.
+                out.append(self._mask_scalar(HOSTNAME, part, mapping))
+                continue
+            device = self._mask_scalar(HOSTNAME, match.group("dev"), mapping)
+            out.append(f"{device}[{match.group('vdom')}]")
+        return ",".join(out)
 
     def _mask_target(self, value: list[Any], mapping: dict[str, str]) -> list[Any]:
         """``[{"name": "ip", "value": "..."}]`` (alert ``target``)."""
@@ -285,6 +309,8 @@ class OutputMasker:
             return self._mask_json_blob(value, mapping)
         if lowered in COMPOSITE_TARGET and isinstance(value, list):
             return self._mask_target(value, mapping)
+        if lowered in COMPOSITE_DEVICE_VDOM and isinstance(value, str):
+            return self._mask_device_vdom(value, mapping)
 
         vtype = self._field_types.get(key)
         if vtype is not None and vtype != TEXT:

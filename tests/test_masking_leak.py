@@ -11,8 +11,10 @@ search the output for the exact original values. Masked IPs are valid IPs
 and masked hostnames are plausible hostnames, so scanning the output for
 "looks like an IP" proves nothing. Only identity comparison does.
 
-Records below mirror the shape of real FAZ alert, incident and traffic
-objects, with documentation values (RFC 5737 / RFC 2606) throughout.
+Records below mirror the shape of real FAZ alert, incident, traffic,
+fortiview, ueba and event-handler objects, with documentation values
+(RFC 5737 / RFC 2606) throughout. The shapes were taken from live 7.6.7
+responses; no value from any real estate appears here.
 """
 
 from typing import Any
@@ -32,10 +34,17 @@ BAD_DOMAIN = "suspicious.example.com"
 PEER_IP = "198.51.100.7"
 SRC_NAME = "workstation-14"
 ANALYST = "jdoe"
+SOC_EMAIL = "soc@example.org"
 # Device identity: masked only when the deployment opts in.
 DEV_NAME = "fgt-branch-01"
+DEV_PEER = "fgt-branch-02"
 DEV_SERIAL = "fgtserial0001"
+DETECT_KEY = "fazserial0001"
 FABRIC = "fabric-alpha"
+VDOM = "root"
+# Left clear by design; see the "known gaps" note in fields.py.
+THREAT_DOMAIN = "threat.example.net"
+OBF_URL = "threat[dot]example[dot]net"
 
 ALERT: dict[str, Any] = {
     "alertid": "202607101000000020",
@@ -73,8 +82,73 @@ TRAFFIC: dict[str, Any] = {
     "msg": f"session from {SRC_NAME} ({ENDPOINT_IP}) to {PEER_IP}",
 }
 
-PERSONAL = [ENDPOINT_NAME, ENDPOINT_IP, GATEWAY_IP, BAD_DOMAIN, PEER_IP, SRC_NAME, ANALYST]
-DEVICE_IDENTITY = [DEV_NAME, DEV_SERIAL, FABRIC]
+
+# The wrapper masks every tool's output, but alert/incident/traffic rows are
+# only three of the shapes that flow through it. The five below come from
+# fortiview, ueba and the event-handler config, whose keys no log schema
+# mentions and which the first version of this file never exercised.
+FORTIVIEW_THREAT: dict[str, Any] = {
+    "fortigate": DEV_NAME,
+    "devvds": f"{DEV_NAME}[{VDOM}]",
+    "threat": THREAT_DOMAIN,
+    "obf_url": OBF_URL,
+    "threatlevel": 4,
+}
+FORTIVIEW_COUNTRY: dict[str, Any] = {
+    "fortigate": f"{DEV_NAME},{DEV_PEER}",
+    "devvds": f"{DEV_NAME}[{VDOM}],{DEV_PEER}[{VDOM}]",
+    "dstcountry": "Canada",
+}
+UEBA_ENDUSER: dict[str, Any] = {
+    "euid": "1025",
+    "euname": ENDPOINT_IP,  # live records put an address in this "name" field
+    "socialid": {"data": []},
+    "importance": 0,
+}
+UEBA_ENDPOINT: dict[str, Any] = {
+    "epid": "1025",
+    "epname": ".self",
+    "detectkey": DETECT_KEY,
+}
+HANDLER: dict[str, Any] = {
+    "name": "Default-Botnet-Communication-Detection-By-Endpoint",
+    "description": f"Escalate when {GATEWAY_IP} beacons out; page {SOC_EMAIL}",
+    "template-url": "/fazcfg-template/basic-handler/fgt",
+    "mitre-domain": "enterprise",
+}
+
+RECORDS = [
+    ALERT,
+    INCIDENT,
+    TRAFFIC,
+    FORTIVIEW_THREAT,
+    FORTIVIEW_COUNTRY,
+    UEBA_ENDUSER,
+    UEBA_ENDPOINT,
+    HANDLER,
+]
+RECORD_IDS = [
+    "alert",
+    "incident",
+    "traffic",
+    "fv-threat",
+    "fv-country",
+    "ueba-enduser",
+    "ueba-endpoint",
+    "handler",
+]
+
+PERSONAL = [
+    ENDPOINT_NAME,
+    ENDPOINT_IP,
+    GATEWAY_IP,
+    BAD_DOMAIN,
+    PEER_IP,
+    SRC_NAME,
+    ANALYST,
+    SOC_EMAIL,
+]
+DEVICE_IDENTITY = [DEV_NAME, DEV_PEER, DEV_SERIAL, DETECT_KEY, FABRIC]
 
 
 def survivors(masked: Any, secrets: list[str]) -> dict[str, list[str]]:
@@ -110,16 +184,12 @@ def full_masker(monkeypatch: pytest.MonkeyPatch) -> OutputMasker:
 
 
 class TestNoIdentifierSurvives:
-    @pytest.mark.parametrize(
-        "record", [ALERT, INCIDENT, TRAFFIC], ids=["alert", "incident", "traffic"]
-    )
+    @pytest.mark.parametrize("record", RECORDS, ids=RECORD_IDS)
     def test_no_personal_identifier_survives(self, masker: OutputMasker, record: dict[str, Any]):
         leaked = survivors(masker.mask_result(record), PERSONAL)
         assert leaked == {}, f"masking leaked: {leaked}"
 
-    @pytest.mark.parametrize(
-        "record", [ALERT, INCIDENT, TRAFFIC], ids=["alert", "incident", "traffic"]
-    )
+    @pytest.mark.parametrize("record", RECORDS, ids=RECORD_IDS)
     def test_device_identity_survives_by_default(
         self, masker: OutputMasker, record: dict[str, Any]
     ):
@@ -128,9 +198,7 @@ class TestNoIdentifierSurvives:
         leaked = survivors(masker.mask_result(record), DEVICE_IDENTITY)
         assert sorted(leaked) == sorted(present)
 
-    @pytest.mark.parametrize(
-        "record", [ALERT, INCIDENT, TRAFFIC], ids=["alert", "incident", "traffic"]
-    )
+    @pytest.mark.parametrize("record", RECORDS, ids=RECORD_IDS)
     def test_nothing_survives_with_device_identity_masked(
         self, full_masker: OutputMasker, record: dict[str, Any]
     ):
@@ -214,3 +282,77 @@ class TestFreeTextSubstitution:
         )
         # "workstation-14-backup" must not be rewritten as "<token>-backup"
         assert f"{SRC_NAME}-backup" in masked["msg"]
+
+
+class TestFortiViewDeviceVdom:
+    """``devvds`` is ``"<devname>[<vdom>]"``: brackets break a plain mask."""
+
+    def test_composite_keeps_the_vdom_and_stays_reversible(self, full_masker: OutputMasker):
+        masked = full_masker.mask_result({"devvds": f"{DEV_NAME}[{VDOM}]"})
+        assert DEV_NAME not in masked["devvds"]
+        assert masked["devvds"].endswith(f"[{VDOM}]")
+        # A hostname mask over the whole string fails closed to a placeholder,
+        # which is irreversible and destroys the vdom with it.
+        assert "masked-unrepresentable-" not in masked["devvds"]
+
+    def test_comma_joined_devices_are_masked_element_by_element(self, full_masker: OutputMasker):
+        masked = full_masker.mask_result({"devvds": f"{DEV_NAME}[{VDOM}],{DEV_PEER}[{VDOM}]"})
+        first, second = masked["devvds"].split(",")
+        assert first.startswith("host-") and second.startswith("host-")
+        assert first != second  # distinct devices keep distinct tokens
+        assert first.endswith(f"[{VDOM}]") and second.endswith(f"[{VDOM}]")
+        assert "masked-unrepresentable-" not in masked["devvds"]
+
+    def test_bare_device_name_without_brackets_still_masks(self, full_masker: OutputMasker):
+        masked = full_masker.mask_result({"devvds": DEV_NAME})
+        assert masked["devvds"].startswith("host-")
+
+    def test_untouched_when_device_identity_masking_is_off(self, masker: OutputMasker):
+        record = {"devvds": f"{DEV_NAME}[{VDOM}]"}
+        assert masker.mask_result(record) == record
+
+    def test_the_same_device_gets_the_same_token_in_devvds_and_fortigate(
+        self, full_masker: OutputMasker
+    ):
+        masked = full_masker.mask_result(FORTIVIEW_THREAT)
+        assert masked["devvds"] == f"{masked['fortigate']}[{VDOM}]"
+
+
+class TestDocumentedGaps:
+    """Pins for limits we chose not to close. A pin failing means someone
+    changed the behavior, and the reasoning in fields.py needs revisiting."""
+
+    def test_threat_and_obf_url_are_left_clear(self, full_masker: OutputMasker):
+        """A browsed domain leaks here. ``threat`` also holds signature names
+        like ``Adobe.Flash.Exploit`` on ips rows, which no shape test can tell
+        from a domain, and the reference estate produced no such row."""
+        masked = full_masker.mask_result(FORTIVIEW_THREAT)
+        assert masked["threat"] == THREAT_DOMAIN
+        assert masked["obf_url"] == OBF_URL
+
+    def test_bare_username_in_prose_is_not_masked(self, masker: OutputMasker):
+        """Free text is only as good as the response it sits in: a username
+        that is masked nowhere else in the same response has no raw-to-token
+        entry to substitute, and no regex can recognize one safely."""
+        masked = masker.mask_result({"description": "escalate to jrivera"})
+        assert "jrivera" in masked["description"]
+
+    def test_handler_metadata_is_not_masked(self, full_masker: OutputMasker):
+        masked = full_masker.mask_result(HANDLER)
+        assert masked["name"] == HANDLER["name"]
+        assert masked["template-url"] == HANDLER["template-url"]
+        assert masked["mitre-domain"] == "enterprise"  # ATT&CK domain, not a DNS name
+
+    def test_socialid_container_is_walked_not_typed(self, masker: OutputMasker):
+        """Empty on every reference record; shape unknown, so it is only
+        descended into. Whatever allowlisted keys it turns out to hold get
+        masked by the ordinary recursive walk."""
+        masked = masker.mask_result({"socialid": {"data": [{"srcip": ENDPOINT_IP}]}})
+        assert masked["socialid"]["data"][0]["srcip"] != ENDPOINT_IP
+
+
+class TestHandlerDescription:
+    def test_embedded_ip_and_email_are_masked_in_the_description(self, masker: OutputMasker):
+        masked = masker.mask_result(HANDLER)
+        assert GATEWAY_IP not in masked["description"]
+        assert SOC_EMAIL not in masked["description"]

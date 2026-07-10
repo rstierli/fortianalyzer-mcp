@@ -21,14 +21,22 @@ Matching is by key name at any nesting depth, so alert sub-objects
 (``event_details`` carries ``src_ip``/``dst_ip``/``host_name``) and
 wrapped log rows are covered by the same table.
 
+FortiView and UEBA use yet another vocabulary: ``fortigate`` and
+``detectkey`` name the reporting appliance, and ``devvds`` packs device
+and vdom into ``"<devname>[<vdom>]"``. All three are device identity and
+follow the ``FAZ_MASK_DEVICE_IDENTITY`` flag; ``devvds`` needs a composite
+handler because the brackets fall outside the hostname alphabet, so a
+plain hostname mask would burn it to an irreversible placeholder.
+
 Out of scope here, by design:
-- Device-identity fields (devname, devid, sn, csf, ...) identify the
-  reporting estate rather than people. They are a separate deployment
-  decision, so they live in ``DEVICE_IDENTITY_TYPES`` and are masked only
-  when ``FAZ_MASK_DEVICE_IDENTITY`` is set. Leaving them clear keeps the
-  model able to reason about which appliance saw what, at the cost of
-  fingerprinting the estate: a leak test still finds the firewall name and
-  serial in a masked record unless the flag is on.
+- Device-identity fields (devname, devid, sn, csf, fortigate, devvds,
+  detectkey, ...) identify the reporting estate rather than people. They
+  are a separate deployment decision, so they live in
+  ``DEVICE_IDENTITY_TYPES`` (plus ``COMPOSITE_DEVICE_VDOM``) and are
+  masked only when ``FAZ_MASK_DEVICE_IDENTITY`` is set. Leaving them clear
+  keeps the model able to reason about which appliance saw what, at the
+  cost of fingerprinting the estate: a leak test still finds the firewall
+  name and serial in a masked record unless the flag is on.
 - ``incident_reporter`` is polymorphic: a username on a manually created
   incident, an alert id on an auto-raised one. Masking it would corrupt
   the alert id, so it is left alone pending a type-aware decision.
@@ -36,6 +44,28 @@ Out of scope here, by design:
   length) and are deferred with it.
 - ``catdesc`` is a category label, not an identifier — masking it would
   only destroy analytic value.
+- Alert-handler config (``name``, ``template-url``, ``mitre-domain``)
+  carries product metadata, not customer data: live values are
+  ``Default-Botnet-Communication-Detection-By-Endpoint``,
+  ``/fazcfg-template/basic-handler/fgt`` and ``enterprise``. Note
+  ``mitre-domain`` is an ATT&CK domain, not a DNS name; do not be tempted
+  to type it as ``DOMAIN``. Only the operator-authored ``description`` is
+  scanned, as free text.
+
+Known gaps, recorded rather than guessed at:
+- ``socialid`` (ueba ``endusers``) is a container, ``{"data": [...]}``, and
+  is empty on every record of the reference estate. Its populated shape is
+  unknown, so no type is assigned: the recursive walk descends into it and
+  masks whatever allowlisted keys it turns out to hold. Revisit with a
+  populated sample.
+- ``threat``/``obf_url`` (fortiview ``top-threats``) hold a browsed domain
+  on webfilter rows (``mask.icloud.com``, obfuscated as
+  ``mask[dot]icloud[dot]com``) but a signature label on ips/virus rows,
+  where a name like ``Adobe.Flash.Exploit`` is indistinguishable from a
+  domain by shape alone. The sibling ``logtype`` almost certainly
+  disambiguates them, but the reference estate produced no ips/virus row
+  to confirm the mapping, so both are left clear rather than masked on a
+  guess. This is a real leak of browsing destinations; see the RFC thread.
 """
 
 # Value-type tags understood by the wrapper. "email" falls back to
@@ -143,6 +173,7 @@ FIELD_TYPES: dict[str, str] = {
     "extrainfo": TEXT,
     "ui": TEXT,  # event: frequently embeds the admin source IP, e.g. GUI(10.0.0.1)
     "prompt": TEXT,  # app-ctrl: GenAI prompt text
+    "description": TEXT,  # eventmgmt handler config: operator-authored prose
     # --- eventmgmt / incidentmgmt object keys (NOT log fields; found by
     # leak-testing verbatim alert and incident records)
     "endpoint": IP_OR_HOST,  # incident: an address or an endpoint name
@@ -168,6 +199,13 @@ COMPOSITE_PREFIXED = ("groupby1", "groupby2")
 COMPOSITE_JSON = ("grpby",)
 COMPOSITE_TARGET = ("target",)
 
+#: fortiview ``devvds``: ``"<devname>[<vdom>]"``, comma-joined when a row
+#: aggregates several devices. The brackets are outside the hostname
+#: alphabet, so the device name must be lifted out before masking or the
+#: whole string fails closed to an irreversible placeholder. Follows
+#: ``FAZ_MASK_DEVICE_IDENTITY`` like the flat device keys below.
+COMPOSITE_DEVICE_VDOM = ("devvds",)
+
 #: Estate identity, not personal data. Masked only when the deployment
 #: opts in via ``FAZ_MASK_DEVICE_IDENTITY``; see the module docstring.
 DEVICE_IDENTITY_TYPES: dict[str, str] = {
@@ -178,6 +216,8 @@ DEVICE_IDENTITY_TYPES: dict[str, str] = {
     "csf": HOSTNAME,
     "sndetected": HOSTNAME,
     "snclosest": HOSTNAME,
+    "fortigate": HOSTNAME,  # fortiview: reporting device, comma-joined when aggregated
+    "detectkey": HOSTNAME,  # ueba endpoints: serial of the detecting appliance
 }
 
 #: ``target[].name`` values, mapped to the type of the sibling ``value``.
