@@ -1,12 +1,21 @@
 """Field allowlist for tool-output masking (RFC #40 Phase 1).
 
-Every entry below was verified against live FAZ 7.6.7 and 8.0.0 schemas
+The log field names were verified against live FAZ 7.6.7 and 8.0.0 schemas
 (``get_log_fields`` across traffic, event, attack, webfilter, dns, virus,
-emailfilter and app-ctrl, plus real rows and alert records) — see the
-field-verification discussion on issue #40. Names the RFC drafted that do
-not exist in any schema (src, srcaddr, dst, dstaddr, srchost, dsthost,
-srcuser, remotename, email, message, domain) are deliberately absent:
-masking a nonexistent field is a silent no-op.
+emailfilter and app-ctrl) — see the field-verification discussion on issue
+#40. Names the RFC drafted that do not exist in any schema (src, srcaddr,
+dst, dstaddr, srchost, dsthost, srcuser, remotename, email, message,
+domain) are deliberately absent: masking a nonexistent field is a silent
+no-op.
+
+**Logs are not the only surface.** ``get_log_fields`` describes logview
+rows. Alerts come from eventmgmt and incidents from incidentmgmt, and they
+carry identifiers under different key names (``epip``, ``epname``,
+``endpoint``, ``reporter``) plus composite keys that hold identifiers
+inside a larger string (``groupby1``, ``grpby``, ``target[].value``). A
+leak test over verbatim live records found real hostnames, domains, IPs
+and usernames surviving a mask built from log names alone. Those keys are
+covered below and by the composite handlers in ``wrapper.py``.
 
 Matching is by key name at any nesting depth, so alert sub-objects
 (``event_details`` carries ``src_ip``/``dst_ip``/``host_name``) and
@@ -14,8 +23,15 @@ wrapped log rows are covered by the same table.
 
 Out of scope here, by design:
 - Device-identity fields (devname, devid, sn, csf, ...) identify the
-  reporting estate rather than people; whether to mask them is a separate
-  deployment decision and not part of the default allowlist.
+  reporting estate rather than people. They are a separate deployment
+  decision, so they live in ``DEVICE_IDENTITY_TYPES`` and are masked only
+  when ``FAZ_MASK_DEVICE_IDENTITY`` is set. Leaving them clear keeps the
+  model able to reason about which appliance saw what, at the cost of
+  fingerprinting the estate: a leak test still finds the firewall name and
+  serial in a masked record unless the flag is on.
+- ``incident_reporter`` is polymorphic: a username on a manually created
+  incident, an alert id on an auto-raised one. Masking it would corrupt
+  the alert id, so it is left alone pending a type-aware decision.
 - ``url``/``referralurl`` need a URL-specific token design (alphabet and
   length) and are deferred with it.
 - ``catdesc`` is a category label, not an identifier — masking it would
@@ -32,6 +48,11 @@ USERNAME = "username"
 DOMAIN = "domain"
 EMAIL = "email"
 TEXT = "text"  # free text: embedded IOCs are masked in place
+#: Holds either an address or a name depending on the record. Masks as
+#: whichever it parses as; the two token forms stay distinguishable on the
+#: way back (a hostname token carries the ``host-`` prefix, an IP token
+#: parses as an IP), so the round trip is unambiguous.
+IP_OR_HOST = "ip_or_host"
 
 FIELD_TYPES: dict[str, str] = {
     # --- IP carriers (log fields + alert/event_details variants)
@@ -75,8 +96,8 @@ FIELD_TYPES: dict[str, str] = {
     "srcname": HOSTNAME,
     "dstname": HOSTNAME,
     "hostname": HOSTNAME,
-    "epname": HOSTNAME,
-    "dstepname": HOSTNAME,
+    "epname": IP_OR_HOST,
+    "dstepname": IP_OR_HOST,
     "fqdn": HOSTNAME,
     "host": HOSTNAME,
     "dst_host": HOSTNAME,
@@ -122,12 +143,50 @@ FIELD_TYPES: dict[str, str] = {
     "extrainfo": TEXT,
     "ui": TEXT,  # event: frequently embeds the admin source IP, e.g. GUI(10.0.0.1)
     "prompt": TEXT,  # app-ctrl: GenAI prompt text
+    # --- eventmgmt / incidentmgmt object keys (NOT log fields; found by
+    # leak-testing verbatim alert and incident records)
+    "endpoint": IP_OR_HOST,  # incident: an address or an endpoint name
+    "reporter": USERNAME,  # incident: who raised it
+    "lastuser": USERNAME,  # incident: who last touched it
+    "dstendpoint": IP_OR_HOST,  # inside the incident grpby JSON blob
+    "srcendpoint": IP_OR_HOST,
     # --- response echo keys: tool responses reflect caller inputs at the
-    # top level; a filter like srcip=="10.1.2.3" re-leaks the raw value
+    # top level; a filter like srcip=="192.0.2.1" re-leaks the raw value
     # outside the log rows unless these are scanned too.
     "filter": TEXT,
     "filter_applied": TEXT,
     "device": HOSTNAME,
+}
+
+#: Composite keys whose value is a single string holding one or more
+#: identifiers inside a larger structure. Name matching cannot reach them,
+#: so ``wrapper.py`` parses each shape and masks the parts.
+#:   groupby1/groupby2  "<fieldname>:<value>"   e.g. "dstip:192.0.2.1"
+#:   grpby              JSON, e.g. '[{"dstendpoint": "192.0.2.1"}]'
+#:   target             [{"name": "ip", "value": "192.0.2.1"}, ...]
+COMPOSITE_PREFIXED = ("groupby1", "groupby2")
+COMPOSITE_JSON = ("grpby",)
+COMPOSITE_TARGET = ("target",)
+
+#: Estate identity, not personal data. Masked only when the deployment
+#: opts in via ``FAZ_MASK_DEVICE_IDENTITY``; see the module docstring.
+DEVICE_IDENTITY_TYPES: dict[str, str] = {
+    "devname": HOSTNAME,
+    "devid": HOSTNAME,
+    "sn": HOSTNAME,
+    "serialno": HOSTNAME,
+    "csf": HOSTNAME,
+    "sndetected": HOSTNAME,
+    "snclosest": HOSTNAME,
+}
+
+#: ``target[].name`` values, mapped to the type of the sibling ``value``.
+TARGET_NAME_TYPES: dict[str, str] = {
+    "ip": IP,
+    "domain": DOMAIN,
+    "device": IP_OR_HOST,
+    "endpoint": IP_OR_HOST,
+    "user": USERNAME,
 }
 
 # Values that carry no identifier and pass through unmasked.
