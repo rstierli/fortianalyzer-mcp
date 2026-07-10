@@ -19,8 +19,14 @@ from fortianalyzer_mcp.utils.validation import (
     validate_severity,
 )
 
-# FAZ incident workflow states accepted by update_incident.
-_VALID_INCIDENT_STATUSES = {"new", "investigating", "contained", "resolved", "closed"}
+# FAZ incident workflow states, from the incidentmgmt spec enum. Verified
+# live on 7.6.7 and 8.0.0: the appliance rejects anything else with
+# "not a valid enum value for 'status'".
+_VALID_INCIDENT_STATUSES = {"draft", "analysis", "response", "closed", "cancelled"}
+
+# The incident spec's severity enum is narrower than the shared
+# VALID_SEVERITIES set (no "critical", no "info").
+_VALID_INCIDENT_SEVERITIES = {"high", "medium", "low"}
 
 logger = logging.getLogger(__name__)
 
@@ -201,57 +207,94 @@ async def get_incident_count(
 
 @mcp.tool()
 async def create_incident(
-    name: str,
-    severity: str,
+    endpoint: str,
+    category: str,
+    severity: str = "medium",
     adom: str | None = None,
-    category: str | None = None,
+    status: str | None = None,
     description: str | None = None,
+    reporter: str = "faz-mcp",
+    name: str | None = None,
+    epid: int | None = None,
+    euid: int | None = None,
 ) -> dict[str, Any]:
     """Create a new security incident.
 
     Creates a manual incident for SOC tracking and investigation.
 
     Args:
-        name: Incident name/title
-        severity: Incident severity:
-            - "critical": Critical severity
-            - "high": High severity
-            - "medium": Medium severity
-            - "low": Low severity
+        endpoint: What the incident is about - an endpoint name or a
+            plain IP address. Required by the FAZ API.
+        category: FAZ incident category value (e.g. "CAT1".."CAT3" on
+            auto-raised incidents; a plain "1" is also accepted). Required
+            by the FAZ API. The valid set is defined on the appliance, not
+            by the API spec, so it is passed through unvalidated.
+        severity: Incident severity: "high", "medium" or "low"
+            (default: "medium").
         adom: ADOM name (default: from config DEFAULT_ADOM)
-        category: Incident category (optional)
+        status: Initial workflow status (optional): "draft", "analysis",
+            "response", "closed" or "cancelled".
         description: Detailed description (optional)
+        reporter: Reporting user recorded on the incident
+            (default: "faz-mcp").
+        name: Incident name/title (optional). Not in the API spec, but
+            the appliance persists it on the incident record.
+        epid: Endpoint ID, for the UEBA tie-in (optional).
+        euid: Enduser ID, for the UEBA tie-in (optional).
 
     Returns:
-        dict with created incident details
+        dict with created incident details. The FAZ response carries the
+        new incident id at the top level of "data" (as "incid").
 
     Example:
         >>> result = await create_incident(
-        ...     name="Suspicious Login Activity",
+        ...     endpoint="192.0.2.10",
+        ...     category="1",
         ...     severity="high",
-        ...     description="Multiple failed login attempts detected"
+        ...     description="Multiple failed login attempts detected",
         ... )
-        >>> print(f"Created incident: {result['data']['id']}")
+        >>> print(f"Created incident: {result['data']['incid']}")
     """
     try:
         adom = validate_adom(adom or get_default_adom())
         severity = validate_severity(severity)
+        if severity not in _VALID_INCIDENT_SEVERITIES:
+            valid = ", ".join(sorted(_VALID_INCIDENT_SEVERITIES))
+            return {
+                "status": "error",
+                "message": f"Validation error: Invalid severity '{severity}' for an "
+                f"incident. Must be one of: {valid}",
+            }
+        if status is not None:
+            status = status.strip().lower()
+            if status not in _VALID_INCIDENT_STATUSES:
+                valid = ", ".join(sorted(_VALID_INCIDENT_STATUSES))
+                return {
+                    "status": "error",
+                    "message": f"Validation error: Invalid status '{status}'. "
+                    f"Must be one of: {valid}",
+                }
         client = _get_client()
 
-        logger.info(f"Creating incident '{name}' in ADOM {adom}")
+        logger.info(f"Creating incident in ADOM {adom}")
 
         result = await client.create_incident(
             adom=adom,
-            name=name,
-            severity=severity,
+            endpoint=endpoint,
             category=category,
+            reporter=reporter,
+            severity=severity,
+            status=status,
             description=description,
+            epid=epid,
+            euid=euid,
+            name=name,
         )
 
         return {
             "status": "success",
             "adom": adom,
-            "name": name,
+            "endpoint": endpoint,
             "severity": severity,
             "data": result,
         }
@@ -278,11 +321,11 @@ async def update_incident(
         incident_id: Incident ID to update
         adom: ADOM name (default: from config DEFAULT_ADOM)
         status: New status (optional):
-            - "new": New incident
-            - "investigating": Under investigation
-            - "contained": Threat contained
-            - "resolved": Incident resolved
+            - "draft": Draft incident
+            - "analysis": Under analysis
+            - "response": In response
             - "closed": Incident closed
+            - "cancelled": Incident cancelled
         severity: New severity (optional)
         assignee: Assign to user (optional)
 
@@ -292,7 +335,7 @@ async def update_incident(
     Example:
         >>> result = await update_incident(
         ...     incident_id="INC-001",
-        ...     status="investigating",
+        ...     status="analysis",
         ...     assignee="analyst1"
         ... )
     """

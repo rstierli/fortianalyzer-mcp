@@ -504,7 +504,7 @@ class TestPolicyPortAnalysisToolBounded:
 
         result = await traffic_tools.get_policy_port_analysis(
             adom="root",
-            device="FGT70FTK22019321",
+            device="FGT60FTK00000001",
             policy_ids=[2],
             time_range="2024-01-01 00:00:00|2024-01-31 00:00:00",
         )
@@ -547,7 +547,7 @@ class TestPolicyPortAnalysisToolBounded:
 
         result = await traffic_tools.get_policy_port_analysis(
             adom="root",
-            device="FGT70FTK22019321",
+            device="FGT60FTK00000001",
             policy_ids=[29],
             time_range="2024-01-01 00:00:00|2024-01-31 00:00:00",
             action="accept",
@@ -583,7 +583,7 @@ class TestPolicyPortAnalysisToolBounded:
 
         result = await traffic_tools.get_policy_port_analysis(
             adom="root",
-            device="FGT70FTK22019321",
+            device="FGT60FTK00000001",
             policy_ids=[2],
             # Custom range (same 24-hour window) avoids touching the FAZ
             # client for TZ lookup, which isn't initialized in these
@@ -625,7 +625,7 @@ class TestPolicyPortAnalysisToolBounded:
 
         result = await traffic_tools.get_policy_port_analysis(
             adom="root",
-            device="FGT70FTK22019321",
+            device="FGT60FTK00000001",
             policy_ids=[1, 2],
             # Custom range avoids the TZ client lookup in unit tests.
             time_range="2024-01-01 00:00:00|2024-01-02 00:00:00",
@@ -657,7 +657,7 @@ class TestPolicyToolAuditMetadata:
 
         result = await traffic_tools.get_policy_port_analysis(
             adom="root",
-            device="FGT70FTK22019321",
+            device="FGT60FTK00000001",
             policy_ids=[2],
             action="accept",
             time_range="2024-01-01 00:00:00|2024-01-02 00:00:00",
@@ -758,7 +758,7 @@ class TestPolicyTrafficProfileToolBounded:
 
         result = await traffic_tools.get_policy_traffic_profile(
             adom="root",
-            device="FGT70FTK22019321",
+            device="FGT60FTK00000001",
             policy_ids=[2],
             time_range="2024-01-01 00:00:00|2024-01-31 00:00:00",
         )
@@ -810,7 +810,7 @@ class TestPolicyProtocolSummaryToolBounded:
 
         result = await traffic_tools.get_policy_protocol_summary(
             adom="root",
-            device="FGT70FTK22019321",
+            device="FGT60FTK00000001",
             policy_ids=[5],
             time_range="2024-01-01 00:00:00|2024-01-31 00:00:00",
         )
@@ -1153,7 +1153,7 @@ class TestPerSliceTotalSum:
 
         monkeypatch.setattr(traffic_tools, "_query_policy_log_slice", fake_slice)
         result = await traffic_tools._query_policy_logs_bounded(
-            "root", "FGT70FTK22019321", 2, self._window_30d(), None, policy_count=8
+            "root", "FGT60FTK00000001", 2, self._window_30d(), None, policy_count=8
         )
         assert result["slices_scanned"] == 3
         assert result["total_hits"] == 60
@@ -1183,7 +1183,7 @@ class TestPerSliceTotalSum:
 
         monkeypatch.setattr(traffic_tools, "_query_policy_log_slice", fake_slice)
         result = await traffic_tools._query_policy_logs_bounded(
-            "root", "FGT70FTK22019321", 2, self._window_30d(), None, policy_count=8
+            "root", "FGT60FTK00000001", 2, self._window_30d(), None, policy_count=8
         )
         assert result["total_hits"] is None
         assert result["total_hits_is_known"] is False
@@ -1202,7 +1202,7 @@ class TestPerSliceTotalSum:
 
         monkeypatch.setattr(traffic_tools, "_query_policy_log_slice", fake_slice)
         result = await traffic_tools._query_policy_logs_bounded(
-            "root", "FGT70FTK22019321", 2, self._window_30d(), None, policy_count=8
+            "root", "FGT60FTK00000001", 2, self._window_30d(), None, policy_count=8
         )
         assert result["truncated_slices"] == 0
         assert result["total_hits"] == 15
@@ -1218,7 +1218,7 @@ class TestPerSliceTotalSum:
 
         monkeypatch.setattr(traffic_tools, "_query_policy_log_slice", fake_slice)
         result = await traffic_tools._query_policy_logs_bounded(
-            "root", "FGT70FTK22019321", 2, self._window_30d(), None, policy_count=8
+            "root", "FGT60FTK00000001", 2, self._window_30d(), None, policy_count=8
         )
         assert result["all_slices_exact"] is False
 
@@ -1235,7 +1235,7 @@ class TestPerSliceTotalSum:
 
         monkeypatch.setattr(traffic_tools, "_query_policy_log_slice", fake_slice)
         await traffic_tools._query_policy_logs_bounded(
-            "root", "FGT70FTK22019321", 2, self._window_30d(), None, policy_count=8, limit=99999
+            "root", "FGT60FTK00000001", 2, self._window_30d(), None, policy_count=8, limit=99999
         )
         # _clamp_limit caps at LOG_FETCH_LIMIT (1000); the slice never sees 99999.
         assert seen_limits and all(seen == LOG_FETCH_LIMIT for seen in seen_limits)
@@ -1259,7 +1259,7 @@ class TestPerSliceTotalSum:
         monkeypatch.setattr(traffic_tools, "_query_policy_log_slice", fake_slice)
         result = await traffic_tools.get_policy_port_analysis(
             adom="root",
-            device="FGT70FTK22019321",
+            device="FGT60FTK00000001",
             policy_ids=[2],
             time_range="2024-01-01 00:00:00|2024-01-31 00:00:00",
         )
@@ -1318,7 +1318,7 @@ class TestPolicyPathEnsuresConnection:
 
         result = await traffic_tools.get_policy_port_analysis(
             adom="root",
-            device="FGT70FTK22019321",
+            device="FGT60FTK00000001",
             policy_ids=[2],
             # Custom range skips the TZ client lookup; isolates the connection revive.
             time_range="2024-01-01 00:00:00|2024-01-02 00:00:00",
