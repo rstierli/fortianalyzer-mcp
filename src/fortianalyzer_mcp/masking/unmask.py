@@ -28,12 +28,22 @@ sensible, it is passed through unchanged: it is far more likely to be a
 real address the user typed than a corrupted token, and passing a real
 address through is correct behavior.
 
-Known ambiguity, documented rather than papered over: with masking on,
-a user who types a *real* IP into ``srcip`` gets it unmasked as if it
-were a token, producing a different real IP. Deterministic FPE has no way
-to distinguish the two. Deployments that expect operators to paste raw
-IPs should keep masking off, or the prose companion should mask what the
-operator types on the way in.
+Known ambiguities, documented rather than papered over:
+
+- With masking on, a user who types a *real* IP into ``srcip`` gets it
+  unmasked as if it were a token, producing a different real IP.
+  Deterministic FPE has no way to distinguish the two. Deployments that
+  expect operators to paste raw IPs should keep masking off, or the prose
+  companion should mask what the operator types on the way in.
+- Hostname case is lost at *mask* time, because the hostname alphabet is
+  lowercase. ``FGT-BRANCH-01`` round trips to ``fgt-branch-01``. Harmless
+  for DNS names, which are case insensitive; it matters for device names
+  that are not.
+- A fortiview ``devvds`` value masks to ``"<token>[<vdom>]"``. Fed back as
+  an argument it will not decrypt as a whole, so it passes through and the
+  tool's validator rejects it. That is deliberate: a device argument wants
+  a device name, and silently discarding the vdom half to salvage one
+  would be guessing at what the caller meant.
 """
 
 import logging
