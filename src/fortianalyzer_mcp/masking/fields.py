@@ -38,8 +38,11 @@ Out of scope here, by design:
   cost of fingerprinting the estate: a leak test still finds the firewall
   name and serial in a masked record unless the flag is on.
 - ``incident_reporter`` is polymorphic: a username on a manually created
-  incident, an alert id on an auto-raised one. Masking it would corrupt
-  the alert id, so it is left alone pending a type-aware decision.
+  incident, an alert id on an auto-raised one, so it carries no type
+  here. The username case is decided per record instead: when the value
+  equals the sibling ``reporter``/``lastuser`` it masks with the same
+  token (``wrapper._mask_incident_reporter``); anything else stays clear
+  so alert ids survive intact.
 - ``url``/``referralurl`` need a URL-specific token design (alphabet and
   length) and are deferred with it.
 - ``catdesc`` is a category label, not an identifier — masking it would

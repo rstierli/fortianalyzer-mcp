@@ -160,6 +160,38 @@ class TestRoundTrip:
         assert seen["srcip"] == "192.0.2.102"  # unmasked before the body ran
         assert result["logs"][0]["srcip"] == token  # re-masked on the way out
 
+    async def test_nested_wrapped_tool_masks_exactly_once(
+        self, monkeypatch: pytest.MonkeyPatch, engine: FPEEngine
+    ):
+        """Tools call other registered tools through their module-level
+        names, which are the WRAPPED functions. The boundary guard must
+        keep masking at the outermost call only: without it the inner
+        result masks twice, no token round-trips (unmask yields another
+        token) and a second pass over a first-pass token can fail closed
+        into a placeholder. Found by the flag-on live round: 8 of 8
+        fortiview threat rows arrived double-masked, 2 as placeholders."""
+        from mcp.server.fastmcp import FastMCP
+
+        monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
+        mcp = FastMCP("test")
+        install_masking(mcp)
+
+        @mcp.tool()
+        async def inner_search() -> dict:
+            return {"logs": [{"srcip": "192.0.2.102", "qname": "threat.example.net"}]}
+
+        @mcp.tool()
+        async def outer_report() -> dict:
+            return {"data": (await inner_search())["logs"]}
+
+        row = (await outer_report())["data"][0]
+        unmasker = ArgUnmasker(engine)
+        assert row["qname"].endswith(".masked.invalid")
+        assert "masked-unrepresentable-" not in row["qname"]
+        # One unmask step must yield the raw value, not another token.
+        assert unmasker.resolve_scalar(row["qname"]) == "threat.example.net"
+        assert unmasker.unmask_args({"srcip": row["srcip"]})["srcip"] == "192.0.2.102"
+
 
 @pytest.fixture
 def full_masker(engine: FPEEngine, monkeypatch: pytest.MonkeyPatch) -> OutputMasker:

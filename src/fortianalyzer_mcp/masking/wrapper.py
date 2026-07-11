@@ -44,6 +44,7 @@ and IPv6-in-text scanning are not yet handled. Device identity
 by default a masked record still fingerprints the reporting device.
 """
 
+import contextvars
 import hashlib
 import hmac
 import inspect
@@ -213,17 +214,27 @@ class OutputMasker:
             out.append(f"{device}[{match.group('vdom')}]")
         return ",".join(out)
 
-    def _mask_target(self, value: list[Any], mapping: dict[str, str]) -> list[Any]:
-        """``[{"name": "ip", "value": "..."}]`` (alert ``target``)."""
+    def _mask_target(
+        self, value: list[Any], mapping: dict[str, str], keep: frozenset[str] = frozenset()
+    ) -> list[Any]:
+        """``[{"name": "ip", "value": "..."}]`` (alert ``target``).
+
+        A value in ``keep`` is the reporting estate's own identity (it
+        appears under a device-identity key elsewhere in this response,
+        and the deployment left device identity unmasked): masking it
+        here while ``devid`` shows it in clear would hand out the
+        token-to-serial pair. Live 8.0.0 alerts do exactly this — the
+        appliance serial arrives as a ``device`` target.
+        """
         out: list[Any] = []
         for item in value:
             if not isinstance(item, dict):
-                out.append(self._mask_structured(item, mapping))
+                out.append(self._mask_structured(item, mapping, keep))
                 continue
             entry = dict(item)
             vtype = TARGET_NAME_TYPES.get(str(entry.get("name", "")).lower())
             raw = entry.get("value")
-            if vtype and isinstance(raw, str):
+            if vtype and isinstance(raw, str) and raw not in keep:
                 token = self._mask_scalar(vtype, raw, mapping)
                 entry["value"] = token
                 # asset_value repeats the identifier on some targets and
@@ -294,20 +305,76 @@ class OutputMasker:
     def mask_result(self, obj: Any) -> Any:
         """Mask a tool result: structured pass, then free-text pass."""
         mapping: dict[str, str] = {}
-        staged = self._mask_structured(obj, mapping)
+        keep = frozenset() if self._mask_device_identity else self._device_identity_values(obj)
+        staged = self._mask_structured(obj, mapping, keep)
         return self._mask_free_text(staged, mapping)
 
-    def _mask_structured(self, obj: Any, mapping: dict[str, str]) -> Any:
+    def _device_identity_values(self, obj: Any) -> frozenset[str]:
+        """Device-identity values present in this response, pre-collected.
+
+        With ``FAZ_MASK_DEVICE_IDENTITY`` off these stay readable by
+        design, so any handler that can reach the same value under another
+        key (live 8.0.0 alerts carry the reporting appliance's serial in
+        ``target[].value``) must leave it clear too. Masking it in one
+        place while ``devid`` shows it two keys away is not privacy, it is
+        a token-to-serial correlation gift.
+        """
+        out: set[str] = set()
+
+        def walk(node: Any) -> None:
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if key in DEVICE_IDENTITY_TYPES and isinstance(value, str):
+                        out.update(part.strip() for part in value.split(","))
+                    elif key.lower() in COMPOSITE_DEVICE_VDOM and isinstance(value, str):
+                        for part in value.split(","):
+                            match = _DEVVDS_RE.match(part.strip())
+                            out.add(match.group("dev") if match else part.strip())
+                    else:
+                        walk(value)
+            elif isinstance(node, list):
+                for item in node:
+                    walk(item)
+
+        walk(obj)
+        return frozenset(v for v in out if v)
+
+    def _mask_structured(
+        self, obj: Any, mapping: dict[str, str], keep: frozenset[str] = frozenset()
+    ) -> Any:
         """Pass 1: mask allowlisted and composite keys, record raw -> token."""
         if isinstance(obj, dict):
             paired = self._mask_threat_pair(obj, mapping)
+            paired.update(self._mask_incident_reporter(obj, mapping))
             return {
-                key: paired[key] if key in paired else self._mask_entry(key, value, mapping)
+                key: paired[key] if key in paired else self._mask_entry(key, value, mapping, keep)
                 for key, value in obj.items()
             }
         if isinstance(obj, list):
-            return [self._mask_structured(item, mapping) for item in obj]
+            return [self._mask_structured(item, mapping, keep) for item in obj]
         return obj
+
+    def _mask_incident_reporter(
+        self, obj: dict[str, Any], mapping: dict[str, str]
+    ) -> dict[str, str]:
+        """``incident_reporter``: masked only when the record proves it a username.
+
+        The field is polymorphic — a username on manually raised incidents,
+        an alert id on auto-raised ones — so typing it outright would
+        corrupt alert ids. But the username case is decidable from the
+        record itself: when the value equals the sibling ``reporter`` or
+        ``lastuser`` (both masked as usernames), it is the same principal
+        and must carry the same token; leaving it clear un-masks the
+        sibling verbatim (found live by the flag-on round on both boxes).
+        Any other value is an id or a principal we cannot prove, and stays
+        untouched as before.
+        """
+        value = obj.get("incident_reporter")
+        if not isinstance(value, str) or not value.strip() or value.strip() in SKIP_VALUES:
+            return {}
+        if value not in (obj.get("reporter"), obj.get("lastuser")):
+            return {}
+        return {"incident_reporter": self._mask_scalar(USERNAME, value, mapping)}
 
     def _mask_threat_pair(self, obj: dict[str, Any], mapping: dict[str, str]) -> dict[str, str]:
         """fortiview ``threat``/``obf_url``: masked together, as domains (#40).
@@ -350,14 +417,16 @@ class OutputMasker:
             out[THREAT_KEY] = self._mask_scalar(DOMAIN, threat, mapping)
         return out
 
-    def _mask_entry(self, key: str, value: Any, mapping: dict[str, str]) -> Any:
+    def _mask_entry(
+        self, key: str, value: Any, mapping: dict[str, str], keep: frozenset[str] = frozenset()
+    ) -> Any:
         lowered = key.lower()
         if lowered in COMPOSITE_PREFIXED and isinstance(value, str):
             return self._mask_prefixed(value, mapping)
         if lowered in COMPOSITE_JSON and isinstance(value, str):
             return self._mask_json_blob(value, mapping)
         if lowered in COMPOSITE_TARGET and isinstance(value, list):
-            return self._mask_target(value, mapping)
+            return self._mask_target(value, mapping, keep)
         if lowered in COMPOSITE_DEVICE_VDOM and isinstance(value, str):
             return self._mask_device_vdom(value, mapping)
 
@@ -370,11 +439,11 @@ class OutputMasker:
                 return [
                     self._mask_scalar(vtype, item, mapping)
                     if isinstance(item, str)
-                    else self._mask_structured(item, mapping)
+                    else self._mask_structured(item, mapping, keep)
                     for item in value
                 ]
         if isinstance(value, dict | list):
-            return self._mask_structured(value, mapping)
+            return self._mask_structured(value, mapping, keep)
         return value  # TEXT values are deliberately left for pass 2
 
     def _mask_free_text(self, obj: Any, mapping: dict[str, str]) -> Any:
@@ -414,12 +483,27 @@ class OutputMasker:
             }
 
 
+#: True while a wrapped tool call is inside its masking boundary. Tools
+#: call other registered tools through their module-level names (e.g.
+#: ``get_top_threats`` -> ``get_fortiview_data``), and those names are the
+#: WRAPPED functions, so without a guard the inner result is masked twice:
+#: every token stops round-tripping (unmask yields another token) and a
+#: second pass over a first-pass token can fail closed into a placeholder.
+#: Found by the flag-on live round, 6 double-masked + 2 placeholder rows.
+_AT_BOUNDARY: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "faz_masking_boundary", default=False
+)
+
+
 def install_masking(mcp: Any) -> tuple[OutputMasker, ArgUnmasker]:
     """Patch ``mcp.tool`` so every tool registered afterwards is masked.
 
     Wrapped tools unmask their keyword arguments on the way in (Phase 2,
     before the tool body reaches any validator) and mask their result on
-    the way out (Phase 1).
+    the way out (Phase 1). The boundary is the OUTERMOST wrapped call
+    only: a wrapped tool invoked from inside another wrapped tool runs
+    bare, because the outer boundary already unmasked the arguments and
+    masks the combined result exactly once.
 
     Must run BEFORE the tool modules are imported (they register at import
     time). Raises MaskingError at startup if ``FAZ_MASKING_KEY`` is absent
@@ -440,15 +524,27 @@ def install_masking(mcp: Any) -> tuple[OutputMasker, ArgUnmasker]:
 
                 @wraps(fn)
                 async def async_wrapped(*fa: Any, **fk: Any) -> Any:
-                    return masker.mask_tool_result(
-                        await fn(*fa, **unmasker.unmask_args(fk)), fn.__name__
-                    )
+                    if _AT_BOUNDARY.get():
+                        return await fn(*fa, **fk)
+                    token = _AT_BOUNDARY.set(True)
+                    try:
+                        return masker.mask_tool_result(
+                            await fn(*fa, **unmasker.unmask_args(fk)), fn.__name__
+                        )
+                    finally:
+                        _AT_BOUNDARY.reset(token)
 
                 return decorator(async_wrapped)
 
             @wraps(fn)
             def sync_wrapped(*fa: Any, **fk: Any) -> Any:
-                return masker.mask_tool_result(fn(*fa, **unmasker.unmask_args(fk)), fn.__name__)
+                if _AT_BOUNDARY.get():
+                    return fn(*fa, **fk)
+                token = _AT_BOUNDARY.set(True)
+                try:
+                    return masker.mask_tool_result(fn(*fa, **unmasker.unmask_args(fk)), fn.__name__)
+                finally:
+                    _AT_BOUNDARY.reset(token)
 
             return decorator(sync_wrapped)
 

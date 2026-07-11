@@ -68,6 +68,9 @@ ALERT: dict[str, Any] = {
         {"name": "domain", "value": BAD_DOMAIN},
         {"name": "device", "value": ENDPOINT_NAME, "asset_value": ENDPOINT_NAME},
         {"name": "device", "value": ENDPOINT_NAME, "asset_value": "1107"},
+        # Live 8.0.0 alerts carry the reporting appliance itself as a
+        # device target; estate identity must stay consistent with devid.
+        {"name": "device", "value": DEV_SERIAL, "asset_value": DEV_SERIAL},
     ],
 }
 INCIDENT: dict[str, Any] = {
@@ -75,6 +78,9 @@ INCIDENT: dict[str, Any] = {
     "endpoint": ENDPOINT_IP,
     "reporter": ANALYST,
     "lastuser": ANALYST,
+    # On a manually raised incident this repeats the reporter username;
+    # the flag-on live round proved leaving it clear un-masks `reporter`.
+    "incident_reporter": ANALYST,
     "grpby": f'[{{"dstendpoint": "{PEER_IP}"}}]',
 }
 TRAFFIC: dict[str, Any] = {
@@ -409,6 +415,44 @@ class TestFortiViewDeviceVdom:
     ):
         masked = full_masker.mask_result(FORTIVIEW_THREAT)
         assert masked["devvds"] == f"{masked['fortigate']}[{VDOM}]"
+
+
+class TestIncidentReporterSibling:
+    """``incident_reporter`` masks only when the record proves it a username."""
+
+    def test_manual_incident_gets_the_reporter_token(self, masker: OutputMasker):
+        masked = masker.mask_result(dict(INCIDENT))
+        assert ANALYST not in str(masked)
+        assert masked["incident_reporter"] == masked["reporter"]  # same principal, same token
+
+    def test_auto_raised_alert_id_stays_clear(self, masker: OutputMasker):
+        """On auto-raised incidents the field holds an alert id; masking it
+        as a username would corrupt the id, so only sibling-proven
+        usernames mask."""
+        record = {"reporter": "Auto-Raised", "incident_reporter": "202607101000000020"}
+        masked = masker.mask_result(record)
+        assert masked["incident_reporter"] == "202607101000000020"
+
+
+class TestTargetDeviceIdentityConsistency:
+    """The reporting appliance inside ``target[]`` follows the flag, like
+    every other device-identity carrier: half-masked estate identity would
+    pair each token with its clear serial two keys away."""
+
+    def test_estate_serial_in_target_stays_clear_when_flag_off(self, masker: OutputMasker):
+        masked = masker.mask_result(ALERT)
+        entry = masked["target"][3]
+        assert entry["value"] == DEV_SERIAL  # consistent with the clear devid
+        assert entry["asset_value"] == DEV_SERIAL
+        # endpoint targets still mask; only estate identity is exempt
+        assert masked["target"][1]["value"] != ENDPOINT_NAME
+
+    def test_estate_serial_in_target_masks_with_the_devid_token_when_flag_on(
+        self, full_masker: OutputMasker
+    ):
+        masked = full_masker.mask_result(ALERT)
+        assert masked["target"][3]["value"] == masked["devid"]  # same identifier, same token
+        assert DEV_SERIAL not in str(masked)
 
 
 def _looks_like_web_domain(value: str) -> bool:
