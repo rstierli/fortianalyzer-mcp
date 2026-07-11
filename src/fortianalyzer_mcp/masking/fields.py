@@ -58,9 +58,11 @@ is non-empty (``obf_url`` is the ``[dot]``-escaped twin of the same
 value), and ``obf_url`` is empty on every signature, filename and anomaly
 row — verified across both reference estates on the RFC #40 thread, where
 ``logtype`` turned out NOT to discriminate (domains arrive under a traffic
-logtype on one estate and a webfilter logtype on the other, and
-malware-detected rows carry dotted *filenames* in ``threat`` that any
-shape test would misread as domains). So the sibling decides: non-empty
+logtype on both estates — an early webfilter-logtype sighting did not
+reproduce on the same box — and malware-detected rows carry dotted
+*filenames* in ``threat`` that any shape test would misread as domains;
+even a live AV detection surfaces as a traffic row, never a virus
+logtype). So the sibling decides: non-empty
 ``obf_url`` masks both as domains, empty leaves ``threat`` clear with its
 analytic value intact. See ``wrapper._mask_threat_pair`` for the residual.
 

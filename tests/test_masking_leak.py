@@ -109,6 +109,70 @@ FORTIVIEW_MALWARE: dict[str, Any] = {
     "obf_url": "",
     "threattype": "malware-detected",
 }
+
+# Full-shape ``top-threats`` rows, sanitized from a live 7.6.7 capture (a
+# complete 7-day window; the #40 thread). Unlike the minimal dicts above,
+# these carry every sibling key the view emits, so the pair rule runs
+# against real row shapes — including the device-identity keys sitting
+# next to the pair. One row per class observed live; the filename row
+# keeps the ``~``/``_`` characters real bundle names carry (both outside
+# the domain alphabet, so a shape test would have failed closed on them).
+LIVE_THREAT_DOMAIN = "relay.privacy.example.com"
+LIVE_SPAM_FQDN = "cell8013.fra.mobile.event.ads.example-adnetwork.com"
+LIVE_MALICIOUS_DOMAIN = "malhost.example.net"
+LIVE_FILENAME = "Vendor.Example.Utility_4.7.18.0_neutral_~_abcdefgh.Msixbundle"
+
+
+def _top_threats_row(
+    threat: str,
+    threattype: str,
+    logtype: str = "10",
+    logtype_str: str = "traffic",
+    obf: bool = False,
+    **extra: Any,
+) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "logtype": logtype,
+        "logtype_str": logtype_str,
+        "threat": threat,
+        "threattype": threattype,
+        "threatlevel": "3",
+        "level_s": "High",
+        "threatweight": "1000",
+        "threat_block": "1000",
+        "threat_pass": "0",
+        "incidents": "10",
+        "incident_block": "10",
+        "incident_pass": "0",
+        "fortigate": DEV_SERIAL,
+        "devvds": f"{DEV_SERIAL}[{VDOM}]",
+        "cve_list": "",
+        "appid": "0",
+        "obf_url": threat.replace(".", "[dot]") if obf else "",
+    }
+    row.update(extra)
+    return row
+
+
+FORTIVIEW_LIVE_ROWS: list[dict[str, Any]] = [
+    _top_threats_row("blocked-connection", "blocked-connection"),
+    _top_threats_row(LIVE_THREAT_DOMAIN, "Proxy Avoidance", obf=True),
+    _top_threats_row("udp_flood", "ips", logtype="1", logtype_str="anomaly"),
+    _top_threats_row("Proxy.HTTP", "Proxy", appid="107347980"),
+    _top_threats_row(LIVE_FILENAME, "malware-detected"),
+    _top_threats_row(LIVE_SPAM_FQDN, "Spam URLs", obf=True),
+    _top_threats_row(LIVE_MALICIOUS_DOMAIN, "Malicious Websites", obf=True),
+]
+LIVE_ROW_IDS = [
+    "fv-live-blocked-connection",
+    "fv-live-proxy-avoidance-domain",
+    "fv-live-anomaly-udp-flood",
+    "fv-live-app-signature",
+    "fv-live-malware-filename",
+    "fv-live-spam-url-fqdn",
+    "fv-live-malicious-website",
+]
+
 FORTIVIEW_COUNTRY: dict[str, Any] = {
     "fortigate": f"{DEV_NAME},{DEV_PEER}",
     "devvds": f"{DEV_NAME}[{VDOM}],{DEV_PEER}[{VDOM}]",
@@ -139,6 +203,7 @@ RECORDS = [
     FORTIVIEW_THREAT,
     FORTIVIEW_SIGNATURE,
     FORTIVIEW_MALWARE,
+    *FORTIVIEW_LIVE_ROWS,
     FORTIVIEW_COUNTRY,
     UEBA_ENDUSER,
     UEBA_ENDPOINT,
@@ -151,6 +216,7 @@ RECORD_IDS = [
     "fv-threat",
     "fv-signature",
     "fv-malware",
+    *LIVE_ROW_IDS,
     "fv-country",
     "ueba-enduser",
     "ueba-endpoint",
@@ -168,6 +234,12 @@ PERSONAL = [
     SOC_EMAIL,
     THREAT_DOMAIN,
     OBF_URL,
+    LIVE_THREAT_DOMAIN,
+    LIVE_SPAM_FQDN,
+    LIVE_MALICIOUS_DOMAIN,
+    LIVE_THREAT_DOMAIN.replace(".", "[dot]"),
+    LIVE_SPAM_FQDN.replace(".", "[dot]"),
+    LIVE_MALICIOUS_DOMAIN.replace(".", "[dot]"),
 ]
 DEVICE_IDENTITY = [DEV_NAME, DEV_PEER, DEV_SERIAL, DETECT_KEY, FABRIC]
 
@@ -425,6 +497,31 @@ class TestThreatObfUrlPair:
             f"domain-shaped threat {threat!r} with empty obf_url would leak; "
             "the #40 sibling rule assumption no longer holds"
         )
+
+    @pytest.mark.parametrize(
+        "row",
+        [r for r in FORTIVIEW_LIVE_ROWS if r["obf_url"]],
+        ids=[i for r, i in zip(FORTIVIEW_LIVE_ROWS, LIVE_ROW_IDS, strict=True) if r["obf_url"]],
+    )
+    def test_live_shape_domain_rows_mask_as_pair(self, masker: OutputMasker, row: dict[str, Any]):
+        """Full-shape rows (every sibling key the view emits): domain rows
+        mask, the pair stays consistent, and neither raw form survives."""
+        masked = masker.mask_result(row)
+        assert row["threat"] not in str(masked)
+        assert row["obf_url"] not in str(masked)
+        assert masked["threat"].endswith(".masked.invalid")
+        assert masked["obf_url"] == masked["threat"].replace(".", "[dot]")
+
+    @pytest.mark.parametrize(
+        "row",
+        [r for r in FORTIVIEW_LIVE_ROWS if not r["obf_url"]],
+        ids=[i for r, i in zip(FORTIVIEW_LIVE_ROWS, LIVE_ROW_IDS, strict=True) if not r["obf_url"]],
+    )
+    def test_live_shape_non_domain_rows_stay_clear(self, masker: OutputMasker, row: dict[str, Any]):
+        """Signature, filename, anomaly and connection-verdict rows keep
+        their analytic value — including the ``~``/``_`` filename class only
+        one estate produces."""
+        assert masker.mask_result(row)["threat"] == row["threat"]
 
 
 class TestDocumentedGaps:
