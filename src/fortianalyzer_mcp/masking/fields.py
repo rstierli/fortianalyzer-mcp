@@ -52,20 +52,24 @@ Out of scope here, by design:
   to type it as ``DOMAIN``. Only the operator-authored ``description`` is
   scanned, as free text.
 
+``threat``/``obf_url`` (fortiview ``top-threats``) are masked as a pair:
+``threat`` holds a browsed web domain exactly when the sibling ``obf_url``
+is non-empty (``obf_url`` is the ``[dot]``-escaped twin of the same
+value), and ``obf_url`` is empty on every signature, filename and anomaly
+row — verified across both reference estates on the RFC #40 thread, where
+``logtype`` turned out NOT to discriminate (domains arrive under a traffic
+logtype on one estate and a webfilter logtype on the other, and
+malware-detected rows carry dotted *filenames* in ``threat`` that any
+shape test would misread as domains). So the sibling decides: non-empty
+``obf_url`` masks both as domains, empty leaves ``threat`` clear with its
+analytic value intact. See ``wrapper._mask_threat_pair`` for the residual.
+
 Known gaps, recorded rather than guessed at:
 - ``socialid`` (ueba ``endusers``) is a container, ``{"data": [...]}``, and
   is empty on every record of the reference estate. Its populated shape is
   unknown, so no type is assigned: the recursive walk descends into it and
   masks whatever allowlisted keys it turns out to hold. Revisit with a
   populated sample.
-- ``threat``/``obf_url`` (fortiview ``top-threats``) hold a browsed domain
-  on webfilter rows (``threat.example.net``, obfuscated as
-  ``threat[dot]example[dot]net``) but a signature label on ips/virus rows,
-  where a name like ``Adobe.Flash.Exploit`` is indistinguishable from a
-  domain by shape alone. The sibling ``logtype`` almost certainly
-  disambiguates them, but the reference estate produced no ips/virus row
-  to confirm the mapping, so both are left clear rather than masked on a
-  guess. This is a real leak of browsing destinations; see the RFC thread.
 """
 
 # Value-type tags understood by the wrapper. "email" falls back to
@@ -198,6 +202,13 @@ FIELD_TYPES: dict[str, str] = {
 COMPOSITE_PREFIXED = ("groupby1", "groupby2")
 COMPOSITE_JSON = ("grpby",)
 COMPOSITE_TARGET = ("target",)
+
+#: fortiview ``top-threats`` pair, masked together by
+#: ``wrapper._mask_threat_pair``: a non-empty ``obf_url`` marks the row as
+#: a browsed-domain threat; ``obf_url`` itself is the ``[dot]``-escaped
+#: twin of ``threat``.
+THREAT_KEY = "threat"
+OBF_URL_KEY = "obf_url"
 
 #: fortiview ``devvds``: ``"<devname>[<vdom>]"``, comma-joined when a row
 #: aggregates several devices. The brackets are outside the hostname

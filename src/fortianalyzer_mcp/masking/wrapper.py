@@ -68,9 +68,11 @@ from fortianalyzer_mcp.masking.fields import (
     IP,
     IP_OR_HOST,
     MAC,
+    OBF_URL_KEY,
     SKIP_VALUES,
     TARGET_NAME_TYPES,
     TEXT,
+    THREAT_KEY,
     USERNAME,
 )
 from fortianalyzer_mcp.masking.fpe_engine import MASKING_KEY_ENV, FPEEngine, MaskingError
@@ -298,10 +300,55 @@ class OutputMasker:
     def _mask_structured(self, obj: Any, mapping: dict[str, str]) -> Any:
         """Pass 1: mask allowlisted and composite keys, record raw -> token."""
         if isinstance(obj, dict):
-            return {key: self._mask_entry(key, value, mapping) for key, value in obj.items()}
+            paired = self._mask_threat_pair(obj, mapping)
+            return {
+                key: paired[key] if key in paired else self._mask_entry(key, value, mapping)
+                for key, value in obj.items()
+            }
         if isinstance(obj, list):
             return [self._mask_structured(item, mapping) for item in obj]
         return obj
+
+    def _mask_threat_pair(self, obj: dict[str, Any], mapping: dict[str, str]) -> dict[str, str]:
+        """fortiview ``threat``/``obf_url``: masked together, as domains (#40).
+
+        ``obf_url`` is populated exactly when ``threat`` holds a browsable
+        web domain (it is the ``[dot]``-escaped twin of the same value) and
+        is empty on every signature, filename and anomaly row — verified
+        across both reference estates on the RFC thread. The sibling, not a
+        logtype table or a shape test, decides: ``logtype`` does not
+        discriminate (domains arrive as traffic rows on one estate), and
+        malware rows carry dotted filenames a shape test would misread.
+
+        Non-empty ``obf_url``: mask ``threat`` as a domain, and unescape,
+        mask and re-escape ``obf_url`` so the pair stays consistent
+        (deterministic FPE makes the two tokens twins again). The model
+        should hand the ``threat`` token back for queries; the re-escaped
+        ``obf_url`` form stays display-only, like the raw field it defangs.
+        Empty ``obf_url``: leave ``threat`` clear, its analytic value
+        (signature or filename) intact.
+
+        Documented residual (fail-open): a row carrying a domain ``threat``
+        with an empty ``obf_url`` would leak that domain. Neither estate
+        shows such a row and the field exists precisely to defang browsable
+        objects; the leak test carries a tripwire assertion so a live
+        counterexample fails a test instead of leaking silently.
+        """
+        obf = obj.get(OBF_URL_KEY)
+        if not isinstance(obf, str) or not obf.strip() or obf.strip() in SKIP_VALUES:
+            return {}
+        out: dict[str, str] = {}
+        token = self._mask_scalar(DOMAIN, obf.replace("[dot]", "."), mapping)
+        escaped = token.replace(".", "[dot]")
+        if _PLACEHOLDER_MARK not in token and escaped != obf:
+            # Catch the escaped raw form in prose too; the unescaped form
+            # is already in the mapping via _mask_scalar.
+            mapping[obf] = escaped
+        out[OBF_URL_KEY] = escaped
+        threat = obj.get(THREAT_KEY)
+        if isinstance(threat, str) and threat.strip() and threat.strip() not in SKIP_VALUES:
+            out[THREAT_KEY] = self._mask_scalar(DOMAIN, threat, mapping)
+        return out
 
     def _mask_entry(self, key: str, value: Any, mapping: dict[str, str]) -> Any:
         lowered = key.lower()
