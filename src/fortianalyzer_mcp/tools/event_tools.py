@@ -400,3 +400,51 @@ async def get_alert_incident_stats(
     except Exception as e:
         logger.error(f"Failed to get alert-incident stats: {e}")
         return {"status": "error", "message": redact(str(e))}
+
+
+_VALID_HANDLER_TYPES = {"basic", "correlation", "both"}
+
+
+@mcp.tool()
+async def get_alert_handlers(
+    adom: str | None = None,
+    handler_type: str = "both",
+) -> dict[str, Any]:
+    """Get event alert-handler (detection-rule) definitions.
+
+    Reads the alert-handler configuration: each handler's name, id, and
+    its rules (severity, filter, groupby, tags). This is the catalogue of
+    detection rules the appliance runs — a read-only building block for
+    the Wave-2 ``alert_rules`` skill.
+
+    Args:
+        adom: ADOM name (default: from config DEFAULT_ADOM)
+        handler_type: Which handlers to return: "basic", "correlation" or
+            "both" (default: "both")
+
+    Returns:
+        dict with handler definitions under "data" (keyed by "basic" and/or
+        "correlation")
+
+    Example:
+        >>> result = await get_alert_handlers(handler_type="basic")
+        >>> print(result["data"]["basic"])
+    """
+    try:
+        adom = validate_adom(adom or get_default_adom())
+        if handler_type not in _VALID_HANDLER_TYPES:
+            valid = ", ".join(sorted(_VALID_HANDLER_TYPES))
+            return {
+                "status": "error",
+                "message": f"Validation error: Invalid handler_type '{handler_type}'. "
+                f"Must be one of: {valid}",
+            }
+        client = _get_client()
+
+        logger.info(f"Getting {handler_type} alert handlers from ADOM {adom}")
+
+        result = await client.get_alert_handlers(adom=adom, handler_type=handler_type)
+        return {"status": "success", "adom": adom, "handler_type": handler_type, "data": result}
+    except Exception as e:
+        logger.error(f"Failed to get alert handlers: {e}")
+        return {"status": "error", "message": redact(str(e))}

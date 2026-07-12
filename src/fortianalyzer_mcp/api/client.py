@@ -1833,3 +1833,101 @@ class FortiAnalyzerClient:
         return await self._raw_request_dict(
             "get", f"/ioc/adom/{adom}/rescan/history", apiver=API_VERSION
         )
+
+    # =========================================================================
+    # UEBA - Endpoints & End-users (from ueba.json) — Wave 2 skills readers
+    # Read-only. Feature-gated: requires UEBA licensed/enabled on the FAZ.
+    # Endpoints identical on 7.6.7 and 8.0.0 (verified).
+    # =========================================================================
+
+    async def get_endpoints(
+        self,
+        adom: str,
+        epids: list[int] | None = None,
+        detail_level: str = "standard",
+        time_range: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Get UEBA endpoint (asset) records.
+
+        FNDN: GET /ueba/adom/{adom}/endpoints
+
+        Args:
+            adom: ADOM name
+            epids: Optional endpoint IDs to scope the query
+            detail_level: "simple", "basic" or "standard"
+            time_range: {"start": ..., "end": ...} first-seen window
+        """
+        params: dict[str, Any] = {"apiver": API_VERSION, "detail-level": detail_level}
+        if epids:
+            params["epids"] = epids
+        if time_range:
+            params["time-range"] = time_range
+        return await self._request_dict("get", f"/ueba/adom/{adom}/endpoints", **params)
+
+    async def get_endpoint_vulnerabilities(
+        self,
+        adom: str,
+        epids: list[int] | None = None,
+        detectby: str | None = None,
+    ) -> dict[str, Any]:
+        """Get CVE/vulnerability records for UEBA endpoints.
+
+        FNDN: GET /ueba/adom/{adom}/endpoints/vuln
+
+        Args:
+            adom: ADOM name
+            epids: Optional endpoint IDs to scope the query
+            detectby: Optional detector filter ("FortiClient" or "FortiGate")
+        """
+        params: dict[str, Any] = {"apiver": API_VERSION}
+        if epids:
+            params["epids"] = epids
+        if detectby:
+            params["detectby"] = detectby
+        return await self._request_dict("get", f"/ueba/adom/{adom}/endpoints/vuln", **params)
+
+    async def get_endusers(
+        self,
+        adom: str,
+        euids: list[int] | None = None,
+        detail_level: str = "standard",
+    ) -> dict[str, Any]:
+        """Get UEBA end-user (identity) records.
+
+        FNDN: GET /ueba/adom/{adom}/endusers
+
+        Args:
+            adom: ADOM name
+            euids: Optional end-user IDs to scope the query
+            detail_level: "basic", "standard" or "extended" (extended adds
+                email/department/title/phone)
+        """
+        params: dict[str, Any] = {"apiver": API_VERSION, "detail-level": detail_level}
+        if euids:
+            params["euids"] = euids
+        return await self._request_dict("get", f"/ueba/adom/{adom}/endusers", **params)
+
+    async def get_alert_handlers(
+        self,
+        adom: str,
+        handler_type: str = "both",
+    ) -> dict[str, Any]:
+        """Get event alert-handler (detection-rule) definitions.
+
+        FNDN: GET /eventmgmt/adom/{adom}/config/basic-handler
+              GET /eventmgmt/adom/{adom}/config/correlation-handler
+
+        Args:
+            adom: ADOM name
+            handler_type: "basic", "correlation" or "both"
+        """
+        result: dict[str, Any] = {}
+        if handler_type in ("basic", "both"):
+            result["basic"] = await self._raw_request_dict(
+                "get", f"/eventmgmt/adom/{adom}/config/basic-handler", apiver=API_VERSION
+            )
+        if handler_type in ("correlation", "both"):
+            result["correlation"] = await self._raw_request_dict(
+                "get", f"/eventmgmt/adom/{adom}/config/correlation-handler", apiver=API_VERSION
+            )
+        return result

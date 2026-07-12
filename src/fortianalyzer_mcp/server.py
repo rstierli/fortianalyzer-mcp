@@ -234,6 +234,7 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
             report_tools,
             system_tools,
             traffic_tools,
+            ueba_tools,
         )
 
         # Map tool names to functions
@@ -278,6 +279,11 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
             "get_alert_details": event_tools.get_alert_details,
             "add_alert_comment": event_tools.add_alert_comment,
             "get_alert_incident_stats": event_tools.get_alert_incident_stats,
+            "get_alert_handlers": event_tools.get_alert_handlers,
+            # UEBA tools (Wave-2 skills readers)
+            "get_endpoints": ueba_tools.get_endpoints,
+            "get_endpoint_vulnerabilities": ueba_tools.get_endpoint_vulnerabilities,
+            "get_endusers": ueba_tools.get_endusers,
             # FortiView tools
             "run_fortiview": fortiview_tools.run_fortiview,
             "fetch_fortiview": fortiview_tools.fetch_fortiview,
@@ -417,6 +423,7 @@ else:
         report_tools,
         system_tools,
         traffic_tools,
+        ueba_tools,
     )
 
     if settings.FAZ_SKILLS_ENABLED:

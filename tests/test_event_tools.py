@@ -219,3 +219,52 @@ class TestAlertClient:
                 comment="Test comment",
                 user="admin",
             )
+
+
+class TestAlertHandlers:
+    """get_alert_handlers reader tool + client method (Wave-2 alert_rules)."""
+
+    async def test_tool_success_both(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from fortianalyzer_mcp.tools import event_tools
+
+        class _Fake:
+            async def get_alert_handlers(self, **kwargs: object) -> dict[str, object]:
+                self.seen = kwargs
+                return {"basic": [{"name": "H1"}], "correlation": [{"name": "C1"}]}
+
+        fake = _Fake()
+        monkeypatch.setattr(event_tools, "get_faz_client", lambda: fake)
+        result = await event_tools.get_alert_handlers(adom="root")
+        assert result["status"] == "success"
+        assert result["handler_type"] == "both"
+        assert result["data"]["basic"][0]["name"] == "H1"
+        assert fake.seen["handler_type"] == "both"
+
+    async def test_tool_rejects_invalid_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from fortianalyzer_mcp.tools import event_tools
+
+        monkeypatch.setattr(event_tools, "get_faz_client", lambda: object())
+        result = await event_tools.get_alert_handlers(handler_type="fancy")
+        assert result["status"] == "error"
+        assert "Validation error" in result["message"]
+
+    async def test_client_method_basic_only(self, mock_client: FortiAnalyzerClient) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        with patch.object(
+            mock_client, "_raw_request", AsyncMock(return_value=[{"name": "H1"}])
+        ) as req:
+            result = await mock_client.get_alert_handlers(adom="root", handler_type="basic")
+        assert "basic" in result and "correlation" not in result
+        assert req.await_args.args[1] == "/eventmgmt/adom/root/config/basic-handler"
+
+    async def test_client_method_both_hits_two_paths(
+        self, mock_client: FortiAnalyzerClient
+    ) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        with patch.object(mock_client, "_raw_request", AsyncMock(return_value=[])) as req:
+            await mock_client.get_alert_handlers(adom="root", handler_type="both")
+        paths = [c.args[1] for c in req.await_args_list]
+        assert "/eventmgmt/adom/root/config/basic-handler" in paths
+        assert "/eventmgmt/adom/root/config/correlation-handler" in paths

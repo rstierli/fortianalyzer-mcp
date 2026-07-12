@@ -5,6 +5,11 @@ All notable changes to FortiAnalyzer MCP Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **UEBA + alert-handler reader tools (Wave-2 skills building blocks — [#44](https://github.com/rstierli/fortianalyzer-mcp/issues/44)).** Four additive read-only tools: `get_endpoints` and `get_endpoint_vulnerabilities` (UEBA endpoint/asset profiles + CVEs), `get_endusers` (UEBA identity records; `extended` detail adds email/department/title/phone), and `get_alert_handlers` (basic/correlation detection-rule config). Feature-gated on UEBA being licensed/enabled; API paths identical on 7.6.7 and 8.0.0. These are the readers the Wave-2 skills (`asset_lookup`, `identity_lookup`, `alert_rules`, `risk_assessment`, ...) will compose; useful on their own in the meantime. Live-verified against a real appliance. Brings the base tool count to 81 (82 with the skills dispatcher).
+
 ## [2.9.1] - 2026-07-12
 
 Patch release: fixes a startup crash when masking is configured through `.env` alone.
