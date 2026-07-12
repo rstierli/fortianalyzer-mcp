@@ -54,7 +54,17 @@ string values are padded with ``~`` (never legal in the value types we
 mask) up to the cipher's minimum length; padding is stripped after
 decryption. Values longer than the cipher's maximum length are encrypted
 in chunks, each chunk with a position-varied tweak so identical chunks at
-different positions do not produce identical ciphertext.
+different positions do not produce identical ciphertext. Two equality
+leaks follow from chunking, both one notch beyond the whole-value
+equality deterministic FPE already discloses by design: two long values
+sharing their first block produce the same first ciphertext block
+(shared-prefix equality is visible), and chunk 0 shares its tweak with
+unchunked values, so a short value equal to another value's first block
+correlates with it.
+
+Unmasked IPv6 addresses come back in Python's canonical compressed form
+(``2001:db8::1``), not necessarily the textual form originally masked —
+the same address, differently spelled; not a round-trip bug.
 
 The key is a secret (AES-128/192/256 as hex). It must never be logged;
 this module never includes key material in exceptions.
@@ -210,7 +220,11 @@ class FPEEngine:
         return str(ipaddress.IPv6Address(int(ct, 16)))
 
     def unmask_ip(self, token: str) -> str:
-        """Reverse :meth:`mask_ip`."""
+        """Reverse :meth:`mask_ip`.
+
+        IPv6 comes back in canonical compressed form, which may not be the
+        textual form originally masked (same address, different spelling).
+        """
         addr = self._parse_ip(token)
         if addr.version == 4:
             pt = self._hex_ciphers["ipv4"].decrypt(f"{int(addr):08x}")
