@@ -1,6 +1,6 @@
 [project]
 name = "fortianalyzer-mcp"
-version = "2.7.3"
+version = "2.8.0"
 description = "Model Context Protocol server for FortiAnalyzer JSON RPC API"
 authors = [
     {name = "Roland Stierli"}

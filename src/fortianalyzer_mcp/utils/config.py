@@ -137,6 +137,12 @@ class Settings(BaseSettings):
         "Off by default: these identify the reporting estate, not people, and masking "
         "them costs the model its sense of which appliance saw what.",
     )
+    # Skills layer (RFC #44) — additive, off by default
+    FAZ_SKILLS_ENABLED: bool = Field(
+        default=False,
+        description="Register the faz_skill dispatcher tool (beta). "
+        "Off by default; no behavior change unless enabled.",
+    )
 
     # Logging Configuration
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
