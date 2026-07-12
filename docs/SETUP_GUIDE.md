@@ -252,9 +252,9 @@ Claude should respond using the MCP tools.
 
 ## Available Tools
 
-The MCP server provides **64 tools** across 8 categories:
+The MCP server provides **77 tools** across 10 categories (78 with the optional skills dispatcher enabled — see the README's "Skills Layer" and "Data Masking" sections for the two beta, off-by-default features). The lists below are a representative selection per category; the README's "Available Tools" section is the full reference.
 
-### System Tools (9)
+### System Tools (11)
 - `get_system_status` - Get FortiAnalyzer system status
 - `get_ha_status` - Get HA cluster status
 - `list_adoms` / `get_adom` - ADOM management
@@ -289,11 +289,12 @@ The MCP server provides **64 tools** across 8 categories:
 - `add_alert_comment` - Add comments to alerts
 - `get_alert_incident_stats` - Alert statistics
 
-### Report Tools (6)
-- `list_report_templates` - Available report templates
-- `run_report` - Generate a report
-- `get_report_history` - Past report runs
-- `get_report_data` - Download report data
+### Report Tools (9)
+- `list_report_templates` / `list_report_layouts` - Available templates/layouts
+- `run_report` / `run_and_wait_report` - Generate a report
+- `get_report_history` / `get_running_reports` - Report runs
+- `get_report_data` / `fetch_report` - Download report data
+- `save_report` - Persist a generated report
 
 ### Incident Tools (6)
 - `get_incidents` - List security incidents
@@ -312,6 +313,18 @@ The MCP server provides **64 tools** across 8 categories:
 - `get_device_info` - Detailed device info
 - `search_devices` - Search devices with filters
 - `list_device_groups` / `list_device_vdoms` - Groups and VDOMs
+
+### Traffic Analysis Tools (3)
+- `get_policy_port_analysis` - Per-policy port/service breakdown
+- `get_policy_protocol_summary` - Per-policy protocol summary
+- `get_policy_traffic_profile` - Per-policy traffic profile
+
+### PCAP Tools (5)
+- `search_ips_logs` - Find IPS logs with PCAP available
+- `get_pcap_by_session` - Download a PCAP by session ID
+- `download_pcap_by_url` - Download a PCAP by URL
+- `search_and_download_pcaps` - Bulk PCAP download by criteria
+- `list_available_pcaps` - List downloadable PCAPs
 
 ---
 

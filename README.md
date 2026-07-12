@@ -413,7 +413,7 @@ networks:
 | `get_device_info` | Get detailed device information |
 | `search_devices` | Search devices with filters |
 
-### Log Tools (12 tools)
+### Log Tools (11 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -478,7 +478,7 @@ networks:
 > the raw `filter=` argument on `query_logs` is a caller-controlled expert escape
 > hatch and is **not** parsed for injection safety — pass trusted input only.
 
-### Report Tools (8 tools)
+### Report Tools (9 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -628,6 +628,8 @@ the summed per-slice total.
 
 With `FAZ_SKILLS_ENABLED=true`, one additional tool is registered: `faz_skill(skill, params)` — a dispatcher for opinionated multi-tool orchestrations that return validated, versioned structured results (`schema_version` in every response). Off by default; no behavior change unless enabled.
 
+This is **Wave 1** of the skills roadmap — 5 of 18 planned skills. Wave 2 (enrichment: asset/identity/threat-intel/network/app/risk lookups) and Wave 3 (behavioral analysis: hunt, root-cause, impact) are designed but not yet implemented; see [RFC #44](https://github.com/rstierli/fortianalyzer-mcp/issues/44). The 5 shipped:
+
 | Skill | Tier | What it does |
 |---|---|---|
 | `incidents` | data access | Incidents in a time window, each with attachment-correlated alerts |
@@ -635,6 +637,40 @@ With `FAZ_SKILLS_ENABLED=true`, one additional tool is registered: `faz_skill(sk
 | `log_search` | data access | Filter-based log search returning verbatim rows (slot-safe: one search per call) |
 | `triage` | analysis | Evidence bundle + deterministic severity-derived assessment for one alert or incident |
 | `incident_summary` | analysis | Structured incident summary: related alerts with evidence logs, threat landscape, timeline |
+
+In normal use you describe the task in natural language and the model builds the `faz_skill` call; the JSON forms below are what that produces (all parameters except the ones noted are optional, with sensible defaults).
+
+**`incidents`** — incidents in a window with correlated alerts:
+```jsonc
+faz_skill(skill="incidents")                                    // last 7 days, up to 50
+faz_skill(skill="incidents", params={"time_range": "24-hour", "filter": "severity==high"})
+faz_skill(skill="incidents", params={"limit": 100, "include_alerts": false})  // faster, no correlation
+```
+
+**`reports`** — list report history or fetch one:
+```jsonc
+faz_skill(skill="reports")                                      // list the last 7 days of reports
+faz_skill(skill="reports", params={"action": "list", "title": "Weekly Security"})
+faz_skill(skill="reports", params={"action": "fetch", "tid": 528613989, "output_format": "PDF"})
+```
+
+**`log_search`** — one filter-based search, verbatim rows:
+```jsonc
+faz_skill(skill="log_search", params={"filter": "srcip==10.0.0.5", "time_range": "1-hour"})
+faz_skill(skill="log_search", params={"logtype": "ips", "filter": "severity==critical", "limit": 200})
+```
+
+**`triage`** — evidence + assessment for exactly one subject (`alert_id` **or** `incident_id`):
+```jsonc
+faz_skill(skill="triage", params={"incident_id": "IN00000019"})
+faz_skill(skill="triage", params={"alert_id": "202606121000000041", "context_time_range": "7-day"})
+```
+
+**`incident_summary`** — structured writeup of one incident (`incident_id` required):
+```jsonc
+faz_skill(skill="incident_summary", params={"incident_id": "IN00000019"})
+faz_skill(skill="incident_summary", params={"incident_id": "IN00000019", "time_range": "30-day", "max_alerts": 25})
+```
 
 - `faz_skill(skill="list")` (alias `"describe"`) returns the machine-readable catalogue including each skill's parameter and output JSON schema.
 - All skills are read-only and additive — zero changes to the existing tools.

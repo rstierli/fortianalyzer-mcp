@@ -5,7 +5,9 @@
 > findings listed as open have since been fixed (debug-log credential exposure,
 > session-in-URL). Controls added after this review — fail-closed HTTP auth,
 > timing-safe bearer comparison, SSRF-safe `validate_pcapurl`, zip-slip/zip-bomb
-> guards, uniform ADOM/identifier validation — are not covered here. Treat
+> guards, uniform ADOM/identifier validation, and the optional reversible
+> data-masking layer (FF3-1 format-preserving pseudonymization of IOC/PII in
+> tool output, `MASKING_ENABLED`, off by default) — are not covered here. Treat
 > `SECURITY.md` and the current source as authoritative.
 
 **Review Date:** 2024-12-05

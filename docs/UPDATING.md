@@ -139,13 +139,14 @@ add the API method to client.py and create a corresponding MCP tool.
 
 ## Version Support Matrix
 
-| FAZ Version | MCP Server Version | Status |
-|-------------|-------------------|--------|
-| 7.0.x | 0.1.x | Supported |
-| 7.2.x | 0.1.x | Supported |
-| 7.4.x | 0.1.x | Supported |
-| 7.6.4 | 0.1.x | Primary Target |
-| 7.6.5 | 0.2.x | Planned |
+Current release: **2.9.1**. The base tools support FAZ 7.x and 8.0.x; the optional skills layer (beta) requires **FAZ 7.6.7+** with UEBA/SOAR licensed.
+
+| FAZ Version | Base tools | Skills layer (beta) |
+|-------------|-----------|---------------------|
+| 7.0.x – 7.4.x | Supported | Not available (needs 7.6.7+) |
+| 7.6.x (< 7.6.7) | Supported | Not available (needs 7.6.7+) |
+| 7.6.7+ | Supported | Supported |
+| 8.0.x | Supported | Supported |
 
 ## Automated Checks (Future Enhancement)
 
@@ -163,9 +164,9 @@ Consider implementing:
    # Runs on new FNDN file commits
    ```
 
-3. **API Coverage Report**
+3. **API Coverage Report** (illustrative format; not current figures)
    ```
-   Total FNDN Endpoints: 150
-   Implemented: 67 (45%)
-   Not Implemented: 83 (55%)
+   Total FNDN Endpoints: <N>
+   Implemented: <M>
    ```
+   The server currently exposes 77 tools (78 with the skills dispatcher); see the README for the authoritative per-category list.
