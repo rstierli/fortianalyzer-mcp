@@ -61,6 +61,7 @@ from fortianalyzer_mcp.masking.fields import (
     COMPOSITE_JSON,
     COMPOSITE_PREFIXED,
     COMPOSITE_TARGET,
+    COMPOSITE_URL_HOST,
     DEVICE_IDENTITY_TYPES,
     DOMAIN,
     EMAIL,
@@ -417,6 +418,39 @@ class OutputMasker:
             out[THREAT_KEY] = self._mask_scalar(DOMAIN, threat, mapping)
         return out
 
+    def _mask_url_host(self, value: str, mapping: dict[str, str]) -> str:
+        """``http_url`` (alert ``event_details``): mask the HOST component only.
+
+        Live alerts carry the browsed destination as a full URL
+        (``https://mask.example.com/``) — the host is the identifier the
+        flag-on estate smoke found leaking, while scheme, path and query
+        are request mechanics. The host masks with the same IP-or-host
+        logic as the flat ``host_name`` field on the same record, so both
+        carry the same token. Path/query segments that embed identifiers
+        remain a documented residual of the deferred full-URL token design.
+        """
+        from urllib.parse import urlsplit
+
+        try:
+            parts = urlsplit(value.strip())
+            host = parts.hostname or ""
+            port = parts.port
+        except ValueError:
+            return self.placeholder(value)
+        if "@" in parts.netloc:
+            # Credentials inside the URL are themselves an identifier;
+            # rare enough to fail closed on the whole value.
+            return self.placeholder(value)
+        if not host:
+            # Not a parseable URL: the free-text scan still catches
+            # embedded IOCs and values masked elsewhere in this response.
+            return self.mask_text(value, mapping)
+        masked_host = self._mask_scalar(IP_OR_HOST, host, mapping)
+        if ":" in masked_host:  # IPv6 literal: re-bracket
+            masked_host = f"[{masked_host}]"
+        netloc = f"{masked_host}:{port}" if port is not None else masked_host
+        return parts._replace(netloc=netloc).geturl()
+
     def _mask_entry(
         self, key: str, value: Any, mapping: dict[str, str], keep: frozenset[str] = frozenset()
     ) -> Any:
@@ -425,6 +459,8 @@ class OutputMasker:
             return self._mask_prefixed(value, mapping)
         if lowered in COMPOSITE_JSON and isinstance(value, str):
             return self._mask_json_blob(value, mapping)
+        if lowered in COMPOSITE_URL_HOST and isinstance(value, str):
+            return self._mask_url_host(value, mapping)
         if lowered in COMPOSITE_TARGET and isinstance(value, list):
             return self._mask_target(value, mapping, keep)
         if lowered in COMPOSITE_DEVICE_VDOM and isinstance(value, str):

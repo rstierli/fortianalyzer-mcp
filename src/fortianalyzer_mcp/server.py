@@ -60,7 +60,7 @@ if settings.MASKING_ENABLED:
     from fortianalyzer_mcp.masking.wrapper import install_masking  # noqa: E402
 
     install_masking(mcp)
-    logger.info("MASKING_ENABLED - tool outputs are masked (RFC #40 Phase 1)")
+    logger.info("MASKING_ENABLED - tool args are unmasked and outputs masked (RFC #40 Phases 1+2)")
 
 
 # Health check resource

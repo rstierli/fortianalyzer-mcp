@@ -63,11 +63,21 @@ ALERT: dict[str, Any] = {
     "groupby1": f"qname:{BAD_DOMAIN}",
     "groupby2": f"endpoint:{ENDPOINT_NAME}",
     "extrainfo": f"Domain:{BAD_DOMAIN} traffic path {GATEWAY_IP}:53",
-    "event_details": {"devid": DEV_SERIAL, "dst_ip": GATEWAY_IP, "src_ip": ENDPOINT_IP},
+    "event_details": {
+        "devid": DEV_SERIAL,
+        "dst_ip": GATEWAY_IP,
+        "src_ip": ENDPOINT_IP,
+        # Live webfilter alerts carry the browsed destination as a flat
+        # host_name AND inside a full URL; the flag-on estate smoke found
+        # the URL (and the host_name target below) leaking.
+        "host_name": BAD_DOMAIN,
+        "http_url": f"https://{BAD_DOMAIN}/",
+    },
     "target": [
         {"name": "domain", "value": BAD_DOMAIN},
         {"name": "device", "value": ENDPOINT_NAME, "asset_value": ENDPOINT_NAME},
         {"name": "device", "value": ENDPOINT_NAME, "asset_value": "1107"},
+        {"name": "host_name", "value": BAD_DOMAIN},
         # Live 8.0.0 alerts carry the reporting appliance itself as a
         # device target; estate identity must stay consistent with devid.
         {"name": "device", "value": DEV_SERIAL, "asset_value": DEV_SERIAL},
@@ -441,7 +451,7 @@ class TestTargetDeviceIdentityConsistency:
 
     def test_estate_serial_in_target_stays_clear_when_flag_off(self, masker: OutputMasker):
         masked = masker.mask_result(ALERT)
-        entry = masked["target"][3]
+        entry = masked["target"][4]
         assert entry["value"] == DEV_SERIAL  # consistent with the clear devid
         assert entry["asset_value"] == DEV_SERIAL
         # endpoint targets still mask; only estate identity is exempt
@@ -451,8 +461,46 @@ class TestTargetDeviceIdentityConsistency:
         self, full_masker: OutputMasker
     ):
         masked = full_masker.mask_result(ALERT)
-        assert masked["target"][3]["value"] == masked["devid"]  # same identifier, same token
+        assert masked["target"][4]["value"] == masked["devid"]  # same identifier, same token
         assert DEV_SERIAL not in str(masked)
+
+
+class TestUrlHostMasking:
+    """``http_url``: the URL's HOST component masks in place; scheme, path
+    and query stay clear. Found leaking by the flag-on estate smoke — the
+    browsed destination survived inside the URL while the flat host_name
+    masked one key away."""
+
+    def test_url_host_masks_and_pair_with_flat_host_name(self, masker: OutputMasker):
+        masked = masker.mask_result(ALERT)
+        url = masked["event_details"]["http_url"]
+        assert BAD_DOMAIN not in url
+        assert url.startswith("https://host-") and url.endswith("/")
+        # same value, same token: flat host_name, host_name target, URL host
+        token = masked["event_details"]["host_name"]
+        assert url == f"https://{token}/"
+        assert masked["target"][3]["value"] == token
+
+    def test_ip_host_url(self, masker: OutputMasker):
+        masked = masker.mask_result({"http_url": f"http://{ENDPOINT_IP}:8080/admin"})
+        url = masked["http_url"]
+        assert ENDPOINT_IP not in url
+        assert url.startswith("http://") and url.endswith(":8080/admin")
+
+    def test_path_and_query_stay_clear(self, masker: OutputMasker):
+        masked = masker.mask_result({"http_url": f"https://{BAD_DOMAIN}/downloads/tool.zip?v=2"})
+        assert masked["http_url"].endswith("/downloads/tool.zip?v=2")
+        assert BAD_DOMAIN not in masked["http_url"]
+
+    def test_userinfo_url_fails_closed(self, masker: OutputMasker):
+        masked = masker.mask_result({"http_url": f"https://{ANALYST}@{BAD_DOMAIN}/"})
+        assert masked["http_url"].startswith("masked-unrepresentable-")
+        assert ANALYST not in masked["http_url"]
+
+    def test_non_url_value_falls_back_to_text_scan(self, masker: OutputMasker):
+        # An IP hiding in a non-URL string still gets caught by the scan.
+        masked = masker.mask_result({"http_url": f"redirect target {ENDPOINT_IP}"})
+        assert ENDPOINT_IP not in masked["http_url"]
 
 
 def _looks_like_web_domain(value: str) -> bool:

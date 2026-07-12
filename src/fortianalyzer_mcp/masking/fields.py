@@ -44,7 +44,13 @@ Out of scope here, by design:
   token (``wrapper._mask_incident_reporter``); anything else stays clear
   so alert ids survive intact.
 - ``url``/``referralurl`` need a URL-specific token design (alphabet and
-  length) and are deferred with it.
+  length) and are deferred with it. ``http_url`` (alert ``event_details``)
+  is the exception: live alerts carry a full URL whose host is the browsed
+  destination (``https://<domain>/``), so the HOST component is masked in
+  place (``COMPOSITE_URL_HOST``, ``wrapper._mask_url_host``) while path
+  and query stay clear — the destination leak closes without the full URL
+  design. Path/query segments embedding identifiers remain a documented
+  residual of the deferred URL work.
 - ``catdesc`` is a category label, not an identifier — masking it would
   only destroy analytic value.
 - Alert-handler config (``name``, ``template-url``, ``mitre-domain``)
@@ -243,7 +249,16 @@ TARGET_NAME_TYPES: dict[str, str] = {
     "device": IP_OR_HOST,
     "endpoint": IP_OR_HOST,
     "user": USERNAME,
+    # Live webfilter alerts carry the browsed destination as a host_name
+    # target; IP_OR_HOST keeps its token identical to the flat
+    # ``host_name`` field on the same record.
+    "host_name": IP_OR_HOST,
 }
+
+#: Keys holding a full URL whose HOST component is the identifier: the
+#: host is masked in place, scheme/path/query stay clear (the full URL
+#: token design is deferred; see the module docstring).
+COMPOSITE_URL_HOST = ("http_url",)
 
 # Values that carry no identifier and pass through unmasked.
 SKIP_VALUES = frozenset({"", "N/A", "n/a", "unknown", "none", "-"})
