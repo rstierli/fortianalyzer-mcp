@@ -131,6 +131,12 @@ class Settings(BaseSettings):
         description="Mask IOC/PII fields in tool outputs via FPE (requires FAZ_MASKING_KEY). "
         "Off by default; no behavior change unless enabled.",
     )
+    FAZ_MASKING_KEY: str | None = Field(
+        default=None,
+        description="FPE key (32/48/64 hex chars) for masking. Read here so it resolves "
+        "from .env consistently with MASKING_ENABLED; the masking engine otherwise reads "
+        "it from the process environment (e.g. a container's environment block).",
+    )
     FAZ_MASK_DEVICE_IDENTITY: bool = Field(
         default=False,
         description="Also mask device-identity fields (devname, devid, sn, csf). "

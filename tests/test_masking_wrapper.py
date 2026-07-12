@@ -17,6 +17,19 @@ from fortianalyzer_mcp.masking.wrapper import OutputMasker, install_masking
 KEY = "2DE79D232DF5585D68CE47882AE256D6"
 
 
+def _settings_with(**overrides: object) -> object:
+    """A stand-in settings object for install_masking's get_settings() call.
+
+    Defaults device-identity masking off; callers override the fields the
+    test cares about (e.g. FAZ_MASKING_KEY).
+    """
+    from types import SimpleNamespace
+
+    fields = {"FAZ_MASK_DEVICE_IDENTITY": False, "FAZ_MASKING_KEY": None}
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
 @pytest.fixture
 def masker(monkeypatch: pytest.MonkeyPatch) -> OutputMasker:
     monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
@@ -200,8 +213,35 @@ class TestInstallMasking:
     def test_install_without_key_fails_loud(self, monkeypatch: pytest.MonkeyPatch):
         from mcp.server.fastmcp import FastMCP
 
+        import fortianalyzer_mcp.utils.config as config_mod
         from fortianalyzer_mcp.masking.fpe_engine import MaskingError
 
+        # Neutralize BOTH key sources: the process environment and the
+        # Settings/.env value the fix bridges from (a local .env with a key
+        # would otherwise mask this crash — the very failure the fix prevents).
         monkeypatch.delenv("FAZ_MASKING_KEY", raising=False)
+        monkeypatch.setattr(
+            config_mod, "get_settings", lambda: _settings_with(FAZ_MASKING_KEY=None)
+        )
         with pytest.raises(MaskingError, match="FAZ_MASKING_KEY"):
             install_masking(FastMCP("test"))
+
+    def test_key_resolves_from_settings_when_not_in_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Regression: MASKING_ENABLED reads .env via Settings, but the engine
+        reads FAZ_MASKING_KEY from os.environ. If the key lives only in .env
+        (as the README documents), install_masking must bridge it or the
+        server crashes fail-closed on startup. A real env var still wins."""
+        from mcp.server.fastmcp import FastMCP
+
+        import fortianalyzer_mcp.utils.config as config_mod
+
+        monkeypatch.delenv("FAZ_MASKING_KEY", raising=False)
+        monkeypatch.setattr(config_mod, "get_settings", lambda: _settings_with(FAZ_MASKING_KEY=KEY))
+        masker, _ = install_masking(FastMCP("test"))
+        assert masker is not None
+        # the bridge exported it so the engine and placeholder key both see it
+        import os
+
+        assert os.environ.get("FAZ_MASKING_KEY") == KEY

@@ -547,8 +547,18 @@ def install_masking(mcp: Any) -> tuple[OutputMasker, ArgUnmasker]:
     """
     from fortianalyzer_mcp.utils.config import get_settings
 
+    settings = get_settings()
+    # The engine and the placeholder key both read FAZ_MASKING_KEY from the
+    # process environment. Settings additionally resolves it from .env (like
+    # MASKING_ENABLED), so bridge that value into the environment here when it
+    # is set there but not already exported — otherwise a deployment that put
+    # both the flag and the key in .env would enable masking, fail to find the
+    # key, and crash fail-closed. A real environment variable still wins.
+    if settings.FAZ_MASKING_KEY and not os.environ.get(MASKING_KEY_ENV):
+        os.environ[MASKING_KEY_ENV] = settings.FAZ_MASKING_KEY
+
     engine = FPEEngine.from_env()
-    masker = OutputMasker(engine, mask_device_identity=get_settings().FAZ_MASK_DEVICE_IDENTITY)
+    masker = OutputMasker(engine, mask_device_identity=settings.FAZ_MASK_DEVICE_IDENTITY)
     unmasker = ArgUnmasker(engine)
     original_tool = mcp.tool
 

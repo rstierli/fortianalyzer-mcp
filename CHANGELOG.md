@@ -5,6 +5,11 @@ All notable changes to FortiAnalyzer MCP Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Masking no longer crashes on startup when `FAZ_MASKING_KEY` is set only in `.env`.** `MASKING_ENABLED` is read through pydantic-settings (which loads `.env`), but the FPE engine read `FAZ_MASKING_KEY` straight from the process environment, which does not — so enabling masking via `.env` alone (exactly as the README documents) turned masking on, failed to find the key, and aborted fail-closed. `install_masking` now bridges the key from settings/`.env` into the environment when it is not already exported (a real environment variable, e.g. a container's, still wins). Regression test added.
+
 ## [2.9.0] - 2026-07-12
 
 Minor release: reversible data masking, RFC #40 Phases 0-2 — beta, behind `MASKING_ENABLED` (default **off**; no behavior change unless enabled; requires `FAZ_MASKING_KEY`). Flag-on live-validated on two estates across FAZ 7.6.7 and 8.0.0.
