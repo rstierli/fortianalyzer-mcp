@@ -232,6 +232,7 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
             log_tools,
             pcap_tools,
             report_tools,
+            soar_tools,
             system_tools,
             traffic_tools,
             ueba_tools,
@@ -284,6 +285,9 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
             "get_endpoints": ueba_tools.get_endpoints,
             "get_endpoint_vulnerabilities": ueba_tools.get_endpoint_vulnerabilities,
             "get_endusers": ueba_tools.get_endusers,
+            # SOAR tools (Wave-2 threat-intel readers)
+            "get_linked_indicators": soar_tools.get_linked_indicators,
+            "get_indicator_enrichment": soar_tools.get_indicator_enrichment,
             # FortiView tools
             "run_fortiview": fortiview_tools.run_fortiview,
             "fetch_fortiview": fortiview_tools.fetch_fortiview,
@@ -421,6 +425,7 @@ else:
         log_tools,
         pcap_tools,
         report_tools,
+        soar_tools,
         system_tools,
         traffic_tools,
         ueba_tools,

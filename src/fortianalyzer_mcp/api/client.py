@@ -1931,3 +1931,66 @@ class FortiAnalyzerClient:
                 "get", f"/eventmgmt/adom/{adom}/config/correlation-handler", apiver=API_VERSION
             )
         return result
+
+    # =========================================================================
+    # SOAR - Indicator reads (from soar.json) — Wave 2 threat-intel readers
+    # Read-only. The bare /indicator/enrichment path is ADD-only; the GET
+    # reads are /indicator, /alert/indicator, /incident/indicator and
+    # /indicator/enrichment/{uuid}. Feature-gated: requires SOAR licensed.
+    # =========================================================================
+
+    _NIL_UUID = "00000000-0000-0000-0000-000000000000"
+
+    async def get_linked_indicators(
+        self,
+        adom: str,
+        alert_id: str | None = None,
+        incident_id: str | None = None,
+        filter: str | None = None,
+    ) -> Any:
+        """Get IOC indicators linked to an alert or an incident.
+
+        FNDN: GET /soar/adom/{adom}/alert/indicator     (alert-id)
+              GET /soar/adom/{adom}/incident/indicator  (incident-id)
+
+        Exactly one of ``alert_id`` / ``incident_id`` must be given.
+        """
+        params: dict[str, Any] = {"apiver": API_VERSION}
+        if filter:
+            params["filter"] = filter
+        if alert_id:
+            params["alert-id"] = alert_id
+            return await self.get(f"/soar/adom/{adom}/alert/indicator", **params)
+        if incident_id:
+            params["incident-id"] = incident_id
+            return await self.get(f"/soar/adom/{adom}/incident/indicator", **params)
+        raise ValueError("provide exactly one of alert_id or incident_id")
+
+    async def get_indicator_enrichment(
+        self,
+        adom: str,
+        indicator_value: str,
+        indicator_type: str,
+        enrichment_uuid: str | None = None,
+        detail_level: str = "standard",
+    ) -> Any:
+        """Get IOC reputation/enrichment for an indicator.
+
+        FNDN: GET /soar/adom/{adom}/indicator/enrichment/{enrichment_uuid}
+
+        Addressable by ``indicator-type`` + ``indicator-value`` (verified
+        live) — the enrichment UUID path segment defaults to a nil UUID
+        when not supplied, since FAZ resolves by type+value. Returns
+        reputation (Good/Suspicious/Malicious/NoReputationAvailable),
+        confidence 0-100 and (extended) enrichment-detail.
+        """
+        uuid = enrichment_uuid or self._NIL_UUID
+        return await self.get(
+            f"/soar/adom/{adom}/indicator/enrichment/{uuid}",
+            apiver=API_VERSION,
+            **{
+                "indicator-type": indicator_type,
+                "indicator-value": indicator_value,
+                "detail-level": detail_level,
+            },
+        )
