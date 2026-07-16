@@ -146,9 +146,20 @@ class ArgUnmasker:
         if not host:
             return self.resolve_scalar(value)
         resolved_host = self.resolve_scalar(host, IP_OR_HOST)
-        tail = candidate[candidate.index(parts.netloc) + len(parts.netloc) :]
+        # Anchor after the ``//`` authority marker (a single-letter host
+        # matches inside the scheme from position 0), and pass through if
+        # the parsed netloc is not in the raw string at all (urlsplit
+        # strips tab/CR/LF, bpo-43882) — never raise for an argument.
+        try:
+            anchor = candidate.index("//") + 2
+            tail = candidate[candidate.index(parts.netloc, anchor) + len(parts.netloc) :]
+        except ValueError:
+            return value
         resolved_tail = tail
-        if tail.startswith("/url-"):
+        # Case-insensitive gate: the other token forms tolerate a model
+        # re-casing them in prose, and the url tail payload is lowercase
+        # over a case-insensitive alphabet, so this one must too.
+        if tail[:5].lower() == "/url-":
             try:
                 resolved_tail = self._engine.unmask_url_tail(tail[1:])
             except MaskingError:

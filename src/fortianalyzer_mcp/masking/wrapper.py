@@ -464,7 +464,7 @@ class OutputMasker:
         only a truly empty remainder short-circuits. Carry-and-reverse:
         substring search inside the tail is an accepted, documented loss.
         """
-        from urllib.parse import urlsplit
+        from urllib.parse import unquote, urlsplit
 
         stripped = value.strip()
         try:
@@ -479,24 +479,40 @@ class OutputMasker:
             # secret, so the whole value fails closed (#40 decision).
             return self.placeholder(value)
         if not host:
-            if "%" in stripped and not any(ch.isspace() for ch in stripped):
-                # Live webfilter shape (both 7.6.7 and 8.0.0): the whole
-                # URL arrives percent-encoded (scheme as ``%3A%2F%2F``),
-                # so nothing parses as a host and the free-text fallback
-                # cannot see the hostname behind the ``%2F`` boundaries —
-                # the flag-on live round caught it leaking. Seal the
-                # entire value as one reversible url token instead.
-                try:
-                    return self._engine.mask_url_tail(stripped)
-                except MaskingError:
-                    return self.placeholder(value)
-            return self.mask_text(value, mapping)
+            if not stripped or stripped in SKIP_VALUES:
+                return value
+            # No parseable host: the live webfilter shape (whole URL
+            # percent-encoded, scheme as ``%3A%2F%2F``) and the classic
+            # schemeless log shapes (``www.example.com/uri``, ``/uri``,
+            # ``example.com:8080/x`` where urlsplit reads the host as the
+            # scheme) all land here, and the free-text fallback leaked
+            # them — the flag-on live round caught the encoded form, the
+            # post-open adversarial review the schemeless ones. Seal the
+            # entire value as one reversible url token; percent-encoded
+            # userinfo (``%40`` before the first encoded slash boundary)
+            # still fails closed per the credentials decision.
+            decoded_head = unquote(stripped).partition("://")[2] or unquote(stripped)
+            if "@" in decoded_head.partition("/")[0]:
+                return self.placeholder(value)
+            try:
+                return self._engine.mask_url_tail(stripped)
+            except MaskingError:
+                return self.placeholder(value)
         masked_host = self._mask_scalar(IP_OR_HOST, host, mapping)
         if ":" in masked_host:  # IPv6 literal: re-bracket
             masked_host = f"[{masked_host}]"
         netloc = f"{masked_host}:{port}" if port is not None else masked_host
         prefix = f"{parts.scheme}://" if parts.scheme else "//"
-        tail = stripped[stripped.index(parts.netloc) + len(parts.netloc) :]
+        # Anchor the netloc search after the ``//`` authority marker: from
+        # position 0 a single-letter host matches inside the scheme
+        # ("https://h") and mis-slices the tail. urlsplit also strips
+        # tab/CR/LF (bpo-43882), so the parsed netloc may not exist in the
+        # raw string at all; that fails closed instead of raising.
+        try:
+            anchor = stripped.index("//") + 2
+            tail = stripped[stripped.index(parts.netloc, anchor) + len(parts.netloc) :]
+        except ValueError:
+            return self.placeholder(value)
         if not tail:
             return f"{prefix}{netloc}"
         try:
@@ -517,6 +533,14 @@ class OutputMasker:
             return self._mask_url_host(value, mapping)
         if lowered in COMPOSITE_URL_FULL and isinstance(value, str):
             return self._mask_url_full(value, mapping)
+        if lowered in COMPOSITE_URL_FULL and isinstance(value, list):
+            # same list convention the typed fields handle below
+            return [
+                self._mask_url_full(item, mapping)
+                if isinstance(item, str)
+                else self._mask_structured(item, mapping, keep)
+                for item in value
+            ]
         if lowered in COMPOSITE_TARGET and isinstance(value, list):
             return self._mask_target(value, mapping, keep)
         if lowered in COMPOSITE_DEVICE_VDOM and isinstance(value, str):

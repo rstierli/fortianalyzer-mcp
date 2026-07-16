@@ -326,3 +326,25 @@ class TestUrlRoundTrip:
         masked = masker.mask_result({"url": encoded})["url"]
         assert masked.startswith("url-")
         assert unmasker.unmask_args({"url": masked})["url"] == encoded
+
+    def test_schemeless_sealed_url_round_trips(self, masker: OutputMasker, unmasker: ArgUnmasker):
+        raw = "intranet.example.com/login?user=jdoe"
+        masked = masker.mask_result({"url": raw})["url"]
+        assert masked.startswith("url-")
+        assert unmasker.unmask_args({"url": masked})["url"] == raw
+
+    def test_single_letter_and_scheme_named_hosts_round_trip(
+        self, masker: OutputMasker, unmasker: ArgUnmasker
+    ):
+        for raw in ("https://h", "https://h/x", "http://http/x"):
+            masked = masker.mask_result({"url": raw})["url"]
+            assert unmasker.unmask_args({"url": masked})["url"] == raw
+
+    def test_recased_masked_url_still_resolves(self, masker: OutputMasker, unmasker: ArgUnmasker):
+        raw = "https://intranet.example.com/a/b?c=d"
+        masked = masker.mask_result({"url": raw})["url"]
+        assert unmasker.unmask_args({"url": masked.upper()})["url"] == raw
+
+    def test_control_char_url_passes_through_without_raising(self, unmasker: ArgUnmasker):
+        hostile = "http://exa\tmple.com/x"
+        assert unmasker.unmask_args({"url": hostile})["url"] == hostile

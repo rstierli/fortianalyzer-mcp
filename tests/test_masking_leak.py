@@ -696,9 +696,12 @@ class TestUrlFullMasking:
         assert masked["url"].startswith("https://host-")
         assert ":8443/" in masked["url"]
 
-    def test_non_url_value_falls_back_to_text_scan(self, masker: OutputMasker):
+    def test_non_url_value_seals_whole(self, masker: OutputMasker):
+        # No parseable host: anything lands in the whole-value seal, so
+        # even free-text junk in the field carries no identifier out.
         masked = masker.mask_result({"url": f"visited {ENDPOINT_IP} twice"})
         assert ENDPOINT_IP not in masked["url"]
+        assert masked["url"].startswith("url-")
 
     def test_percent_encoded_url_seals_whole_value(self, masker: OutputMasker):
         # The live webfilter shape on both 7.6.7 and 8.0.0: the url field
@@ -713,3 +716,43 @@ class TestUrlFullMasking:
         assert masked["url"].startswith("url-")
         # the record keeps the masked-host correlation through the sibling
         assert masked["hostname"].startswith("host-")
+
+    def test_schemeless_url_seals_whole(self, masker: OutputMasker):
+        # Classic FAZ webfilter shapes carry no scheme; urlsplit finds no
+        # host and the old fallback leaked the whole value raw (found by
+        # the post-open adversarial review).
+        for raw in (f"{BAD_DOMAIN}/login?user={ANALYST}", "/download/report-jdoe.pdf"):
+            masked = masker.mask_result({"url": raw})["url"]
+            assert masked.startswith("url-")
+            assert BAD_DOMAIN not in masked and "login" not in masked and "jdoe" not in masked
+
+    def test_control_chars_in_netloc_do_not_kill_the_result(self, masker: OutputMasker):
+        # urlsplit strips tab/CR/LF (bpo-43882) so the parsed netloc is not
+        # a substring of the raw value; the naive .index() raised and the
+        # whole multi-row result failed closed.
+        hostile = "http://exa\tmple.com/x"
+        masked = masker.mask_result({"url": hostile, "other": "keep"})
+        assert masked.get("other") == "keep"  # result survived
+        assert "example.com" not in str(masked["url"])
+
+    def test_single_letter_host_short_circuits(self, masker: OutputMasker):
+        # 'https://h': .index() from position 0 found the 'h' inside the
+        # scheme, mis-slicing the tail. The empty remainder must short
+        # circuit with no url- token.
+        masked = masker.mask_result({"url": "https://h"})["url"]
+        assert "url-" not in masked
+        assert masked.startswith("https://host-")
+
+    def test_list_valued_url_masks(self, masker: OutputMasker):
+        masked = masker.mask_result({"url": [f"https://{BAD_DOMAIN}/a/b"]})["url"]
+        assert isinstance(masked, list)
+        assert BAD_DOMAIN not in str(masked)
+
+    def test_percent_encoded_userinfo_fails_closed(self, masker: OutputMasker):
+        # Roland's decision: credentials never ride a reversible token.
+        # The percent-encoded live shape can smuggle userinfo past the
+        # netloc check; decode-and-inspect closes it.
+        encoded = f"https%3A%2F%2F{ANALYST}%3Asecret%40{BAD_DOMAIN}%2Fpath"
+        masked = masker.mask_result({"url": encoded})["url"]
+        assert masked.startswith("masked-unrepresentable-")
+        assert ANALYST not in masked and "secret" not in masked
