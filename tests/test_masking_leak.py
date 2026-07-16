@@ -646,3 +646,56 @@ class TestHandlerDescription:
         masked = masker.mask_result(HANDLER)
         assert GATEWAY_IP not in masked["description"]
         assert SOC_EMAIL not in masked["description"]
+
+
+class TestUrlFullMasking:
+    """``url``/``referralurl``: host masks in place, the whole tail
+    (path+query+fragment) seals into one reversible ``url-`` token.
+    Maintainer decision on #40: these fields are carry-and-reverse, not
+    greppable; scheme and port stay clear; credentials fail closed."""
+
+    def test_tail_identifiers_do_not_survive(self, masker: OutputMasker):
+        raw = f"https://{BAD_DOMAIN}/employees/{ANALYST}/profile?dept=finance&user={ANALYST}#t"
+        masked = masker.mask_result({"url": raw})
+        out = masked["url"]
+        assert BAD_DOMAIN not in out
+        assert ANALYST not in out
+        assert "finance" not in out
+        assert "employees" not in out
+
+    def test_masked_url_shape(self, masker: OutputMasker):
+        masked = masker.mask_result({"url": f"https://{BAD_DOMAIN}/a/b?c=d"})
+        out = masked["url"]
+        scheme, rest = out.split("://", 1)
+        assert scheme == "https"
+        host_part, _, tail_part = rest.partition("/")
+        assert host_part.startswith("host-")
+        assert tail_part.startswith("url-") and "/" not in tail_part
+
+    def test_bare_host_and_bare_slash_stay_distinct(self, masker: OutputMasker):
+        no_slash = masker.mask_result({"url": f"https://{BAD_DOMAIN}"})["url"]
+        with_slash = masker.mask_result({"url": f"https://{BAD_DOMAIN}/"})["url"]
+        assert no_slash != with_slash
+        assert "url-" not in no_slash  # empty remainder short-circuits
+        assert "url-" in with_slash  # bare / goes through the token path
+
+    def test_referralurl_same_treatment_and_host_correlates(self, masker: OutputMasker):
+        masked = masker.mask_result(
+            {"referralurl": f"https://{BAD_DOMAIN}/from?x=1", "host_name": BAD_DOMAIN}
+        )
+        host_token = masked["host_name"]
+        assert masked["referralurl"].startswith(f"https://{host_token}/url-")
+
+    def test_userinfo_fails_closed_whole_value(self, masker: OutputMasker):
+        masked = masker.mask_result({"url": f"https://{ANALYST}:secret@{BAD_DOMAIN}/x"})
+        assert masked["url"].startswith("masked-unrepresentable-")
+        assert ANALYST not in masked["url"] and "secret" not in masked["url"]
+
+    def test_port_preserved_scheme_clear(self, masker: OutputMasker):
+        masked = masker.mask_result({"url": f"https://{BAD_DOMAIN}:8443/x/y"})
+        assert masked["url"].startswith("https://host-")
+        assert ":8443/" in masked["url"]
+
+    def test_non_url_value_falls_back_to_text_scan(self, masker: OutputMasker):
+        masked = masker.mask_result({"url": f"visited {ENDPOINT_IP} twice"})
+        assert ENDPOINT_IP not in masked["url"]

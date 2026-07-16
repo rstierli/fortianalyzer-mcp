@@ -43,14 +43,24 @@ Out of scope here, by design:
   equals the sibling ``reporter``/``lastuser`` it masks with the same
   token (``wrapper._mask_incident_reporter``); anything else stays clear
   so alert ids survive intact.
-- ``url``/``referralurl`` need a URL-specific token design (alphabet and
-  length) and are deferred with it. ``http_url`` (alert ``event_details``)
-  is the exception: live alerts carry a full URL whose host is the browsed
-  destination (``https://<domain>/``), so the HOST component is masked in
-  place (``COMPOSITE_URL_HOST``, ``wrapper._mask_url_host``) while path
-  and query stay clear — the destination leak closes without the full URL
-  design. Path/query segments embedding identifiers remain a documented
-  residual of the deferred URL work.
+- ``url``/``referralurl`` are carry-and-reverse (#40 decision): the host
+  masks in place and the whole tail (path+query+fragment) seals into one
+  reversible ``url-<kid>-<ct>`` token (``COMPOSITE_URL_FULL``,
+  ``wrapper._mask_url_full``). The raw tail is base32-shielded before
+  encryption so hostile bytes (``~``, percent-encoding, mixed case,
+  non-ASCII) ride the existing string cipher and round-trip exactly.
+  Documented residuals: scheme and port stay clear; the token length
+  reveals the tail's byte length (base32 is a fixed ~1.6x expansion and
+  FF3 is length-preserving); identical tails and shared-first-chunk
+  prefixes correlate, the same chunking residual as every string type;
+  and substring search inside the tail (``url contain "/login"``) is an
+  accepted loss. ``http_url`` (alert ``event_details``) stays HOST-only
+  by the same decision: live alerts carry a full URL whose host is the
+  browsed destination, so the host masks in place
+  (``COMPOSITE_URL_HOST``, ``wrapper._mask_url_host``) while path and
+  query stay clear — upgrading it to the full-tail treatment is a GA-time
+  call behind its own flag. Path/query identifiers in ``http_url`` remain
+  its documented residual.
 - ``catdesc`` is a category label, not an identifier — masking it would
   only destroy analytic value.
 - Alert-handler config (``name``, ``template-url``, ``mitre-domain``)
@@ -256,9 +266,16 @@ TARGET_NAME_TYPES: dict[str, str] = {
 }
 
 #: Keys holding a full URL whose HOST component is the identifier: the
-#: host is masked in place, scheme/path/query stay clear (the full URL
-#: token design is deferred; see the module docstring).
+#: host is masked in place, scheme/path/query stay clear (kept host-only
+#: by the #40 decision; may upgrade to the full-tail treatment at GA
+#: behind its own flag).
 COMPOSITE_URL_HOST = ("http_url",)
+
+#: Keys holding a full URL treated as carry-and-reverse (#40 decision):
+#: the host masks in place exactly like COMPOSITE_URL_HOST, and the whole
+#: tail (path+query+fragment) seals into one reversible ``url-`` token.
+#: Substring search inside the tail is an accepted, documented loss.
+COMPOSITE_URL_FULL = ("url", "referralurl")
 
 # Values that carry no identifier and pass through unmasked.
 SKIP_VALUES = frozenset({"", "N/A", "n/a", "unknown", "none", "-"})

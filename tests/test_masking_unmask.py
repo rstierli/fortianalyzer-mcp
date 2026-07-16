@@ -266,3 +266,54 @@ class TestRoundTripDocumentedLimits:
         insensitive; worth knowing for device names that are not."""
         token = masker.mask_result({"srcname": "FGT-BRANCH-01"})["srcname"]
         assert unmasker.unmask_args({"srcname": token})["srcname"] == "fgt-branch-01"
+
+
+class TestUrlRoundTrip:
+    """The load-bearing unmask path (#40 decision): a masked URL handed
+    back whole — as a url argument or inside a filter — must decompose,
+    resolve host and tail, and reassemble the exact original before FAZ
+    sees it. A miss here is the silent-zero-rows failure class."""
+
+    RAW = "https://intranet.example.com/portal/login.aspx?returnUrl=/dashboard&sid=8471#top"
+
+    def _masked(self, masker: OutputMasker) -> str:
+        return masker.mask_result({"url": self.RAW})["url"]
+
+    def test_whole_masked_url_argument_resolves(self, masker: OutputMasker, unmasker: ArgUnmasker):
+        masked = self._masked(masker)
+        assert masked != self.RAW
+        out = unmasker.unmask_args({"url": masked})
+        assert out["url"] == self.RAW
+
+    def test_referralurl_argument_resolves(self, masker: OutputMasker, unmasker: ArgUnmasker):
+        masked = masker.mask_result({"referralurl": self.RAW})["referralurl"]
+        assert unmasker.unmask_args({"referralurl": masked})["referralurl"] == self.RAW
+
+    def test_masked_url_inside_filter_resolves(self, masker: OutputMasker, unmasker: ArgUnmasker):
+        raw = "https://intranet.example.com/a/b?c=d"
+        masked = masker.mask_result({"url": raw})["url"]
+        resolved = unmasker.unmask_filter(f'url=="{masked}"')
+        assert resolved == f'url=="{raw}"'
+
+    def test_ip_literal_host_round_trips(self, masker: OutputMasker, unmasker: ArgUnmasker):
+        raw = "http://192.0.2.19:8080/admin?x=1"
+        masked = masker.mask_result({"url": raw})["url"]
+        assert "192.0.2.19" not in masked
+        assert unmasker.unmask_args({"url": masked})["url"] == raw
+
+    def test_bare_host_and_bare_slash_round_trip_distinctly(
+        self, masker: OutputMasker, unmasker: ArgUnmasker
+    ):
+        for raw in ("https://intranet.example.com", "https://intranet.example.com/"):
+            masked = masker.mask_result({"url": raw})["url"]
+            assert unmasker.unmask_args({"url": masked})["url"] == raw
+
+    def test_remask_of_unmasked_url_reproduces_token(
+        self, masker: OutputMasker, unmasker: ArgUnmasker
+    ):
+        masked = self._masked(masker)
+        raw = unmasker.unmask_args({"url": masked})["url"]
+        assert masker.mask_result({"url": raw})["url"] == masked
+
+    def test_real_url_passes_through(self, unmasker: ArgUnmasker):
+        assert unmasker.unmask_args({"url": self.RAW})["url"] == self.RAW

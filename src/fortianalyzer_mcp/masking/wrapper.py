@@ -37,8 +37,8 @@ yields exactly the token the caller sent, so follow-up turns stay
 consistent.
 
 This module is the OUTPUT side. Argument unmasking (Phase 2) lives in
-``unmask.py`` and is applied by the same registration patch. URL masking
-and IPv6-in-text scanning are not yet handled. Device identity
+``unmask.py`` and is applied by the same registration patch.
+IPv6-in-text scanning is not yet handled. Device identity
 (``devname``, ``devid``, ``sn``, ``csf``, ``fortigate``, ``devvds``,
 ``detectkey``) is masked only when ``FAZ_MASK_DEVICE_IDENTITY`` is set, so
 by default a masked record still fingerprints the reporting device.
@@ -61,6 +61,7 @@ from fortianalyzer_mcp.masking.fields import (
     COMPOSITE_JSON,
     COMPOSITE_PREFIXED,
     COMPOSITE_TARGET,
+    COMPOSITE_URL_FULL,
     COMPOSITE_URL_HOST,
     DEVICE_IDENTITY_TYPES,
     DOMAIN,
@@ -451,6 +452,48 @@ class OutputMasker:
         netloc = f"{masked_host}:{port}" if port is not None else masked_host
         return parts._replace(netloc=netloc).geturl()
 
+    def _mask_url_full(self, value: str, mapping: dict[str, str]) -> str:
+        """``url``/``referralurl``: host in place, tail sealed (#40 decision).
+
+        The host masks exactly like :meth:`_mask_url_host` (same guards,
+        same token as a sibling ``host_name`` for hostname values). The
+        raw remainder after ``scheme://netloc`` — taken verbatim, so ``?``
+        and ``#`` appear only when actually present — seals into a single
+        reversible ``url-<kid>-<ct>`` path segment. A bare ``/`` goes
+        through the token path so ``…/h`` and ``…/h/`` stay distinct;
+        only a truly empty remainder short-circuits. Carry-and-reverse:
+        substring search inside the tail is an accepted, documented loss.
+        """
+        from urllib.parse import urlsplit
+
+        stripped = value.strip()
+        try:
+            parts = urlsplit(stripped)
+            host = parts.hostname or ""
+            port = parts.port
+        except ValueError:
+            return self.placeholder(value)
+        if "@" in parts.netloc:
+            # Credentials inside the URL are themselves an identifier;
+            # a reversible userinfo token would hand back a recoverable
+            # secret, so the whole value fails closed (#40 decision).
+            return self.placeholder(value)
+        if not host:
+            return self.mask_text(value, mapping)
+        masked_host = self._mask_scalar(IP_OR_HOST, host, mapping)
+        if ":" in masked_host:  # IPv6 literal: re-bracket
+            masked_host = f"[{masked_host}]"
+        netloc = f"{masked_host}:{port}" if port is not None else masked_host
+        prefix = f"{parts.scheme}://" if parts.scheme else "//"
+        tail = stripped[stripped.index(parts.netloc) + len(parts.netloc) :]
+        if not tail:
+            return f"{prefix}{netloc}"
+        try:
+            token = self._engine.mask_url_tail(tail)
+        except MaskingError:
+            return self.placeholder(value)
+        return f"{prefix}{netloc}/{token}"
+
     def _mask_entry(
         self, key: str, value: Any, mapping: dict[str, str], keep: frozenset[str] = frozenset()
     ) -> Any:
@@ -461,6 +504,8 @@ class OutputMasker:
             return self._mask_json_blob(value, mapping)
         if lowered in COMPOSITE_URL_HOST and isinstance(value, str):
             return self._mask_url_host(value, mapping)
+        if lowered in COMPOSITE_URL_FULL and isinstance(value, str):
+            return self._mask_url_full(value, mapping)
         if lowered in COMPOSITE_TARGET and isinstance(value, list):
             return self._mask_target(value, mapping, keep)
         if lowered in COMPOSITE_DEVICE_VDOM and isinstance(value, str):

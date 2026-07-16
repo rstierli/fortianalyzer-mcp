@@ -24,8 +24,18 @@ documented, same family as the IP wrinkle below.
     domain    ``<ct>.<kid>.<mask_suffix>``
     hostname  ``host-<kid>-<ct>``
     username  ``user-<kid>-<ct>``
+    url tail  ``url-<kid>-<ct>``
     ipv4/ipv6 valid-looking address, FPE over the full 32/128 bits
     mac       valid-looking MAC, FPE over the full 48 bits
+
+URL tails (a ``url``/``referralurl`` value's path+query+fragment) are
+utf-8 encoded and lowercase-base32'd before encryption: base32 output is
+a strict subset of the string alphabet and never contains the pad char,
+so arbitrary bytes ride the existing cipher, chunking and pad unchanged
+and the round trip is byte-exact. The token length reveals the tail's
+byte length (base32 is a fixed ~1.6x expansion and FF3 is
+length-preserving) — a documented residual, like the chunking prefix
+equality which applies to these tails too.
 
 ``mask_suffix`` defaults to ``masked.invalid`` — the ``.invalid`` TLD is
 reserved (RFC 2606), so a leaked token can never resolve to a real host.
@@ -70,6 +80,7 @@ The key is a secret (AES-128/192/256 as hex). It must never be logged;
 this module never includes key material in exceptions.
 """
 
+import base64
 import hashlib
 import ipaddress
 import os
@@ -110,6 +121,7 @@ _TWEAK_LABELS = {
     "username": "faz-mcp-fpe:v1:username",
     "domain": "faz-mcp-fpe:v1:domain",
     "email_local": "faz-mcp-fpe:v1:email-local",
+    "url_tail": "faz-mcp-fpe:v1:url-tail",
 }
 
 
@@ -319,6 +331,36 @@ class FPEEngine:
         return f"{self._decrypt_str('email_local', local)}@{self._decrypt_str('domain', domain_ct)}"
 
     # ------------------------------------------------------------------ #
+    # URL tails                                                          #
+    # ------------------------------------------------------------------ #
+
+    def mask_url_tail(self, value: str) -> str:
+        """Mask a URL tail (path+query+fragment) into a ``url-<kid>-<ct>`` token.
+
+        The raw tail is utf-8 encoded and lowercase-base32'd before
+        encryption, so arbitrary bytes (``~``, percent-encoding, mixed
+        case, non-ASCII) ride the existing string cipher without touching
+        its alphabet or pad conventions: base32 output (``a-z2-7``) is a
+        strict subset of ``_STR_ALPHABET`` and never contains the pad char.
+        """
+        if not value:
+            raise MaskingError("cannot mask an empty URL tail")
+        encoded = base64.b32encode(value.encode()).decode("ascii").lower().rstrip("=")
+        return f"url-{self._key_id}-{self._encrypt_str('url_tail', encoded)}"
+
+    def unmask_url_tail(self, token: str) -> str:
+        """Reverse :meth:`mask_url_tail`, returning the exact original tail."""
+        payload = self._strip_prefix(token, "url-")
+        encoded = self._decrypt_str("url_tail", self._split_key_id(payload, token))
+        try:
+            raw = base64.b32decode(encoded.upper() + "=" * (-len(encoded) % 8))
+            return raw.decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as exc:
+            # A corrupted/re-encoded ciphertext dies here, loudly, instead
+            # of decrypting to plausible garbage.
+            raise MaskingError(f"cannot unmask url token: {exc}") from exc
+
+    # ------------------------------------------------------------------ #
     # Generic token recognition (marked types only)                      #
     # ------------------------------------------------------------------ #
 
@@ -353,6 +395,8 @@ class FPEEngine:
             return self.unmask_hostname(candidate)
         if candidate.startswith("user-"):
             return self.unmask_username(stripped)
+        if candidate.startswith("url-"):
+            return self.unmask_url_tail(candidate)
         return None
 
     # ------------------------------------------------------------------ #

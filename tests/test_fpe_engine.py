@@ -335,3 +335,48 @@ class TestKeyId:
             engine.unmask_hostname("host-abcdef")
         with pytest.raises(MaskingError, match="key id"):
             engine.unmask_domain("abcdef.masked.invalid")
+
+
+# --------------------------------------------------------------------- #
+# URL tails (RFC #40 url/referralurl design)                            #
+# --------------------------------------------------------------------- #
+
+
+class TestUrlTailMasking:
+    def test_round_trip_preserves_exact_tail(self, engine: FPEEngine):
+        tail = "/portal/login.aspx?returnUrl=/dashboard&sid=8471#top"
+        token = engine.mask_url_tail(tail)
+        assert token.startswith(f"url-{engine.key_id}-")
+        assert engine.unmask_url_tail(token) == tail
+
+    def test_unmask_token_recognizes_url_marker(self, engine: FPEEngine):
+        tail = "/download?file=Q3_report.pdf"
+        token = engine.mask_url_tail(tail)
+        assert engine.unmask_token(token) == tail
+
+    def test_unmask_token_wrong_key_fails_loudly(self, engine: FPEEngine):
+        token = engine.mask_url_tail("/a/b?c=d")
+        other = FPEEngine(OTHER_KEY)
+        with pytest.raises(MaskingError):
+            other.unmask_token(token)
+
+    @pytest.mark.parametrize(
+        "tail",
+        [
+            "/~jdoe/home",  # ~ would trip the pad-char guard unshielded
+            "/search?q=caf%C3%A9&x=%2Fetc",  # percent-encoding
+            "/Portal/Login.ASPX?ReturnUrl=/Dash",  # mixed case must survive
+            "/wiki/café?tag=日本語",  # raw non-ASCII
+            "/",  # bare slash: distinct from empty, must round-trip
+            "/a?b=c&d=e#frag",  # query + fragment
+        ],
+    )
+    def test_hostile_bytes_round_trip_exactly(self, engine: FPEEngine, tail: str):
+        assert engine.unmask_url_tail(engine.mask_url_tail(tail)) == tail
+
+    def test_deterministic(self, engine: FPEEngine):
+        assert engine.mask_url_tail("/x/y?z=1") == engine.mask_url_tail("/x/y?z=1")
+
+    def test_token_is_url_safe_single_segment(self, engine: FPEEngine):
+        token = engine.mask_url_tail("/portal/login.aspx?returnUrl=/dashboard&sid=8471#top")
+        assert "/" not in token and "?" not in token and "#" not in token

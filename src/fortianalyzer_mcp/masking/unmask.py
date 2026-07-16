@@ -50,7 +50,14 @@ import logging
 import re
 from typing import Any
 
-from fortianalyzer_mcp.masking.fields import FIELD_TYPES, IP, IP_OR_HOST, MAC, SKIP_VALUES
+from fortianalyzer_mcp.masking.fields import (
+    COMPOSITE_URL_FULL,
+    FIELD_TYPES,
+    IP,
+    IP_OR_HOST,
+    MAC,
+    SKIP_VALUES,
+)
 from fortianalyzer_mcp.masking.fpe_engine import FPEEngine, MaskingError
 
 logger = logging.getLogger(__name__)
@@ -113,6 +120,52 @@ class ArgUnmasker:
             return self._unmask_by_type(vtype, candidate)
         return value
 
+    # -- masked URLs (#40 url/referralurl) ---------------------------------- #
+
+    def resolve_url(self, value: str) -> str:
+        """Resolve a masked ``url``/``referralurl`` back to the original.
+
+        Decompose, resolve, reassemble: the host resolves through the same
+        field-context route as any ``IP_OR_HOST`` argument (marked-token
+        check first, then the ``unmask_ip`` fallback, so an IP-literal
+        host round-trips too), and a ``/url-<kid>-<ct>`` tail segment
+        decodes back to the exact original path+query+fragment. A URL
+        that carries neither passes through untouched. This path is
+        load-bearing: without it a masked URL handed back whole would
+        reach FAZ still tokenized and silently match zero rows.
+        """
+        from urllib.parse import urlsplit
+
+        candidate = value.strip()
+        try:
+            parts = urlsplit(candidate)
+            host = parts.hostname or ""
+            port = parts.port
+        except ValueError:
+            return value
+        if not host:
+            return self.resolve_scalar(value)
+        resolved_host = self.resolve_scalar(host, IP_OR_HOST)
+        tail = candidate[candidate.index(parts.netloc) + len(parts.netloc) :]
+        resolved_tail = tail
+        if tail.startswith("/url-"):
+            try:
+                resolved_tail = self._engine.unmask_url_tail(tail[1:])
+            except MaskingError:
+                # Marker present but the payload will not decrypt: leave the
+                # whole URL alone so the downstream validator rejects it.
+                logger.warning(
+                    "url argument carries a url- tail token that does not decrypt; passed through"
+                )
+                return value
+        if resolved_host == host and resolved_tail == tail:
+            return value
+        if ":" in resolved_host:  # IPv6 literal: re-bracket
+            resolved_host = f"[{resolved_host}]"
+        netloc = f"{resolved_host}:{port}" if port is not None else resolved_host
+        prefix = f"{parts.scheme}://" if parts.scheme else "//"
+        return f"{prefix}{netloc}{resolved_tail}"
+
     # -- filter expressions ------------------------------------------------ #
 
     def unmask_filter(self, expression: str) -> str:
@@ -126,8 +179,11 @@ class ArgUnmasker:
         def clause_sub(match: re.Match[str]) -> str:
             field = match.group("field")
             raw = match.group("value")
-            vtype = FIELD_TYPES.get(field.lower())
-            resolved = self.resolve_scalar(raw, vtype)
+            if field.lower() in COMPOSITE_URL_FULL:
+                resolved = self.resolve_url(raw)
+            else:
+                vtype = FIELD_TYPES.get(field.lower())
+                resolved = self.resolve_scalar(raw, vtype)
             if resolved == raw:
                 return match.group(0)
             return match.group(0).replace(raw, resolved)
@@ -145,6 +201,8 @@ class ArgUnmasker:
         if isinstance(value, str):
             if lowered in ("filter", "filter_applied"):
                 return self.unmask_filter(value)
+            if lowered in COMPOSITE_URL_FULL:
+                return self.resolve_url(value)
             vtype = FIELD_TYPES.get(lowered)
             if vtype in (IP, MAC, IP_OR_HOST):
                 # comma-joined multi-values, same convention as the output side
