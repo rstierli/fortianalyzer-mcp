@@ -699,3 +699,17 @@ class TestUrlFullMasking:
     def test_non_url_value_falls_back_to_text_scan(self, masker: OutputMasker):
         masked = masker.mask_result({"url": f"visited {ENDPOINT_IP} twice"})
         assert ENDPOINT_IP not in masked["url"]
+
+    def test_percent_encoded_url_seals_whole_value(self, masker: OutputMasker):
+        # The live webfilter shape on both 7.6.7 and 8.0.0: the url field
+        # carries the whole URL percent-encoded (scheme as %3A%2F%2F), so
+        # nothing parses as a host and the free-text fallback cannot see
+        # the hostname behind the %2F boundary. Found by the flag-on live
+        # round; the whole raw value seals as one url token instead.
+        encoded = f"https%3A%2F%2F{BAD_DOMAIN}%2Fportal%2Flogin%3Fuser%3D{ANALYST}"
+        masked = masker.mask_result({"url": encoded, "hostname": BAD_DOMAIN})
+        assert BAD_DOMAIN not in masked["url"]
+        assert ANALYST not in masked["url"]
+        assert masked["url"].startswith("url-")
+        # the record keeps the masked-host correlation through the sibling
+        assert masked["hostname"].startswith("host-")

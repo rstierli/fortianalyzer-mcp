@@ -479,6 +479,17 @@ class OutputMasker:
             # secret, so the whole value fails closed (#40 decision).
             return self.placeholder(value)
         if not host:
+            if "%" in stripped and not any(ch.isspace() for ch in stripped):
+                # Live webfilter shape (both 7.6.7 and 8.0.0): the whole
+                # URL arrives percent-encoded (scheme as ``%3A%2F%2F``),
+                # so nothing parses as a host and the free-text fallback
+                # cannot see the hostname behind the ``%2F`` boundaries —
+                # the flag-on live round caught it leaking. Seal the
+                # entire value as one reversible url token instead.
+                try:
+                    return self._engine.mask_url_tail(stripped)
+                except MaskingError:
+                    return self.placeholder(value)
             return self.mask_text(value, mapping)
         masked_host = self._mask_scalar(IP_OR_HOST, host, mapping)
         if ":" in masked_host:  # IPv6 literal: re-bracket

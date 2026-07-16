@@ -317,3 +317,12 @@ class TestUrlRoundTrip:
 
     def test_real_url_passes_through(self, unmasker: ArgUnmasker):
         assert unmasker.unmask_args({"url": self.RAW})["url"] == self.RAW
+
+    def test_percent_encoded_url_round_trips(self, masker: OutputMasker, unmasker: ArgUnmasker):
+        # The live webfilter shape: whole URL percent-encoded, masks to a
+        # bare url token; handing that token back as a url argument must
+        # restore the exact encoded original.
+        encoded = "https%3A%2F%2Fintranet.example.com%2Fportal%2Flogin%3Fuser%3Djdoe"
+        masked = masker.mask_result({"url": encoded})["url"]
+        assert masked.startswith("url-")
+        assert unmasker.unmask_args({"url": masked})["url"] == encoded
