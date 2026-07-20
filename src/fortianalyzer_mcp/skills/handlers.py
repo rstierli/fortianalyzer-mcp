@@ -24,7 +24,15 @@ from typing import Any
 
 from fortianalyzer_mcp.skills.models import (
     AlertEvidence,
+    AlertRuleHandler,
+    AlertRulesParams,
+    AlertRulesResult,
+    AssetLookupParams,
+    AssetLookupResult,
+    AssetRecord,
     FeatureGap,
+    IdentityLookupParams,
+    IdentityLookupResult,
     IncidentRecord,
     IncidentsParams,
     IncidentsResult,
@@ -808,5 +816,254 @@ async def run_incident_summary(params: IncidentSummaryParams) -> IncidentSummary
             "evidence_logs": sum(len(e.logs) for e in evidence),
         },
         time_range=params.time_range,
+        warnings=warnings,
+    )
+
+
+# --------------------------------------------------------------------- #
+# asset_lookup (Wave 2)                                                 #
+# --------------------------------------------------------------------- #
+
+
+def _match_endpoint(endpoint: dict[str, Any], hostname: str | None, ip: str | None) -> bool:
+    """Client-side endpoint filter over the live UEBA field names."""
+    if hostname is not None and hostname.lower() not in str(endpoint.get("epname") or "").lower():
+        return False
+    if ip is not None and str(endpoint.get("epip") or "") != ip:
+        return False
+    return True
+
+
+def _flatten_vuln_records(
+    payload: Any,
+) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
+    """Group the vulnerability reader's records by endpoint id.
+
+    Tolerates the shapes the UEBA spec allows: records carrying a
+    ``vuln-group`` list (each group wrapping a ``vuln`` list), a flat
+    ``vuln`` list, or bare CVE rows. Rows whose record carries no ``epid``
+    land in the orphan list instead of being guessed onto an endpoint.
+    """
+    by_endpoint: dict[str, list[dict[str, Any]]] = {}
+    orphans: list[dict[str, Any]] = []
+    for record in _records(payload):
+        epid = record.get("epid")
+        rows: list[dict[str, Any]] = []
+        groups = record.get("vuln-group")
+        if isinstance(groups, list):
+            for group in groups:
+                if not isinstance(group, dict):
+                    continue
+                vulns = group.get("vuln")
+                if isinstance(vulns, list):
+                    rows.extend(v for v in vulns if isinstance(v, dict))
+                else:
+                    rows.append(group)
+        elif isinstance(record.get("vuln"), list):
+            rows.extend(v for v in record["vuln"] if isinstance(v, dict))
+        else:
+            rows.append(record)
+        if epid is None:
+            orphans.extend(rows)
+        else:
+            by_endpoint.setdefault(str(epid), []).extend(rows)
+    return by_endpoint, orphans
+
+
+def _severity_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    """Vulnerability count per lowercased severity label."""
+    counts: dict[str, int] = {}
+    for row in rows:
+        severity = str(row.get("severity") or "unknown").lower()
+        counts[severity] = counts.get(severity, 0) + 1
+    return counts
+
+
+async def run_asset_lookup(params: AssetLookupParams) -> AssetLookupResult:
+    """Endpoint (asset) profiles with attributed CVE context.
+
+    One UEBA endpoints read plus, when requested, one vulnerability read
+    scoped to the matched endpoint ids. Both are plain GETs — no logview
+    search slots. The endpoints read is the subject; a failed
+    vulnerability read degrades to a warning.
+    """
+    from fortianalyzer_mcp.tools.ueba_tools import get_endpoint_vulnerabilities, get_endpoints
+
+    endpoints_res, err = await _call(
+        get_endpoints,
+        adom=params.adom,
+        epids=params.epids,
+        detail_level=params.detail_level,
+        time_range=params.time_range,
+    )
+    if endpoints_res is None:
+        raise SkillExecutionError(f"could not retrieve UEBA endpoints ({err})")
+
+    warnings: list[str] = []
+    all_endpoints = _records(endpoints_res.get("data"))
+    if params.ip is not None and not any("epip" in endpoint for endpoint in all_endpoints):
+        # The appliance only returns epip at "simple" detail (live-verified:
+        # basic/standard omit it), so an ip filter at any other level would
+        # silently match nothing. Name it rather than return a false empty.
+        warnings.append(
+            "ip filter set but no endpoint carries 'epip' at this detail_level; "
+            "use detail_level='simple' to filter by IP"
+        )
+    matched = [
+        endpoint
+        for endpoint in all_endpoints
+        if _match_endpoint(endpoint, params.hostname, params.ip)
+    ]
+    matched_total = len(matched)
+    if matched_total > params.limit:
+        warnings.append(f"{matched_total} endpoints matched; returning the first {params.limit}")
+        matched = matched[: params.limit]
+
+    vulns_by_endpoint: dict[str, list[dict[str, Any]]] = {}
+    orphans: list[dict[str, Any]] = []
+    if params.include_vulnerabilities and matched:
+        known_epids: list[int] = []
+        for endpoint in matched:
+            epid = endpoint.get("epid")
+            if isinstance(epid, int):
+                known_epids.append(epid)
+            elif isinstance(epid, str) and epid.isdigit():
+                known_epids.append(int(epid))
+        if not known_epids:
+            warnings.append("no matched endpoint carries an 'epid'; vulnerability lookup skipped")
+        else:
+            vuln_res, err = await _call(
+                get_endpoint_vulnerabilities,
+                adom=params.adom,
+                epids=known_epids,
+                detectby=params.detectby,
+            )
+            if vuln_res is None:
+                warnings.append(f"vulnerability context unavailable ({err})")
+            else:
+                vulns_by_endpoint, orphans = _flatten_vuln_records(vuln_res.get("data"))
+                if orphans:
+                    warnings.append(
+                        f"{len(orphans)} vulnerability records had no attributable endpoint id"
+                    )
+
+    records = []
+    for endpoint in matched:
+        rows = vulns_by_endpoint.get(str(endpoint.get("epid")), [])
+        records.append(
+            AssetRecord(
+                endpoint=endpoint,
+                vulnerabilities=rows,
+                vulnerability_counts=_severity_counts(rows),
+            )
+        )
+    return AssetLookupResult(
+        endpoints=records,
+        endpoint_count=len(records),
+        matched_total=matched_total,
+        unattributed_vulnerabilities=orphans,
+        warnings=warnings,
+    )
+
+
+# --------------------------------------------------------------------- #
+# identity_lookup (Wave 2)                                              #
+# --------------------------------------------------------------------- #
+
+
+async def run_identity_lookup(params: IdentityLookupParams) -> IdentityLookupResult:
+    """End-user identity records, verbatim from the UEBA directory.
+
+    Exactly one UEBA end-users read (a plain GET); the username filter is
+    applied client-side over the live ``euname`` field.
+    """
+    from fortianalyzer_mcp.tools.ueba_tools import get_endusers
+
+    users_res, err = await _call(
+        get_endusers,
+        adom=params.adom,
+        euids=params.euids,
+        detail_level=params.detail_level,
+    )
+    if users_res is None:
+        raise SkillExecutionError(f"could not retrieve UEBA end-users ({err})")
+
+    warnings: list[str] = []
+    users = _records(users_res.get("data"))
+    if params.username is not None:
+        needle = params.username.lower()
+        users = [user for user in users if needle in str(user.get("euname") or "").lower()]
+    matched_total = len(users)
+    if matched_total > params.limit:
+        warnings.append(f"{matched_total} users matched; returning the first {params.limit}")
+        users = users[: params.limit]
+
+    return IdentityLookupResult(
+        users=users,
+        user_count=len(users),
+        matched_total=matched_total,
+        detail_level=params.detail_level,
+        warnings=warnings,
+    )
+
+
+# --------------------------------------------------------------------- #
+# alert_rules (Wave 2)                                                  #
+# --------------------------------------------------------------------- #
+
+
+async def run_alert_rules(params: AlertRulesParams) -> AlertRulesResult:
+    """The appliance's detection-rule catalogue (alert handlers).
+
+    One eventmgmt config read per requested handler class (plain GETs,
+    batched by the reader). Handlers flatten into records labelled with
+    their class so consumers never have to know the two-endpoint split.
+    """
+    from fortianalyzer_mcp.tools.event_tools import get_alert_handlers
+
+    handlers_res, err = await _call(
+        get_alert_handlers,
+        adom=params.adom,
+        handler_type=params.handler_type,
+    )
+    if handlers_res is None:
+        raise SkillExecutionError(f"could not retrieve alert handlers ({err})")
+
+    warnings: list[str] = []
+    data = handlers_res.get("data")
+    flattened: list[AlertRuleHandler] = []
+    for handler_class in ("basic", "correlation"):
+        section = data.get(handler_class) if isinstance(data, dict) else None
+        if section is None:
+            continue
+        section_records = _records(section)
+        if not section_records and section:
+            warnings.append(f"{handler_class} handler payload had an unrecognized shape")
+            continue
+        flattened.extend(
+            AlertRuleHandler(handler_class=handler_class, handler=handler)
+            for handler in section_records
+        )
+
+    if params.name is not None:
+        needle = params.name.lower()
+        flattened = [
+            entry for entry in flattened if needle in str(entry.handler.get("name") or "").lower()
+        ]
+    matched_total = len(flattened)
+    if matched_total > params.limit:
+        warnings.append(f"{matched_total} handlers matched; returning the first {params.limit}")
+        flattened = flattened[: params.limit]
+
+    rule_count = sum(
+        len(entry.handler["rule"])
+        for entry in flattened
+        if isinstance(entry.handler.get("rule"), list)
+    )
+    return AlertRulesResult(
+        handlers=flattened,
+        handler_count=len(flattened),
+        matched_total=matched_total,
+        rule_count=rule_count,
         warnings=warnings,
     )

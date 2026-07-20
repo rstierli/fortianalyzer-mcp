@@ -31,6 +31,8 @@ from fortianalyzer_mcp.skills.models import (
 )
 
 WAVE1_SKILL_IDS = {"incidents", "reports", "log_search", "triage", "incident_summary"}
+WAVE2_DATA_ACCESS_IDS = {"asset_lookup", "identity_lookup", "alert_rules"}
+REGISTERED_SKILL_IDS = WAVE1_SKILL_IDS | WAVE2_DATA_ACCESS_IDS
 
 GET_INCIDENTS = "fortianalyzer_mcp.tools.incident_tools.get_incidents"
 GET_INCIDENT = "fortianalyzer_mcp.tools.incident_tools.get_incident"
@@ -117,7 +119,7 @@ INCIDENT = {
 
 class TestCatalog:
     def test_wave1_skills_registered(self):
-        assert set(SKILLS) == WAVE1_SKILL_IDS
+        assert set(SKILLS) == REGISTERED_SKILL_IDS
 
     def test_catalogue_entries_have_schemas(self):
         for entry in catalogue():
@@ -142,7 +144,7 @@ class TestDispatcher:
         result = await faz_skill(skill="list")
         assert result["status"] == "success"
         assert result["schema_version"] == SCHEMA_VERSION
-        assert {s["id"] for s in result["skills"]} == WAVE1_SKILL_IDS
+        assert {s["id"] for s in result["skills"]} == REGISTERED_SKILL_IDS
 
     async def test_unknown_skill(self):
         result = await faz_skill(skill="does_not_exist")
@@ -176,7 +178,7 @@ class TestDispatcher:
     async def test_describe_alias(self):
         result = await faz_skill(skill="describe")
         assert result["status"] == "success"
-        assert {s["id"] for s in result["skills"]} == WAVE1_SKILL_IDS
+        assert {s["id"] for s in result["skills"]} == REGISTERED_SKILL_IDS
 
     async def test_invalid_output_maps_to_skill_output_invalid(
         self, monkeypatch: pytest.MonkeyPatch

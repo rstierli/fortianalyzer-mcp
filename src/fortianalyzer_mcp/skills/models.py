@@ -174,6 +174,146 @@ class LogSearchResult(BaseModel):
 
 
 # --------------------------------------------------------------------- #
+# asset_lookup (Data Access)                                            #
+# --------------------------------------------------------------------- #
+
+
+class AssetLookupParams(BaseModel):
+    """Parameters for the ``asset_lookup`` skill."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    adom: str | None = None
+    epids: list[int] | None = Field(
+        default=None, description="Endpoint IDs to scope the query server-side"
+    )
+    hostname: str | None = Field(
+        default=None, description="Case-insensitive substring match on the endpoint name"
+    )
+    ip: str | None = Field(
+        default=None,
+        description="Exact match on the endpoint IP (the 'epip' field, which the "
+        "appliance returns only at detail_level='simple'; a warning is emitted "
+        "if it is filtered on at a level that omits it)",
+    )
+    detail_level: Literal["simple", "basic", "standard"] = "standard"
+    time_range: str | None = Field(
+        default=None, description='Optional first-seen window, e.g. "7-day" or "start|end"'
+    )
+    include_vulnerabilities: bool = Field(
+        default=True, description="Attach per-endpoint CVE records and severity counts"
+    )
+    detectby: Literal["FortiClient", "FortiGate"] | None = Field(
+        default=None, description="Vulnerability detector filter"
+    )
+    limit: int = Field(default=50, ge=1, le=500, description="Max endpoints returned")
+
+
+class AssetRecord(BaseModel):
+    """One endpoint (asset) profile with its vulnerability context."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint: dict[str, Any] = Field(description="FAZ UEBA endpoint record, verbatim")
+    vulnerabilities: list[dict[str, Any]] = Field(
+        default_factory=list, description="CVE records attributed to this endpoint, verbatim"
+    )
+    vulnerability_counts: dict[str, int] = Field(
+        default_factory=dict,
+        description="Vulnerability count per severity (lowercased), derived",
+    )
+
+
+class AssetLookupResult(BaseModel):
+    """Output of the ``asset_lookup`` skill."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    endpoints: list[AssetRecord]
+    endpoint_count: int
+    matched_total: int = Field(description="Endpoints matching the filters before the limit")
+    unattributed_vulnerabilities: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="CVE records the reader returned without an attributable endpoint id",
+    )
+    warnings: list[str] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------- #
+# identity_lookup (Data Access)                                         #
+# --------------------------------------------------------------------- #
+
+
+class IdentityLookupParams(BaseModel):
+    """Parameters for the ``identity_lookup`` skill."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    adom: str | None = None
+    euids: list[int] | None = Field(
+        default=None, description="End-user IDs to scope the query server-side"
+    )
+    username: str | None = Field(
+        default=None, description="Case-insensitive substring match on the user name"
+    )
+    detail_level: Literal["basic", "standard", "extended"] = Field(
+        default="standard", description='"extended" adds email/department/title/phone'
+    )
+    limit: int = Field(default=50, ge=1, le=500, description="Max users returned")
+
+
+class IdentityLookupResult(BaseModel):
+    """Output of the ``identity_lookup`` skill. Records are verbatim."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    users: list[dict[str, Any]] = Field(description="FAZ UEBA end-user records, verbatim")
+    user_count: int
+    matched_total: int = Field(description="Users matching the filters before the limit")
+    detail_level: str
+    warnings: list[str] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------- #
+# alert_rules (Data Access)                                             #
+# --------------------------------------------------------------------- #
+
+
+class AlertRulesParams(BaseModel):
+    """Parameters for the ``alert_rules`` skill."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    adom: str | None = None
+    handler_type: Literal["basic", "correlation", "both"] = "both"
+    name: str | None = Field(
+        default=None, description="Case-insensitive substring match on the handler name"
+    )
+    limit: int = Field(default=100, ge=1, le=500, description="Max handlers returned")
+
+
+class AlertRuleHandler(BaseModel):
+    """One alert handler (detection rule set) with its class."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    handler_class: Literal["basic", "correlation"]
+    handler: dict[str, Any] = Field(description="FAZ alert-handler definition, verbatim")
+
+
+class AlertRulesResult(BaseModel):
+    """Output of the ``alert_rules`` skill."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    handlers: list[AlertRuleHandler]
+    handler_count: int
+    matched_total: int = Field(description="Handlers matching the filters before the limit")
+    rule_count: int = Field(description="Total rules across the returned handlers, derived")
+    warnings: list[str] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------- #
 # triage (Analysis)                                                     #
 # --------------------------------------------------------------------- #
 

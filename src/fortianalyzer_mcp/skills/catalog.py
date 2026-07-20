@@ -13,6 +13,12 @@ from pydantic import BaseModel
 
 from fortianalyzer_mcp.skills import handlers
 from fortianalyzer_mcp.skills.models import (
+    AlertRulesParams,
+    AlertRulesResult,
+    AssetLookupParams,
+    AssetLookupResult,
+    IdentityLookupParams,
+    IdentityLookupResult,
     IncidentsParams,
     IncidentsResult,
     IncidentSummary,
@@ -67,6 +73,35 @@ SKILLS: dict[str, SkillSpec] = {
             params_model=LogSearchParams,
             output_model=LogSearchResult,
             handler=handlers.run_log_search,
+        ),
+        SkillSpec(
+            id="asset_lookup",
+            tier="data_access",
+            description="Endpoint (asset) profiles from the UEBA inventory, each "
+            "with attributed CVE records and severity counts. Requires UEBA.",
+            params_model=AssetLookupParams,
+            output_model=AssetLookupResult,
+            handler=handlers.run_asset_lookup,
+        ),
+        SkillSpec(
+            id="identity_lookup",
+            tier="data_access",
+            description="End-user identity records from the UEBA directory "
+            "(groups, VPN IP, seen window; extended adds contact fields). "
+            "Requires UEBA.",
+            params_model=IdentityLookupParams,
+            output_model=IdentityLookupResult,
+            handler=handlers.run_identity_lookup,
+        ),
+        SkillSpec(
+            id="alert_rules",
+            tier="data_access",
+            description="The appliance's detection-rule catalogue: basic and "
+            "correlation alert handlers with their per-rule severity, filters, "
+            "groupby and tags.",
+            params_model=AlertRulesParams,
+            output_model=AlertRulesResult,
+            handler=handlers.run_alert_rules,
         ),
         SkillSpec(
             id="triage",
