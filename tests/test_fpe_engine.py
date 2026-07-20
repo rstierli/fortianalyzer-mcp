@@ -7,6 +7,7 @@ token conventions, and key handling.
 
 import ipaddress
 import re
+import traceback
 
 import pytest
 
@@ -110,6 +111,33 @@ class TestMacMasking:
     def test_invalid_mac_raises(self, engine: FPEEngine):
         with pytest.raises(MaskingError):
             engine.mask_mac("00:1a:2b:3c:4d")
+
+
+class TestMaskingErrorPrivacy:
+    def test_invalid_ip_error_omits_value(self, engine: FPEEngine):
+        offending = "not-an-ip-203-0-113-99"
+
+        with pytest.raises(MaskingError) as excinfo:
+            engine.mask_ip(offending)
+
+        assert offending not in str(excinfo.value)
+        assert offending not in "".join(traceback.format_exception(excinfo.value))
+
+    def test_invalid_mac_error_omits_value(self, engine: FPEEngine):
+        offending = "zz:zz"
+
+        with pytest.raises(MaskingError) as excinfo:
+            engine.mask_mac(offending)
+
+        assert offending not in str(excinfo.value)
+
+    def test_invalid_email_error_omits_value(self, engine: FPEEngine):
+        offending = "no-at-sign.example"
+
+        with pytest.raises(MaskingError) as excinfo:
+            engine.mask_email(offending)
+
+        assert offending not in str(excinfo.value)
 
 
 # --------------------------------------------------------------------- #

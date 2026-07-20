@@ -238,18 +238,21 @@ class FPEEngine:
         textual form originally masked (same address, different spelling).
         """
         addr = self._parse_ip(token)
-        if addr.version == 4:
-            pt = self._hex_ciphers["ipv4"].decrypt(f"{int(addr):08x}")
-            return str(ipaddress.IPv4Address(int(pt, 16)))
-        pt = self._hex_ciphers["ipv6"].decrypt(f"{int(addr):032x}")
-        return str(ipaddress.IPv6Address(int(pt, 16)))
+        try:
+            if addr.version == 4:
+                pt = self._hex_ciphers["ipv4"].decrypt(f"{int(addr):08x}")
+                return str(ipaddress.IPv4Address(int(pt, 16)))
+            pt = self._hex_ciphers["ipv6"].decrypt(f"{int(addr):032x}")
+            return str(ipaddress.IPv6Address(int(pt, 16)))
+        except Exception as exc:
+            raise MaskingError("cannot unmask IP address") from exc
 
     @staticmethod
     def _parse_ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
         try:
             return ipaddress.ip_address(value.strip())
-        except ValueError as exc:
-            raise MaskingError(f"not a valid IP address: {value!r}") from exc
+        except ValueError:
+            raise MaskingError("not a valid IP address") from None
 
     # ------------------------------------------------------------------ #
     # MAC addresses                                                      #
@@ -267,14 +270,18 @@ class FPEEngine:
 
     def unmask_mac(self, token: str) -> str:
         """Reverse :meth:`mask_mac`. Returns lowercase colon-separated form."""
-        pt = self._hex_ciphers["mac"].decrypt(self._normalize_mac(token))
-        return ":".join(pt[i : i + 2] for i in range(0, 12, 2))
+        normalized = self._normalize_mac(token)
+        try:
+            pt = self._hex_ciphers["mac"].decrypt(normalized)
+            return ":".join(pt[i : i + 2] for i in range(0, 12, 2))
+        except Exception as exc:
+            raise MaskingError("cannot unmask MAC address") from exc
 
     @staticmethod
     def _normalize_mac(value: str) -> str:
         digits = re.sub(r"[:.\-\s]", "", value.strip().lower())
         if not re.fullmatch(r"[0-9a-f]{12}", digits):
-            raise MaskingError(f"not a valid MAC address: {value!r}")
+            raise MaskingError("not a valid MAC address")
         return digits
 
     # ------------------------------------------------------------------ #
@@ -316,7 +323,7 @@ class FPEEngine:
         """Mask an email address into ``<ct-local>@<ct-domain>.<kid>.<mask_suffix>``."""
         local, _, domain = value.strip().partition("@")
         if not local or not domain:
-            raise MaskingError(f"not a valid email address: {value!r}")
+            raise MaskingError("not a valid email address")
         return (
             f"{self._encrypt_str('email_local', local)}"
             f"@{self._encrypt_str('domain', domain)}.{self._key_id}.{self._mask_suffix}"
@@ -426,7 +433,7 @@ class FPEEngine:
             raise MaskingError(f"not a valid masked {vtype} token payload")
         try:
             plain = self._apply_chunked(cipher, vtype, payload, encrypt=False)
-        except ValueError as exc:
+        except Exception as exc:
             raise MaskingError(f"cannot unmask {vtype} token: {exc}") from exc
         # Padding is always trailing and the pad char never occurs in real
         # values, so stripping from the right is unambiguous.

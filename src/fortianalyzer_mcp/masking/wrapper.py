@@ -216,6 +216,17 @@ class OutputMasker:
             out.append(f"{device}[{match.group('vdom')}]")
         return ",".join(out)
 
+    def _burn_strings(self, value: Any, keep: frozenset[str]) -> Any:
+        if isinstance(value, str):
+            if value in keep or not value or value.strip() in SKIP_VALUES:
+                return value
+            return self.placeholder(value)
+        if isinstance(value, list):
+            return [self._burn_strings(item, keep) for item in value]
+        if isinstance(value, dict):
+            return {key: self._burn_strings(item, keep) for key, item in value.items()}
+        return value
+
     def _mask_target(
         self, value: list[Any], mapping: dict[str, str], keep: frozenset[str] = frozenset()
     ) -> list[Any]:
@@ -227,23 +238,56 @@ class OutputMasker:
         here while ``devid`` shows it in clear would hand out the
         token-to-serial pair. Live 8.0.0 alerts do exactly this — the
         appliance serial arrives as a ``device`` target.
+
+        Unknown target names fail closed by burning string content because
+        there is no reliable type for reversible masking.
         """
         out: list[Any] = []
         for item in value:
             if not isinstance(item, dict):
                 out.append(self._mask_structured(item, mapping, keep))
                 continue
-            entry = dict(item)
-            vtype = TARGET_NAME_TYPES.get(str(entry.get("name", "")).lower())
-            raw = entry.get("value")
-            if vtype and isinstance(raw, str) and raw not in keep:
-                token = self._mask_scalar(vtype, raw, mapping)
-                entry["value"] = token
-                # asset_value repeats the identifier on some targets and
-                # carries an internal numeric id on others; mask only the
-                # former.
-                if entry.get("asset_value") == raw:
-                    entry["asset_value"] = token
+            name: Any = ""
+            raw: Any = None
+            for key, item_value in item.items():
+                lowered = key.lower()
+                if lowered == "name":
+                    name = item_value
+                elif lowered == "value":
+                    raw = item_value
+            vtype = TARGET_NAME_TYPES.get(str(name).lower())
+            if vtype is None:
+                masked_value = self._burn_strings(raw, keep)
+            elif isinstance(raw, str):
+                masked_value = raw if raw in keep else self._mask_scalar(vtype, raw, mapping)
+            elif isinstance(raw, list):
+                masked_value = [
+                    elem
+                    if isinstance(elem, str) and elem in keep
+                    else self._mask_scalar(vtype, elem, mapping)
+                    if isinstance(elem, str)
+                    else self._burn_strings(elem, keep)
+                    for elem in raw
+                ]
+            elif isinstance(raw, dict):
+                masked_value = self._burn_strings(raw, keep)
+            else:
+                masked_value = raw
+
+            entry: dict[str, Any] = {}
+            for key, item_value in item.items():
+                lowered = key.lower()
+                if lowered == "name":
+                    entry[key] = item_value
+                elif lowered == "value":
+                    entry[key] = masked_value
+                elif lowered == "asset_value":
+                    # asset_value repeats the identifier on some targets and
+                    # carries an internal numeric id on others; mask only the
+                    # former.
+                    entry[key] = masked_value if item_value == raw else item_value
+                else:
+                    entry[key] = self._mask_entry(key, item_value, mapping, keep)
             out.append(entry)
         return out
 
@@ -326,7 +370,7 @@ class OutputMasker:
         def walk(node: Any) -> None:
             if isinstance(node, dict):
                 for key, value in node.items():
-                    if key in DEVICE_IDENTITY_TYPES and isinstance(value, str):
+                    if key.lower() in DEVICE_IDENTITY_TYPES and isinstance(value, str):
                         out.update(part.strip() for part in value.split(","))
                     elif key.lower() in COMPOSITE_DEVICE_VDOM and isinstance(value, str):
                         for part in value.split(","):
@@ -546,7 +590,7 @@ class OutputMasker:
         if lowered in COMPOSITE_DEVICE_VDOM and isinstance(value, str):
             return self._mask_device_vdom(value, mapping)
 
-        vtype = self._field_types.get(key)
+        vtype = self._field_types.get(lowered)
         if vtype is not None and vtype != TEXT:
             if isinstance(value, str):
                 return self._mask_scalar(vtype, value, mapping)
@@ -567,14 +611,25 @@ class OutputMasker:
         if isinstance(obj, dict):
             out: dict[str, Any] = {}
             for key, value in obj.items():
-                if self._field_types.get(key) == TEXT and isinstance(value, str):
-                    out[key] = self._mask_scalar_text(value, mapping)
+                if self._field_types.get(key.lower()) == TEXT:
+                    out[key] = self._mask_text_tree(value, mapping)
                 else:
                     out[key] = self._mask_free_text(value, mapping)
             return out
         if isinstance(obj, list):
             return [self._mask_free_text(item, mapping) for item in obj]
         return obj
+
+    def _mask_text_tree(self, value: Any, mapping: dict[str, str]) -> Any:
+        if isinstance(value, str):
+            return self._mask_scalar_text(value, mapping)
+        if isinstance(value, list):
+            # Free-text lines; each string leaf gets the IOC scan. Nested dicts
+            # in a list were already masked in pass 1, so recursion leaves them be.
+            return [self._mask_text_tree(item, mapping) for item in value]
+        # A dict under a TEXT key is a structured object already masked key-by-key
+        # in pass 1; scanning it here would double-mask its tokens. Leave it.
+        return value
 
     def _mask_scalar_text(self, value: str, mapping: dict[str, str]) -> str:
         if value.strip() in SKIP_VALUES:

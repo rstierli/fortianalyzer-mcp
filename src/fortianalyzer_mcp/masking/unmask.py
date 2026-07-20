@@ -59,6 +59,7 @@ from fortianalyzer_mcp.masking.fields import (
     SKIP_VALUES,
 )
 from fortianalyzer_mcp.masking.fpe_engine import FPEEngine, MaskingError
+from fortianalyzer_mcp.utils.validation import sanitize_filter_value
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,7 @@ _FILTER_CLAUSE_RE = re.compile(
     r"\s*(?P<op>==|!=|<=|>=|=~|<|>|\bcontain\b|\b!contain\b)\s*"
     r"(?P<quote>[\"']?)(?P<value>[^\"'\s()]+)(?P=quote)"
 )
+_FILTER_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
 class ArgUnmasker:
@@ -81,8 +83,8 @@ class ArgUnmasker:
     def _unmask_marked(self, value: str) -> str | None:
         """Resolve a self-identifying token, or None if it carries no marker.
 
-        Raises MaskingError only through :meth:`resolve_scalar`, which
-        decides what a bad payload means for the caller.
+        Engine failures propagate only through :meth:`resolve_scalar`,
+        which decides what a bad payload means for the caller.
         """
         return self._engine.unmask_token(value)
 
@@ -143,6 +145,9 @@ class ArgUnmasker:
             port = parts.port
         except ValueError:
             return value
+        if "@" in parts.netloc:
+            # The mask side never emits userinfo tokens; do not reassemble lossily.
+            return value
         if not host:
             return self.resolve_scalar(value)
         resolved_host = self.resolve_scalar(host, IP_OR_HOST)
@@ -197,7 +202,20 @@ class ArgUnmasker:
                 resolved = self.resolve_scalar(raw, vtype)
             if resolved == raw:
                 return match.group(0)
-            return match.group(0).replace(raw, resolved)
+            if _FILTER_CONTROL_RE.search(resolved):
+                logger.warning(
+                    "resolved filter value has control characters; token left unresolved"
+                )
+                return match.group(0)
+            quote = match.group("quote")
+            head = match.group(0)[: match.start("quote") - match.start()]
+            if quote:
+                # Preserve caller quoting and escape delimiters introduced by
+                # the resolved value so it cannot terminate the clause early.
+                escaped = resolved.replace("\\", "\\\\").replace(quote, "\\" + quote)
+                return f"{head}{quote}{escaped}{quote}"
+            # Use the same safe-bare or double-quoted convention as callers.
+            return f"{head}{sanitize_filter_value(resolved)}"
 
         return _FILTER_CLAUSE_RE.sub(clause_sub, expression)
 

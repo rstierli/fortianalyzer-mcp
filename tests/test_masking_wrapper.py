@@ -168,6 +168,29 @@ class TestTextScan:
         )
         assert masked["logs"][0]["srcip"] in masked["filter"]
 
+    def test_text_list_scans_each_string(self, masker: OutputMasker):
+        masked = masker.mask_result(
+            {"msg": ["Connection from 192.0.2.7 by bob@example.com", "second line"]}
+        )
+
+        assert "192.0.2.7" not in str(masked)
+        assert "bob@example.com" not in str(masked)
+        assert masked["msg"][1] == "second line"
+
+    def test_text_dict_typed_key_is_not_double_masked(self, masker: OutputMasker):
+        nested = masker.mask_result({"msg": {"srcip": "192.0.2.9"}})["msg"]["srcip"]
+        bare = masker.mask_result({"srcip": "192.0.2.9"})["srcip"]
+
+        assert nested == bare
+
+    def test_text_dict_composite_key_is_not_double_masked(self, masker: OutputMasker):
+        raw = "srcip:192.0.2.17"
+        nested = masker.mask_result({"msg": {"groupby1": raw}})["msg"]["groupby1"]
+        bare = masker.mask_result({"groupby1": raw})["groupby1"]
+
+        assert nested == bare
+        assert "192.0.2.17" not in nested
+
 
 class TestFailClosed:
     def test_unmaskable_value_becomes_placeholder(self, masker: OutputMasker):
@@ -189,6 +212,115 @@ class TestFailClosed:
         assert out["status"] == "error"
         assert out["error"] == "masking_failed"
         assert "192.0.2.102" not in str(out)
+
+
+class TestTargetFailClosed:
+    def test_known_name_list_masks_each_string(self, masker: OutputMasker):
+        raw_values = ["192.0.2.10", "192.0.2.11"]
+        masked = masker.mask_result({"target": [{"name": "ip", "value": raw_values}]})
+        values = masked["target"][0]["value"]
+
+        assert all(value not in raw_values for value in values)
+        assert all(raw not in str(masked) for raw in raw_values)
+
+    def test_unknown_name_string_is_burned(self, masker: OutputMasker):
+        raw = "bob@example.com"
+        masked = masker.mask_result({"target": [{"name": "email", "value": raw}]})
+
+        assert masked["target"][0]["value"].startswith("masked-unrepresentable-")
+        assert raw not in str(masked)
+
+    def test_unknown_name_list_strings_are_burned(self, masker: OutputMasker):
+        raw_values = ["bob@example.com", "alice@example.org"]
+        masked = masker.mask_result({"target": [{"name": "email", "value": raw_values}]})
+        values = masked["target"][0]["value"]
+
+        assert all(value.startswith("masked-unrepresentable-") for value in values)
+        assert all(raw not in str(masked) for raw in raw_values)
+
+    def test_nested_sibling_key_uses_normal_masking(self, masker: OutputMasker):
+        masked = masker.mask_result(
+            {
+                "target": [
+                    {
+                        "name": "user",
+                        "value": "alice",
+                        "detail": {"srcip": "192.0.2.12"},
+                    }
+                ]
+            }
+        )
+        entry = masked["target"][0]
+
+        assert entry["value"].startswith("user-")
+        assert entry["detail"]["srcip"] != "192.0.2.12"
+        assert "192.0.2.12" not in str(masked)
+
+    def test_known_name_dict_burns_nested_strings(self, masker: OutputMasker):
+        masked = masker.mask_result({"target": [{"name": "ip", "value": {"note": "192.0.2.13"}}]})
+
+        assert masked["target"][0]["value"]["note"].startswith("masked-unrepresentable-")
+        assert "192.0.2.13" not in str(masked)
+
+    def test_known_name_list_burns_nested_strings(self, masker: OutputMasker):
+        masked = masker.mask_result(
+            {"target": [{"name": "ip", "value": [{"note": "192.0.2.14"}]}]}
+        )
+
+        assert masked["target"][0]["value"][0]["note"].startswith("masked-unrepresentable-")
+        assert "192.0.2.14" not in str(masked)
+
+    def test_repeated_list_asset_value_reuses_masked_value(self, masker: OutputMasker):
+        raw = ["192.0.2.50"]
+        masked = masker.mask_result(
+            {"target": [{"name": "ip", "value": raw, "asset_value": raw}]}
+        )
+        entry = masked["target"][0]
+
+        assert entry["asset_value"] == entry["value"]
+        assert "192.0.2.50" not in str(masked)
+
+    def test_known_name_value_in_keep_stays_clear(self, masker: OutputMasker):
+        devid = "FGT60F0000000000"
+        masked = masker.mask_result(
+            {"devid": devid, "target": [{"name": "device", "value": devid}]}
+        )
+
+        assert masked["target"][0]["value"] == devid
+
+    def test_unknown_name_value_in_keep_stays_clear(self, masker: OutputMasker):
+        devid = "FGT60F0000000000"
+        masked = masker.mask_result({"devid": devid, "target": [{"name": "email", "value": devid}]})
+
+        assert masked["target"][0]["value"] == devid
+
+
+class TestCaseInsensitiveFieldLookup:
+    def test_mixed_case_typed_key_masks(self, masker: OutputMasker):
+        masked = masker.mask_result({"SrcIP": "192.0.2.20"})
+
+        assert masked["SrcIP"] != "192.0.2.20"
+
+    def test_mixed_case_text_key_is_scanned(self, masker: OutputMasker):
+        masked = masker.mask_result({"Msg": "from 192.0.2.21"})
+
+        assert "192.0.2.21" not in masked["Msg"]
+
+    def test_mixed_case_device_identity_populates_keep(self, masker: OutputMasker):
+        devid = "FGT60F0000000000"
+        masked = masker.mask_result(
+            {"DevId": devid, "target": [{"name": "device", "value": devid}]}
+        )
+
+        assert masked["target"][0]["value"] == devid
+
+    def test_mixed_case_target_structural_keys_mask_value(self, masker: OutputMasker):
+        masked = masker.mask_result(
+            {"target": [{"Name": "ip", "Value": "192.0.2.18"}]}
+        )
+
+        assert "Value" in masked["target"][0]
+        assert "192.0.2.18" not in str(masked)
 
 
 class TestInstallMasking:
