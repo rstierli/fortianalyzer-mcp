@@ -263,18 +263,14 @@ class TestTargetFailClosed:
         assert "192.0.2.13" not in str(masked)
 
     def test_known_name_list_burns_nested_strings(self, masker: OutputMasker):
-        masked = masker.mask_result(
-            {"target": [{"name": "ip", "value": [{"note": "192.0.2.14"}]}]}
-        )
+        masked = masker.mask_result({"target": [{"name": "ip", "value": [{"note": "192.0.2.14"}]}]})
 
         assert masked["target"][0]["value"][0]["note"].startswith("masked-unrepresentable-")
         assert "192.0.2.14" not in str(masked)
 
     def test_repeated_list_asset_value_reuses_masked_value(self, masker: OutputMasker):
         raw = ["192.0.2.50"]
-        masked = masker.mask_result(
-            {"target": [{"name": "ip", "value": raw, "asset_value": raw}]}
-        )
+        masked = masker.mask_result({"target": [{"name": "ip", "value": raw, "asset_value": raw}]})
         entry = masked["target"][0]
 
         assert entry["asset_value"] == entry["value"]
@@ -315,9 +311,7 @@ class TestCaseInsensitiveFieldLookup:
         assert masked["target"][0]["value"] == devid
 
     def test_mixed_case_target_structural_keys_mask_value(self, masker: OutputMasker):
-        masked = masker.mask_result(
-            {"target": [{"Name": "ip", "Value": "192.0.2.18"}]}
-        )
+        masked = masker.mask_result({"target": [{"Name": "ip", "Value": "192.0.2.18"}]})
 
         assert "Value" in masked["target"][0]
         assert "192.0.2.18" not in str(masked)
