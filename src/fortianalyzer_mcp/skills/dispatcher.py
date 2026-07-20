@@ -97,9 +97,18 @@ async def faz_skill(skill: str, params: dict[str, Any] | None = None) -> dict[st
             skill=skill,
         )
 
+    dumped = result.model_dump()
+    # The success path does not go through error_response, so scrub the
+    # caller-facing warnings here too: a degraded sub-call can carry raw FAZ
+    # exception text (internal hostnames, session/token material) into a
+    # warning. Redacting at the source covers today's warnings; this is the
+    # belt-and-suspenders chokepoint for any warning shape. See issue #68 M4.
+    warnings = dumped.get("warnings")
+    if isinstance(warnings, list):
+        dumped["warnings"] = [redact(w) if isinstance(w, str) else w for w in warnings]
     return {
         "status": "success",
         "skill": skill,
         "schema_version": SCHEMA_VERSION,
-        "result": result.model_dump(),
+        "result": dumped,
     }

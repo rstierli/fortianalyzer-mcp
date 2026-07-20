@@ -39,6 +39,7 @@ from fortianalyzer_mcp.skills.models import (
     TriageParams,
     TriageResult,
 )
+from fortianalyzer_mcp.utils.responses import redact
 
 logger = logging.getLogger(__name__)
 
@@ -101,9 +102,12 @@ async def _call(tool_fn: Any, **kwargs: Any) -> tuple[dict[str, Any] | None, str
         result = await tool_fn(**kwargs)
     except Exception as exc:
         logger.warning("skill sub-call %s raised: %s", name, exc)
-        return None, f"{name}: {exc}"
+        # Reasons surface to the caller via result.warnings on the success
+        # path (which the dispatcher does not route through error_response),
+        # so scrub secrets/tokens/session ids at the source. See issue #68 M4.
+        return None, redact(f"{name}: {exc}")
     if isinstance(result, dict) and result.get("status") != "success":
-        return None, f"{name}: {result.get('message') or result.get('error') or 'failed'}"
+        return None, redact(f"{name}: {result.get('message') or result.get('error') or 'failed'}")
     return result, None
 
 
@@ -191,7 +195,7 @@ async def _fetch_attached_alerts(
             limit=limit,
         )
     except Exception as exc:
-        return [], f"attachments lookup: {exc}"
+        return [], redact(f"attachments lookup: {exc}")
 
     records = _records(res)
     alerts: list[dict[str, Any]] = []
@@ -448,6 +452,7 @@ async def run_triage(params: TriageParams) -> TriageResult:
         get_alerts,
     )
     from fortianalyzer_mcp.tools.incident_tools import get_incident, get_incidents
+    from fortianalyzer_mcp.utils.validation import sanitize_filter_value
 
     warnings: list[str] = []
     triggering_logs: list[dict[str, Any]] = []
@@ -464,25 +469,29 @@ async def run_triage(params: TriageParams) -> TriageResult:
         # entity enrichment only — live FAZ returns just {alertid, devs,
         # epids, euids} there.
         subject: dict[str, Any] = {}
-        if '"' not in params.alert_id:
-            lookup_res, err = await _call(
-                get_alerts,
-                adom=params.adom,
-                time_range=_SUBJECT_LOOKUP_WINDOW,
-                filter=f'alertid=="{params.alert_id}"',
-                limit=5,
+        # alert_id is attacker-influenceable free text; sanitize it before it
+        # enters the filter expression (self-quotes and escapes any quote /
+        # operator / backslash so it cannot rewrite the clause). Replaces the
+        # earlier no-double-quote blocklist. See issue #68 L5.
+        safe_alert_id = sanitize_filter_value(params.alert_id, "alert_id")
+        lookup_res, err = await _call(
+            get_alerts,
+            adom=params.adom,
+            time_range=_SUBJECT_LOOKUP_WINDOW,
+            filter=f"alertid=={safe_alert_id}",
+            limit=5,
+        )
+        if lookup_res is None:
+            warnings.append(f"alert filter lookup unavailable: {err}")
+        else:
+            subject = next(
+                (
+                    a
+                    for a in lookup_res.get("data") or []
+                    if str(a.get("alertid")) == str(params.alert_id)
+                ),
+                {},
             )
-            if lookup_res is None:
-                warnings.append(f"alert filter lookup unavailable: {err}")
-            else:
-                subject = next(
-                    (
-                        a
-                        for a in lookup_res.get("data") or []
-                        if str(a.get("alertid")) == str(params.alert_id)
-                    ),
-                    {},
-                )
         if not subject:
             alerts_res, err = await _call(
                 get_alerts, adom=params.adom, time_range=params.context_time_range, limit=500

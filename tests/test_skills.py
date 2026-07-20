@@ -539,7 +539,8 @@ class TestTriageSkill:
         assert result.subject == ALERT_LINKED
         alerts_mock.assert_awaited_once()
         kwargs = alerts_mock.await_args.kwargs
-        assert kwargs["filter"] == 'alertid=="alert-001"'
+        # sanitize_filter_value leaves a safe alphanumeric id unquoted.
+        assert kwargs["filter"] == "alertid==alert-001"
         assert kwargs["time_range"] == "30-day"
 
     async def test_alert_filter_miss_falls_back_to_window_scan(self):
@@ -560,9 +561,10 @@ class TestTriageSkill:
         assert "filter" not in scan_kwargs
         assert scan_kwargs["time_range"] == "24-hour"
 
-    async def test_alert_id_with_quote_skips_filter_lookup(self):
-        # A quote in the id cannot be embedded safely in a filter
-        # expression; the subject lookup must go straight to the scan.
+    async def test_alert_id_with_quote_is_sanitized_not_skipped(self):
+        # A quote in the id is escaped and quoted (issue #68 L5), so the
+        # filter-first lookup still runs — with a clause that cannot break
+        # out — rather than being skipped by a blocklist.
         with (
             t(GET_ALERTS, return_value=ok(data=[])) as alerts_mock,
             t(GET_ALERT_DETAILS, return_value=self.DETAILS),
@@ -571,8 +573,9 @@ class TestTriageSkill:
             t(GET_ALERT_INCIDENT_STATS, return_value=ok(data={})),
         ):
             await handlers.run_triage(TriageParams(alert_id='alert"-x'))
-        alerts_mock.assert_awaited_once()
-        assert "filter" not in alerts_mock.await_args.kwargs
+        # The filter-first lookup runs (call 0) with an escaped, quoted
+        # clause; an empty result then falls back to the window scan (call 1).
+        assert alerts_mock.await_args_list[0].kwargs["filter"] == 'alertid=="alert\\"-x"'
 
     async def test_alert_related_incidents_by_attachment_membership(self):
         # Live alerts carry no incident-linkage fields; the authoritative
