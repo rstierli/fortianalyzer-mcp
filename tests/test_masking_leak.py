@@ -17,6 +17,7 @@ fortiview, ueba and event-handler objects, with documentation values
 responses; no value from any real estate appears here.
 """
 
+import re
 import time
 from typing import Any
 
@@ -481,11 +482,34 @@ class TestFreeTextSubstitution:
 
         assert masker._substitute_known(first_raw, mapping) == first_token
 
+    def test_substitution_compiles_one_pattern_regardless_of_mapping_size(
+        self, masker: OutputMasker, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The mechanism the wall-clock test below can only approximate: the
+        # old code compiled one regex per known value, so a large response
+        # blew past re's internal cache and every field recompiled from
+        # scratch. Counting compiles pins that directly and cannot flake on
+        # a slow runner.
+        compiled: list[Any] = []
+        real_compile = re.compile
+
+        def counting_compile(*args: Any, **kwargs: Any):
+            compiled.append(args[0] if args else None)
+            return real_compile(*args, **kwargs)
+
+        mapping = {f"host-{index:04d}.example.com": f"token-{index}" for index in range(200)}
+        monkeypatch.setattr(re, "compile", counting_compile)
+        out = masker._substitute_known("prose naming host-0007.example.com here", mapping)
+
+        assert out == "prose naming token-7 here"
+        assert len(compiled) == 1
+
     def test_large_result_masks_within_a_wall_clock_budget(self, masker: OutputMasker):
-        # Guards the regex-cache cliff the one-pass substitution removed. The
-        # bound is deliberately generous so a loaded CI runner does not flake;
-        # substitution is still superlinear, so this pins the order of
-        # magnitude, not a growth rate.
+        # Smoke bound only, to catch a catastrophic regression. Kept very
+        # generous on purpose: this asserted < 5s and flaked at 5.8s on a
+        # loaded CI runner while taking ~0.45s locally. The pre-fix
+        # implementation took ~23s here, so a regression still trips it.
+        # The compile-count test above is what actually pins the fix.
         rows = []
         blocks = ("192.0.2", "198.51.100", "203.0.113")
         for index in range(500):
@@ -507,7 +531,7 @@ class TestFreeTextSubstitution:
         masker.mask_result({"logs": rows})
         elapsed = time.perf_counter() - started
 
-        assert elapsed < 5
+        assert elapsed < 60
 
     def test_hostname_masked_in_a_field_is_also_masked_in_prose(self, masker: OutputMasker):
         masked = masker.mask_result(
