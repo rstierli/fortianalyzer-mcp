@@ -54,7 +54,12 @@ Out of scope here, by design:
   FF3 is length-preserving); identical tails and shared-first-chunk
   prefixes correlate, the same chunking residual as every string type;
   and substring search inside the tail (``url contain "/login"``) is an
-  accepted loss. ``http_url`` (alert ``event_details``) stays HOST-only
+  accepted loss. One more, conservative by design: a hostless value whose
+  decoded form carries a ``@`` before the first slash (an email or
+  userinfo-looking fragment with no path) fails closed to an irreversible
+  placeholder rather than sealing reversibly: the credentials guard
+  cannot tell an innocent address from a secret, and burning the one
+  value is the safe direction to err. ``http_url`` (alert ``event_details``) stays HOST-only
   by the same decision: live alerts carry a full URL whose host is the
   browsed destination, so the host masks in place
   (``COMPOSITE_URL_HOST``, ``wrapper._mask_url_host``) while path and
