@@ -61,6 +61,55 @@ class TestScalarResolution:
 
 
 class TestFilterExpressions:
+    @pytest.mark.parametrize("op", ["==", "!=", "<=", ">=", "=~", "!~", "~", "="])
+    def test_all_operators_resolve_masked_ip(
+        self, unmasker: ArgUnmasker, engine: FPEEngine, op: str
+    ):
+        token = engine.mask_ip("192.0.2.102")
+
+        assert unmasker.unmask_filter(f'srcip{op}"{token}"') == f'srcip{op}"192.0.2.102"'
+        assert unmasker.unmask_filter(f"srcip{op}{token}") == f"srcip{op}192.0.2.102"
+
+    def test_bang_contain_with_space_resolves(self, unmasker: ArgUnmasker, engine: FPEEngine):
+        token = engine.mask_ip("192.0.2.102")
+
+        assert unmasker.unmask_filter(f'srcip !contain "{token}"') == 'srcip !contain "192.0.2.102"'
+
+    @pytest.mark.parametrize(
+        "expression",
+        [
+            'srcip==""',
+            'srcip=~""',
+            'pcapurl!=""',
+            "dstport>=443",
+            "attack=*Remote.Code.Execution*",
+        ],
+    )
+    def test_operator_alternation_does_not_missplit(
+        self,
+        unmasker: ArgUnmasker,
+        expression: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        resolved_values: list[str] = []
+        original_resolve = unmasker.resolve_scalar
+
+        def recording_resolve(value: str, vtype: str | None = None) -> str:
+            resolved_values.append(value)
+            return original_resolve(value, vtype)
+
+        monkeypatch.setattr(unmasker, "resolve_scalar", recording_resolve)
+
+        assert unmasker.unmask_filter(expression) == expression
+        if expression in ('srcip==""', 'srcip=~""'):
+            assert resolved_values == []
+
+    def test_single_equals_filter_round_trips(self, masker: OutputMasker, unmasker: ArgUnmasker):
+        original = 'srcip="192.0.2.102" and dstport==443'
+        masked = masker.mask_result({"filter_applied": original})["filter_applied"]
+
+        assert unmasker.unmask_args({"filter_applied": masked})["filter_applied"] == original
+
     def test_ip_clause_resolved_by_field_name(self, unmasker: ArgUnmasker, engine: FPEEngine):
         token = engine.mask_ip("192.0.2.102")
         out = unmasker.unmask_filter(f'srcip=="{token}"')
@@ -366,24 +415,26 @@ class TestUrlRoundTrip:
 class TestFilterInjectionGuard:
     HOSTILE_TAIL = '/x" or srcip=="203.0.113.9'
 
+    @pytest.mark.parametrize("op", ("==", "="))
     def test_hostile_masked_url_tail_stays_inside_original_quotes(
-        self, masker: OutputMasker, unmasker: ArgUnmasker
+        self, masker: OutputMasker, unmasker: ArgUnmasker, op: str
     ):
         hostile_url = f"https://ex.example.com{self.HOSTILE_TAIL}"
         masked_url = masker.mask_result({"url": hostile_url})["url"]
-        expression = f'url=="{masked_url}"'
+        expression = f'url{op}"{masked_url}"'
 
         result = unmasker.unmask_filter(expression)
 
-        assert result == 'url=="https://ex.example.com/x\\" or srcip==\\"203.0.113.9"'
+        assert result == f'url{op}"https://ex.example.com/x\\" or srcip==\\"203.0.113.9"'
 
+    @pytest.mark.parametrize("op", ("==", "="))
     def test_unquoted_url_with_comma_is_safely_quoted(
-        self, masker: OutputMasker, unmasker: ArgUnmasker
+        self, masker: OutputMasker, unmasker: ArgUnmasker, op: str
     ):
         raw = "https://ex.example.com/p,q=203.0.113.9"
         token = masker.mask_result({"url": raw})["url"]
 
-        assert unmasker.unmask_filter(f"url=={token}") == f'url=="{raw}"'
+        assert unmasker.unmask_filter(f"url{op}{token}") == f'url{op}"{raw}"'
 
     @pytest.mark.parametrize(
         "metacharacter",
@@ -429,6 +480,35 @@ class TestFilterInjectionGuard:
 
 
 class TestResolveNeverRaises:
+    def test_url_host_engine_failure_passes_through(
+        self, unmasker: ArgUnmasker, engine: FPEEngine, monkeypatch: pytest.MonkeyPatch
+    ):
+        host = engine.mask_hostname("safe.example.com")
+        tail = engine.mask_url_tail("/path")
+        value = f"https://{host}/{tail}"
+
+        def fail(_value: str) -> str:
+            raise RuntimeError("engine failure")
+
+        monkeypatch.setattr(engine._str_ciphers["hostname"], "decrypt", fail)
+
+        assert unmasker.resolve_url(value) == value
+
+    def test_stale_host_key_id_fails_the_whole_url_closed(
+        self, masker: OutputMasker, unmasker: ArgUnmasker
+    ):
+        masked = masker.mask_result({"url": "https://safe.example.com/path?q=value"})["url"]
+        prefix, rest = masked.split("://", 1)
+        host, slash, tail = rest.partition("/")
+        marker, key_id, ciphertext = host.split("-", 2)
+        stale_key_id = "0000" if key_id != "0000" else "ffff"
+        stale_host = f"{marker}-{stale_key_id}-{ciphertext}"
+        stale = f"{prefix}://{stale_host}{slash}{tail}"
+        expression = f'url=="{stale}"'
+
+        assert unmasker.resolve_url(stale) == stale
+        assert unmasker.unmask_filter(expression) == expression
+
     def test_marked_token_engine_failure_passes_through(
         self, unmasker: ArgUnmasker, engine: FPEEngine, monkeypatch: pytest.MonkeyPatch
     ):

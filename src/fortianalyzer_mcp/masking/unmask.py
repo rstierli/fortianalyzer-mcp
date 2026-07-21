@@ -63,10 +63,10 @@ from fortianalyzer_mcp.utils.validation import sanitize_filter_value
 
 logger = logging.getLogger(__name__)
 
-# field==value / field!=value / field contain value, single or double quoted
+# field==value / field=value / field contain value, single or double quoted
 _FILTER_CLAUSE_RE = re.compile(
     r"(?P<field>[A-Za-z_][A-Za-z0-9_]*)"
-    r"\s*(?P<op>==|!=|<=|>=|=~|<|>|\bcontain\b|\b!contain\b)\s*"
+    r"\s*(?P<op>==|!=|<=|>=|=~|!~|<|>|=(?![=~])|~|!contain\b|\bcontain\b)\s*"
     r"(?P<quote>[\"']?)(?P<value>[^\"'\s()]+)(?P=quote)"
 )
 _FILTER_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -132,9 +132,11 @@ class ArgUnmasker:
         check first, then the ``unmask_ip`` fallback, so an IP-literal
         host round-trips too), and a ``/url-<kid>-<ct>`` tail segment
         decodes back to the exact original path+query+fragment. A URL
-        that carries neither passes through untouched. This path is
-        load-bearing: without it a masked URL handed back whole would
-        reach FAZ still tokenized and silently match zero rows.
+        that carries neither passes through untouched. A host or tail token
+        that carries a marker but will not decrypt fails the whole value
+        closed. This path is load-bearing: without it a masked URL handed
+        back whole would reach FAZ still tokenized and silently match zero
+        rows.
         """
         from urllib.parse import urlsplit
 
@@ -150,7 +152,19 @@ class ArgUnmasker:
             return value
         if not host:
             return self.resolve_scalar(value)
-        resolved_host = self.resolve_scalar(host, IP_OR_HOST)
+        try:
+            marked_host = self._unmask_marked(host)
+        except MaskingError:
+            # Marker present but the payload will not decrypt: leave the whole
+            # URL alone rather than sending FAZ a half-resolved one that can
+            # only match zero rows. Mirrors the tail branch below.
+            logger.warning(
+                "url argument carries a host token that does not decrypt; passed through"
+            )
+            return value
+        resolved_host = (
+            marked_host if marked_host is not None else self._unmask_by_type(IP_OR_HOST, host)
+        )
         # Anchor after the ``//`` authority marker (a single-letter host
         # matches inside the scheme from position 0), and pass through if
         # the parsed netloc is not in the raw string at all (urlsplit

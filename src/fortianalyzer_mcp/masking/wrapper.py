@@ -95,6 +95,20 @@ _MIN_SUBSTITUTION_LEN = 4
 _PLACEHOLDER_MARK = "masked-unrepresentable-"
 
 
+def _find_key(obj: dict[str, Any], name: str) -> str | None:
+    """Original spelling of the lowercase ``name`` in ``obj``, or None.
+
+    The composite handlers hand ``_mask_structured`` an override dict it
+    looks up with ``key in paired`` against the ORIGINAL keys, so a
+    case-insensitive match must give back the key as spelled in ``obj`` or
+    the override silently stops applying.
+    """
+    for key in obj:
+        if key.lower() == name:
+            return key
+    return None
+
+
 class OutputMasker:
     """Recursive result masker bound to one FPE engine."""
 
@@ -221,10 +235,15 @@ class OutputMasker:
             if value in keep or not value or value.strip() in SKIP_VALUES:
                 return value
             return self.placeholder(value)
-        if isinstance(value, list):
+        if isinstance(value, list | tuple):
             return [self._burn_strings(item, keep) for item in value]
         if isinstance(value, dict):
-            return {key: self._burn_strings(item, keep) for key, item in value.items()}
+            # A map-shaped value carries the identifier in the KEY
+            # ({"<ip>": {...}}), and no later pass ever scans a key.
+            return {
+                self._burn_strings(key, keep): self._burn_strings(item, keep)
+                for key, item in value.items()
+            }
         return value
 
     def _mask_target(
@@ -240,12 +259,20 @@ class OutputMasker:
         appliance serial arrives as a ``device`` target.
 
         Unknown target names fail closed by burning string content because
-        there is no reliable type for reversible masking.
+        there is no reliable type for reversible masking. So does a whole
+        ``target`` that is not a list, an entry that is not a dict, and a
+        map-shaped ``value`` whose key carries the identifier. An entry
+        that IS a dict but carries neither ``name`` nor ``value`` is still
+        walked by the allowlist, so an identifier parked in its own key
+        survives; that shape is unattested and tracked separately.
         """
         out: list[Any] = []
         for item in value:
             if not isinstance(item, dict):
-                out.append(self._mask_structured(item, mapping, keep))
+                # No name/value pair to type the entry by: burn it like an
+                # unknown target name. The allowlist pass returns a bare
+                # string leaf unchanged, which is fail-open here.
+                out.append(self._burn_strings(item, keep))
                 continue
             name: Any = ""
             raw: Any = None
@@ -260,7 +287,7 @@ class OutputMasker:
                 masked_value = self._burn_strings(raw, keep)
             elif isinstance(raw, str):
                 masked_value = raw if raw in keep else self._mask_scalar(vtype, raw, mapping)
-            elif isinstance(raw, list):
+            elif isinstance(raw, list | tuple):
                 masked_value = [
                     elem
                     if isinstance(elem, str) and elem in keep
@@ -278,7 +305,14 @@ class OutputMasker:
             for key, item_value in item.items():
                 lowered = key.lower()
                 if lowered == "name":
-                    entry[key] = item_value
+                    # A label is a short string like "ip" or "device". Any
+                    # other shape is not a label, so its content is burned
+                    # rather than echoed: nothing else scans this slot.
+                    entry[key] = (
+                        item_value
+                        if isinstance(item_value, str)
+                        else self._burn_strings(item_value, keep)
+                    )
                 elif lowered == "value":
                     entry[key] = masked_value
                 elif lowered == "asset_value":
@@ -332,19 +366,62 @@ class OutputMasker:
         the same response is the same identifier wherever it appears in
         prose, and gets the same token. Longest first, so a domain is not
         partially rewritten by one of its own labels.
+        Matching is case-insensitive: hostnames, domains and emails are
+        case-insensitive identifiers and mask to the same token whatever
+        their spelling, so an echo that re-cases one is the same value.
+        The exact spelling still wins the token lookup, because usernames
+        are case-sensitive principals and ``Admin``/``admin`` must keep
+        their own tokens when both were masked. One alternation in one
+        pass, so a token already substituted is never re-scanned.
         """
         if not mapping:
             return text
-        for raw in sorted(mapping, key=len, reverse=True):
-            if len(raw) < _MIN_SUBSTITUTION_LEN:
-                continue
-            token = mapping[raw]
-            for variant in dict.fromkeys((raw, raw.lower())):
-                pattern = re.compile(
-                    r"(?<![A-Za-z0-9._-])" + re.escape(variant) + r"(?![A-Za-z0-9._-])"
-                )
-                text = pattern.sub(token, text)
-        return text
+        raws = [
+            raw
+            for raw in sorted(mapping, key=len, reverse=True)
+            if len(raw) >= _MIN_SUBSTITUTION_LEN
+        ]
+        if not raws:
+            return text
+        # An inexact (case-only) match may reuse a token only when exactly one
+        # raw owns that folded form. Usernames are case-sensitive principals,
+        # so two of them differing only in case make a third spelling
+        # ambiguous, and picking either token would resolve to the wrong
+        # identity. Ambiguous spellings fail closed to a placeholder instead.
+        folded: dict[str, str] = {}
+        ambiguous: set[str] = set()
+        for raw in raws:
+            key = raw.casefold()
+            if key in folded and folded[key] != mapping[raw]:
+                ambiguous.add(key)
+            folded.setdefault(key, mapping[raw])
+        # ``(?ai:...)`` scopes both flags to the alternation, and both are
+        # load-bearing. Without the scoping, ``re.IGNORECASE`` also widens
+        # the boundary look-arounds, because the ASCII class ``[A-Za-z]``
+        # then additionally matches the characters that case-fold into it,
+        # so an identifier sitting next to one is handed back in clear.
+        # Without ``a``, case-insensitivity follows full Unicode folding,
+        # which equates U+017F/U+212A/U+0130/U+0131 with ASCII letters: the
+        # regex matches a spelling that ``casefold`` then fails to look up,
+        # and a known value degrades to an irreversible placeholder. Re-casing
+        # an identifier means ASCII case, so ASCII folding is what we want.
+        pattern = re.compile(
+            r"(?<![A-Za-z0-9._-])(?ai:"
+            + "|".join(re.escape(raw) for raw in raws)
+            + r")(?![A-Za-z0-9._-])"
+        )
+
+        def swap(match: re.Match[str]) -> str:
+            found = match.group(0)
+            exact = mapping.get(found)
+            if exact is not None:
+                return exact
+            key = found.casefold()
+            if key in ambiguous:
+                return self.placeholder(found)
+            return folded.get(key) or self.placeholder(found)
+
+        return pattern.sub(swap, text)
 
     # -- the two passes -------------------------------------------------- #
 
@@ -415,12 +492,20 @@ class OutputMasker:
         Any other value is an id or a principal we cannot prove, and stays
         untouched as before.
         """
-        value = obj.get("incident_reporter")
+        key = _find_key(obj, "incident_reporter")
+        if key is None:
+            return {}
+        value = obj[key]
         if not isinstance(value, str) or not value.strip() or value.strip() in SKIP_VALUES:
             return {}
-        if value not in (obj.get("reporter"), obj.get("lastuser")):
+        siblings = tuple(
+            obj[sib]
+            for sib in (_find_key(obj, "reporter"), _find_key(obj, "lastuser"))
+            if sib is not None
+        )
+        if value not in siblings:
             return {}
-        return {"incident_reporter": self._mask_scalar(USERNAME, value, mapping)}
+        return {key: self._mask_scalar(USERNAME, value, mapping)}
 
     def _mask_threat_pair(self, obj: dict[str, Any], mapping: dict[str, str]) -> dict[str, str]:
         """fortiview ``threat``/``obf_url``: masked together, as domains (#40).
@@ -447,7 +532,10 @@ class OutputMasker:
         objects; the leak test carries a tripwire assertion so a live
         counterexample fails a test instead of leaking silently.
         """
-        obf = obj.get(OBF_URL_KEY)
+        obf_key = _find_key(obj, OBF_URL_KEY)
+        if obf_key is None:
+            return {}
+        obf = obj[obf_key]
         if not isinstance(obf, str) or not obf.strip() or obf.strip() in SKIP_VALUES:
             return {}
         out: dict[str, str] = {}
@@ -457,10 +545,12 @@ class OutputMasker:
             # Catch the escaped raw form in prose too; the unescaped form
             # is already in the mapping via _mask_scalar.
             mapping[obf] = escaped
-        out[OBF_URL_KEY] = escaped
-        threat = obj.get(THREAT_KEY)
-        if isinstance(threat, str) and threat.strip() and threat.strip() not in SKIP_VALUES:
-            out[THREAT_KEY] = self._mask_scalar(DOMAIN, threat, mapping)
+        out[obf_key] = escaped
+        threat_key = _find_key(obj, THREAT_KEY)
+        if threat_key is not None:
+            threat = obj[threat_key]
+            if isinstance(threat, str) and threat.strip() and threat.strip() not in SKIP_VALUES:
+                out[threat_key] = self._mask_scalar(DOMAIN, threat, mapping)
         return out
 
     def _mask_url_host(self, value: str, mapping: dict[str, str]) -> str:
@@ -585,8 +675,17 @@ class OutputMasker:
                 else self._mask_structured(item, mapping, keep)
                 for item in value
             ]
-        if lowered in COMPOSITE_TARGET and isinstance(value, list):
-            return self._mask_target(value, mapping, keep)
+        if lowered in COMPOSITE_TARGET:
+            if isinstance(value, list):
+                return self._mask_target(value, mapping, keep)
+            # Any other shape has no entries to type from. A scalar would
+            # reach the generic tail and be returned verbatim; a container
+            # would be walked by the allowlist, which masks the keys it
+            # knows and returns everything else in clear. Fail closed on
+            # the whole shape rather than depend on what the allowlist
+            # happens to cover. The cost is real: a container whose keys
+            # are allowlisted was masked reversibly before and now burns.
+            return self._burn_strings(value, keep)
         if lowered in COMPOSITE_DEVICE_VDOM and isinstance(value, str):
             return self._mask_device_vdom(value, mapping)
 

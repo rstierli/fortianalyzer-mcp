@@ -215,6 +215,107 @@ class TestFailClosed:
 
 
 class TestTargetFailClosed:
+    def test_non_dict_target_item_is_burned(self, masker: OutputMasker):
+        raw = "192.0.2.50"
+        masked = masker.mask_result({"target": [raw]})
+
+        assert masked["target"][0].startswith("masked-unrepresentable-")
+        assert raw not in str(masked)
+
+    def test_nested_list_target_item_is_burned(self, masker: OutputMasker):
+        raw = "192.0.2.51"
+        masked = masker.mask_result({"target": [[raw]]})
+
+        assert masked["target"][0][0].startswith("masked-unrepresentable-")
+        assert raw not in str(masked)
+
+    def test_nested_dict_target_item_is_burned(self, masker: OutputMasker):
+        raw = "192.0.2.52"
+        masked = masker.mask_result({"target": [[{"name": "ip", "value": raw}]]})
+
+        assert raw not in str(masked)
+
+    def test_known_name_dict_key_is_burned(self, masker: OutputMasker):
+        raw = "192.0.2.53"
+        masked = masker.mask_result({"target": [{"name": "ip", "value": {raw: {"hits": 3}}}]})
+
+        assert raw not in str(masked)
+
+    def test_unknown_name_dict_key_is_burned(self, masker: OutputMasker):
+        raw = "192.0.2.54"
+        masked = masker.mask_result({"target": [{"name": "whatever", "value": {raw: 1}}]})
+
+        assert raw not in str(masked)
+
+    def test_known_name_deeply_nested_string_leaf_is_burned(self, masker: OutputMasker):
+        """This passes before the fix and pins the existing deep recursion."""
+        raw = "192.0.2.55"
+        masked = masker.mask_result(
+            {
+                "target": [
+                    {"name": "ip", "value": [{"a": [{"b": raw}]}]},
+                ]
+            }
+        )
+
+        assert raw not in str(masked)
+
+    def test_non_list_target_string_is_burned(self, masker: OutputMasker):
+        raw = "bad.example.com"
+        masked = masker.mask_result({"target": raw})
+
+        assert masked["target"].startswith("masked-unrepresentable-")
+        assert raw not in str(masked)
+
+    def test_non_list_target_dict_is_burned(self, masker: OutputMasker):
+        raw = "192.0.2.90"
+        masked = masker.mask_result({"target": {"name": "ip", "value": raw}})
+
+        assert raw not in str(masked)
+
+    def test_tuple_target_is_burned(self, masker: OutputMasker):
+        """JSON payloads never produce tuples; this is defensive only.
+
+        Pin tuple support so ``list | tuple`` is not simplified to ``list``.
+        """
+        raw = "192.0.2.91"
+        masked = masker.mask_result({"target": ({"name": "ip", "value": raw},)})
+
+        assert raw not in str(masked)
+
+    def test_scalar_target_passes_through(self, masker: OutputMasker):
+        masked = masker.mask_result({"target": 1107})
+
+        assert masked["target"] == 1107
+
+    def test_stray_string_beside_a_valid_target_entry_burns_only_the_stray(
+        self, masker: OutputMasker, engine: FPEEngine
+    ):
+        raw_ip = "192.0.2.92"
+        stray = "bad.example.com"
+        masked = masker.mask_result({"target": [{"name": "ip", "value": raw_ip}, stray]})
+        valid, burned = masked["target"]
+
+        assert engine.unmask_ip(valid["value"]) == raw_ip
+        assert "masked-unrepresentable-" not in valid["value"]
+        assert burned.startswith("masked-unrepresentable-")
+        assert raw_ip not in str(masked)
+        assert stray not in str(masked)
+
+    def test_keep_value_as_dict_key_stays_clear(self, masker: OutputMasker):
+        devid = "FGT60F0000000000"
+        masked = masker.mask_result(
+            {"devid": devid, "target": [{"name": "ip", "value": {devid: 1}}]}
+        )
+
+        assert devid in masked["target"][0]["value"]
+
+    def test_non_list_target_keeps_device_identity_clear(self, masker: OutputMasker):
+        devid = "FGT60F0000000000"
+        masked = masker.mask_result({"devid": devid, "target": devid})
+
+        assert masked["target"] == devid
+
     def test_known_name_list_masks_each_string(self, masker: OutputMasker):
         raw_values = ["192.0.2.10", "192.0.2.11"]
         masked = masker.mask_result({"target": [{"name": "ip", "value": raw_values}]})
@@ -259,13 +360,15 @@ class TestTargetFailClosed:
     def test_known_name_dict_burns_nested_strings(self, masker: OutputMasker):
         masked = masker.mask_result({"target": [{"name": "ip", "value": {"note": "192.0.2.13"}}]})
 
-        assert masked["target"][0]["value"]["note"].startswith("masked-unrepresentable-")
+        value = next(iter(masked["target"][0]["value"].values()))
+        assert value.startswith("masked-unrepresentable-")
         assert "192.0.2.13" not in str(masked)
 
     def test_known_name_list_burns_nested_strings(self, masker: OutputMasker):
         masked = masker.mask_result({"target": [{"name": "ip", "value": [{"note": "192.0.2.14"}]}]})
 
-        assert masked["target"][0]["value"][0]["note"].startswith("masked-unrepresentable-")
+        value = next(iter(masked["target"][0]["value"][0].values()))
+        assert value.startswith("masked-unrepresentable-")
         assert "192.0.2.14" not in str(masked)
 
     def test_repeated_list_asset_value_reuses_masked_value(self, masker: OutputMasker):
@@ -292,6 +395,70 @@ class TestTargetFailClosed:
 
 
 class TestCaseInsensitiveFieldLookup:
+    def test_mixed_case_reporter_sibling_still_masks_incident_reporter(self, masker: OutputMasker):
+        user = "example-user"
+        masked = masker.mask_result({"Reporter": user, "incident_reporter": user})
+
+        assert user not in str(masked)
+        assert masked["incident_reporter"] == masked["Reporter"]
+
+    def test_mixed_case_incident_reporter_key_masks_and_keeps_its_spelling(
+        self, masker: OutputMasker
+    ):
+        user = "example-operator"
+        masked = masker.mask_result({"lastuser": user, "Incident_Reporter": user})
+
+        assert user not in str(masked)
+        assert "Incident_Reporter" in masked
+
+    def test_mixed_case_threat_sibling_masks_with_obf_url(self, masker: OutputMasker):
+        domain = "bad.example.com"
+        masked = masker.mask_result({"obf_url": "bad[dot]example[dot]com", "Threat": domain})
+
+        assert domain not in str(masked)
+        assert masked["Threat"] == masked["obf_url"].replace("[dot]", ".")
+
+    def test_mixed_case_obf_url_key_masks_the_pair(self, masker: OutputMasker):
+        domain = "bad.example.com"
+        escaped = "bad[dot]example[dot]com"
+        masked = masker.mask_result({"OBF_URL": escaped, "THREAT": domain})
+
+        assert domain not in str(masked)
+        assert escaped not in str(masked)
+        assert list(masked) == ["OBF_URL", "THREAT"]
+
+    def test_mixed_case_auto_raised_alert_id_still_stays_clear(self, masker: OutputMasker):
+        alert_id = "202607101000000020"
+        masked = masker.mask_result({"Reporter": "Auto-Raised", "incident_reporter": alert_id})
+
+        assert masked["incident_reporter"] == alert_id
+
+    def test_tuple_value_under_a_known_target_name_is_masked(self, masker: OutputMasker):
+        # The known-name branch accepts tuples as well as lists; without that
+        # a tuple falls through to the verbatim tail and the address survives.
+        masked = masker.mask_result({"target": [{"name": "ip", "value": ("192.0.2.93",)}]})
+
+        assert "192.0.2.93" not in str(masked)
+
+    def test_non_string_target_name_is_burned(self, masker: OutputMasker):
+        # A label is a short string. Any other shape is not a label, and the
+        # name slot is echoed verbatim by design, so its content must burn.
+        masked = masker.mask_result(
+            {"target": [{"name": {"label": "bad.example.com"}, "value": "192.0.2.94"}]}
+        )
+
+        assert "bad.example.com" not in str(masked)
+        assert "192.0.2.94" not in str(masked)
+
+    def test_unhashable_reporter_sibling_does_not_break_masking(self, masker: OutputMasker):
+        # The sibling values are compared as a tuple, not a set: a malformed
+        # record can carry a list under `reporter`, and a set comprehension
+        # would raise TypeError straight out of mask_result.
+        user = "example-user"
+        masked = masker.mask_result({"incident_reporter": user, "reporter": [user]})
+
+        assert masked["incident_reporter"] == user
+
     def test_mixed_case_typed_key_masks(self, masker: OutputMasker):
         masked = masker.mask_result({"SrcIP": "192.0.2.20"})
 

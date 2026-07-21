@@ -17,6 +17,7 @@ fortiview, ueba and event-handler objects, with documentation values
 responses; no value from any real estate appears here.
 """
 
+import time
 from typing import Any
 
 import pytest
@@ -357,6 +358,157 @@ class TestCompositeKeys:
 
 
 class TestFreeTextSubstitution:
+    def test_uppercase_echo_of_a_masked_hostname_is_substituted(self, masker: OutputMasker):
+        name = "edge.example.com"
+        masked = masker.mask_result(
+            {"srcname": name, "msg": f"blocked session from {name.upper()} at the edge"}
+        )
+
+        assert name.upper() not in masked["msg"]
+        assert masked["srcname"] in masked["msg"]
+
+    def test_title_case_echo_of_a_masked_domain_is_substituted(self, masker: OutputMasker):
+        domain = "example.org"
+        masked = masker.mask_result(
+            {
+                "groupby1": f"qname:{domain}",
+                "extrainfo": f"Domain:{domain.title()} blocked",
+            }
+        )
+        token = masked["groupby1"].partition(":")[2]
+
+        assert domain.title() not in masked["extrainfo"]
+        assert token in masked["extrainfo"]
+
+    def test_case_variant_usernames_keep_distinct_tokens(self, masker: OutputMasker):
+        masked = masker.mask_result(
+            {
+                "logs": [{"user": "Admin"}, {"user": "admin"}],
+                "msg": "Admin changed policy; admin logged out",
+            }
+        )
+        upper_token = masked["logs"][0]["user"]
+        lower_token = masked["logs"][1]["user"]
+        engine = FPEEngine(KEY)
+
+        assert upper_token != lower_token
+        assert upper_token in masked["msg"]
+        assert lower_token in masked["msg"]
+        assert engine.unmask_username(upper_token) == "Admin"
+        assert engine.unmask_username(lower_token) == "admin"
+
+    def test_uppercase_short_values_are_not_substituted_into_prose(self, masker: OutputMasker):
+        masked = masker.mask_result({"user": "abc", "msg": "ABC is a short code"})
+
+        assert "ABC is a short code" == masked["msg"]
+
+    def test_uppercase_echo_respects_token_boundaries(self, masker: OutputMasker):
+        name = "edge.example.com"
+        compound = f"{name.upper()}-SUFFIX"
+        masked = masker.mask_result({"srcname": name, "msg": f"{compound} is a different host"})
+
+        assert compound in masked["msg"]
+
+    def test_uppercase_echo_respects_the_leading_token_boundary(self, masker: OutputMasker):
+        # The trailing lookahead is covered above. Without the leading
+        # lookbehind this prefixed word is partially rewritten instead of
+        # being left alone.
+        name = "edge.example.com"
+        compound = f"NOT{name.upper()}"
+        masked = masker.mask_result({"srcname": name, "msg": f"{compound} is a different host"})
+
+        assert compound in masked["msg"]
+
+    # Escapes on purpose: these are exactly the characters an editor,
+    # terminal or copy-paste is most likely to flatten to ASCII, which
+    # would silently turn the two tests below into no-ops.
+    @pytest.mark.parametrize("adjacent", ["\u017f", "\u212a", "\u0130", "\u0131"])
+    def test_echo_next_to_a_case_folding_character_is_still_substituted(
+        self, masker: OutputMasker, adjacent: str
+    ):
+        # These four characters case-fold into the ASCII boundary class, so a
+        # pattern-wide re.IGNORECASE widens the boundary look-arounds and the
+        # identifier next to one is handed back in clear. The flag must stay
+        # scoped to the alternation with (?ai:...).
+        name = "edge.example.com"
+        masked = masker.mask_result(
+            {"srcname": name, "msg": f"seen {adjacent}{name} and {name}{adjacent} here"}
+        )
+
+        assert name not in masked["msg"]
+
+    @pytest.mark.parametrize("other", ["te\u017ft.example", "test.examp\u0142e"])
+    def test_unicode_lookalike_is_left_alone_not_burned(self, masker: OutputMasker, other: str):
+        # Folding is ASCII-only. Under full Unicode folding the regex matches
+        # these spellings but the casefold lookup misses, and a value that is
+        # not the known identifier at all degrades to an irreversible
+        # placeholder. Re-casing means ASCII case; leave anything else alone.
+        out = masker._substitute_known(f"{other} is here", {"test.example": "TOKEN"})
+
+        assert out == f"{other} is here"
+
+    def test_ambiguous_case_variant_principals_fail_closed(self, masker: OutputMasker):
+        # Two principals differing only in case make a third spelling
+        # ambiguous. Reusing either token would resolve to the wrong identity,
+        # so the occurrence burns instead.
+        mapping = {"Example-User": "user-aaaa", "example-user": "user-bbbb"}
+        out = masker._substitute_known("EXAMPLE-USER changed policy", mapping)
+
+        assert out.startswith("masked-unrepresentable-")
+        assert "user-aaaa" not in out
+        assert "user-bbbb" not in out
+
+    def test_unambiguous_case_variant_echo_keeps_the_single_token(self, masker: OutputMasker):
+        # Only one principal owns this folded form, so the echo is safe to
+        # attribute to it. This is the common case and must keep working.
+        out = masker._substitute_known("EXAMPLE-USER changed policy", {"Example-User": "user-aaaa"})
+
+        assert out == "user-aaaa changed policy"
+
+    def test_longest_raw_wins_at_the_same_start_position(self, masker: OutputMasker):
+        # Alternation order is load-bearing: shortest-first would rewrite the
+        # local part and leave the domain half of the address in prose.
+        mapping = {"person": "USERTOKEN", "person@example.com": "EMAILTOKEN"}
+
+        assert masker._substitute_known("person@example.com sent mail", mapping) == (
+            "EMAILTOKEN sent mail"
+        )
+
+    def test_a_substituted_token_is_not_rescanned(self, masker: OutputMasker):
+        first_raw = "edge.example.com"
+        first_token = "~fragment~"
+        mapping = {first_raw: first_token, "fragment": "replacement"}
+
+        assert masker._substitute_known(first_raw, mapping) == first_token
+
+    def test_large_result_masks_within_a_wall_clock_budget(self, masker: OutputMasker):
+        # Guards the regex-cache cliff the one-pass substitution removed. The
+        # bound is deliberately generous so a loaded CI runner does not flake;
+        # substitution is still superlinear, so this pins the order of
+        # magnitude, not a growth rate.
+        rows = []
+        blocks = ("192.0.2", "198.51.100", "203.0.113")
+        for index in range(500):
+            ip = f"{blocks[index // 254]}.{index % 254 + 1}"
+            user = f"example-user-{index:03d}"
+            hostname = f"host-{index}.example.com"
+            destination = f"destination-{index}.example.org"
+            rows.append(
+                {
+                    "srcip": ip,
+                    "user": user,
+                    "hostname": hostname,
+                    "dstname": destination,
+                    "msg": f"{hostname} connected as {user} to {destination}",
+                }
+            )
+
+        started = time.perf_counter()
+        masker.mask_result({"logs": rows})
+        elapsed = time.perf_counter() - started
+
+        assert elapsed < 5
+
     def test_hostname_masked_in_a_field_is_also_masked_in_prose(self, masker: OutputMasker):
         masked = masker.mask_result(
             {"srcname": SRC_NAME, "msg": f"blocked session from {SRC_NAME} at the edge"}
