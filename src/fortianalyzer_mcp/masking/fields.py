@@ -4,9 +4,16 @@ The log field names were verified against live FAZ 7.6.7 and 8.0.0 schemas
 (``get_log_fields`` across traffic, event, attack, webfilter, dns, virus,
 emailfilter and app-ctrl) — see the field-verification discussion on issue
 #40. Names the RFC drafted that do not exist in any schema (src, srcaddr,
-dst, dstaddr, srchost, dsthost, srcuser, remotename, email, message,
-domain) are deliberately absent: masking a nonexistent field is a silent
-no-op.
+dst, dstaddr, srchost, dsthost, srcuser, remotename) are deliberately
+absent: masking a nonexistent field is a silent no-op.
+
+``email``, ``domain`` and ``message`` were dropped on those same grounds
+and have since stopped qualifying. The logview vocabulary is not the only
+one the tools read: UEBA returns ``email`` on an extended ``get_endusers``
+record, FortiView names a browsed site ``domain`` on a top-websites row,
+and every tool answers an error under ``message``. Absent from
+``get_log_fields`` does not mean absent from a tool response, so each is
+carried below with the type its real carrier uses.
 
 **Logs are not the only surface.** ``get_log_fields`` describes logview
 rows. Alerts come from eventmgmt and incidents from incidentmgmt, and they
@@ -188,6 +195,7 @@ FIELD_TYPES: dict[str, str] = {
     "botnetdomain": DOMAIN,
     "domainctrldomain": DOMAIN,
     "scertcname": DOMAIN,
+    "domain": DOMAIN,  # fortiview top-websites: the site that was browsed
     # --- email carriers (from/to fall back to username when no "@")
     "sender": EMAIL,
     "recipient": EMAIL,
@@ -196,6 +204,7 @@ FIELD_TYPES: dict[str, str] = {
     "cc": EMAIL,
     "collectedemail": EMAIL,
     "dstcollectedemail": EMAIL,
+    "email": EMAIL,  # ueba get_endusers, detail_level="extended"
     # --- free text: embedded IOCs masked in place
     "msg": TEXT,
     "logdesc": TEXT,
@@ -217,6 +226,15 @@ FIELD_TYPES: dict[str, str] = {
     "filter": TEXT,
     "filter_applied": TEXT,
     "device": HOSTNAME,
+    # --- caller-facing prose: the skills layer and every tool error build
+    # these strings themselves, and they name the record they are about
+    # ("2 end-users match username 'jdoe'"). Pass 1 masks the record's own
+    # keys, so without these the same identifier is a token under one key
+    # and clear two keys away. TEXT, so pass 2 masks in place and nothing
+    # here is ever burned.
+    "warnings": TEXT,
+    "message": TEXT,
+    "reason": TEXT,
 }
 
 #: Composite keys whose value is a single string holding one or more
@@ -255,6 +273,12 @@ DEVICE_IDENTITY_TYPES: dict[str, str] = {
     "snclosest": HOSTNAME,
     "fortigate": HOSTNAME,  # fortiview: reporting device, comma-joined when aggregated
     "detectkey": HOSTNAME,  # ueba endpoints: serial of the detecting appliance
+    # eventmgmt alert subject_details: {alertid, devs, epids, euids}. Same
+    # class as devname, and until it was listed here it defeated the flag
+    # rather than following it: the device stayed clear under "devs" while
+    # the sibling "devname" masked, handing over the token-to-name pairing
+    # the flag exists to withhold.
+    "devs": HOSTNAME,
 }
 
 #: ``target[].name`` values, mapped to the type of the sibling ``value``.
@@ -280,7 +304,11 @@ COMPOSITE_URL_HOST = ("http_url",)
 #: the host masks in place exactly like COMPOSITE_URL_HOST, and the whole
 #: tail (path+query+fragment) seals into one reversible ``url-`` token.
 #: Substring search inside the tail is an accepted, documented loss.
-COMPOSITE_URL_FULL = ("url", "referralurl")
+#: ``link`` is the SOAR reputation source's reference URL, and the source
+#: puts the indicator in its query string ("...?query=<indicator>"), so the
+#: sensitive part is the tail, not the public portal host. Same treatment
+#: as ``url``, which keeps it reversible for anyone who wants to follow it.
+COMPOSITE_URL_FULL = ("url", "referralurl", "link")
 
 # Values that carry no identifier and pass through unmasked.
 SKIP_VALUES = frozenset({"", "N/A", "n/a", "unknown", "none", "-"})

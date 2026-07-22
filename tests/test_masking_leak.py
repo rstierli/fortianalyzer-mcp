@@ -932,3 +932,140 @@ class TestUrlFullMasking:
         masked = masker.mask_result({"url": encoded})["url"]
         assert masked.startswith("masked-unrepresentable-")
         assert ANALYST not in masked and "secret" not in masked
+
+
+class TestNonLogviewVocabulary:
+    """Keys that no logview schema has, but a real tool response carries.
+
+    The allowlist was built from ``get_log_fields``, so ``email``, ``domain``
+    and ``message`` were dropped as names that mask nothing. The UEBA, SOAR
+    and FortiView readers answer under exactly those names, and each of
+    these records is the shape its reader returns.
+    """
+
+    def test_ueba_enduser_email_is_masked(self, masker: OutputMasker):
+        engine = FPEEngine(KEY)
+        record = {"euid": 5, "euname": ANALYST, "email": SOC_EMAIL, "department": "SOC"}
+        masked = masker.mask_result({"status": "success", "data": [record]})
+        out = masked["data"][0]
+
+        assert SOC_EMAIL not in str(masked)
+        assert engine.unmask_email(out["email"]) == SOC_EMAIL
+
+    def test_fortiview_top_website_domain_is_masked(self, masker: OutputMasker):
+        masked = masker.mask_result({"data": [{"domain": BAD_DOMAIN, "bandwidth": 2}]})
+
+        assert BAD_DOMAIN not in str(masked)
+
+    def test_error_message_embedded_ip_is_masked_in_place(self, masker: OutputMasker):
+        # ``message`` is TEXT, so pass 2 scans it. A username in the same
+        # prose is only substituted when the response masked it somewhere
+        # (see the mapping residual in #73); an embedded address always is.
+        masked = masker.mask_result({"status": "error", "message": f"could not reach {PEER_IP}"})
+
+        assert PEER_IP not in masked["message"]
+
+
+class TestSoarIndicatorPair:
+    """``value`` typed by its sibling ``type``, the way SOAR returns an IOC."""
+
+    def test_indicator_ip_is_masked(self, masker: OutputMasker):
+        engine = FPEEngine(KEY)
+        row = {"value": PEER_IP, "type": "IP", "enrichment-reputation": "Malicious"}
+        out = masker.mask_result({"data": [row]})["data"][0]
+
+        assert PEER_IP not in str(out)
+        assert engine.unmask_ip(out["value"]) == PEER_IP
+        assert out["enrichment-reputation"] == "Malicious"  # verdict stays readable
+
+    def test_indicator_domain_is_masked(self, masker: OutputMasker):
+        out = masker.mask_result({"data": [{"value": BAD_DOMAIN, "type": "Domain"}]})
+
+        assert BAD_DOMAIN not in str(out)
+
+    def test_indicator_url_is_masked(self, masker: OutputMasker):
+        url = f"https://{BAD_DOMAIN}/payload"
+        out = masker.mask_result({"data": [{"value": url, "type": "URL"}]})["data"][0]
+
+        assert BAD_DOMAIN not in str(out)
+        assert out["value"].startswith("https://host-")
+
+    def test_indicator_type_is_case_insensitive(self, masker: OutputMasker):
+        # SOAR spells them IP/URL/Domain; nothing guarantees the casing.
+        for spelling in ("ip", "IP", "Ip"):
+            out = masker.mask_result({"data": [{"value": PEER_IP, "type": spelling}]})
+            assert PEER_IP not in str(out), spelling
+
+    def test_generic_value_type_pair_is_left_alone(self, masker: OutputMasker):
+        # The whole reason "value" is not allowlisted outright: the same key
+        # names a severity band, a count and a setting elsewhere in the API.
+        # An unrecognised type must leave it exactly as it was.
+        for kind in ("string", "severity", "int", ""):
+            out = masker.mask_result({"value": "high", "type": kind})
+            assert out["value"] == "high", kind
+
+    def test_value_without_a_type_sibling_is_left_alone(self, masker: OutputMasker):
+        assert masker.mask_result({"value": "high"})["value"] == "high"
+
+    def test_indicator_echo_in_prose_carries_the_same_token(self, masker: OutputMasker):
+        # The skills layer names the indicator in its caller-facing warning.
+        # Masked under one key and clear two keys away is the exact failure
+        # the two-pass design exists to close.
+        masked = masker.mask_result(
+            {
+                "data": [{"value": BAD_DOMAIN, "type": "Domain"}],
+                "warnings": [f"no stored enrichment for Domain '{BAD_DOMAIN}'"],
+            }
+        )
+
+        assert BAD_DOMAIN not in str(masked)
+        assert masked["data"][0]["value"] in masked["warnings"][0]
+
+
+class TestDeviceListAndSourceLink:
+    """Two more names the log vocabulary never had.
+
+    ``devs`` is the device list on an eventmgmt alert's ``subject_details``,
+    and ``link`` is the reference URL a SOAR reputation source returns.
+    """
+
+    def test_devs_follows_the_device_identity_flag(self, masker: OutputMasker):
+        # Flag off is the default: the appliance stays clear, like devname.
+        subject = {"alertid": "A1", "devs": [DEV_NAME], "epids": [3]}
+        masked = masker.mask_result({"subject_details": subject})
+
+        assert masked["subject_details"]["devs"] == [DEV_NAME]
+
+    def test_devs_masks_when_the_flag_is_on(self, full_masker: OutputMasker):
+        subject = {"alertid": "A1", "devs": [DEV_NAME], "epids": [3]}
+        masked = full_masker.mask_result({"subject_details": subject})
+
+        assert DEV_NAME not in str(masked)
+
+    def test_devs_and_devname_agree_under_the_flag(self, full_masker: OutputMasker):
+        # The reason this matters: while devs was unlisted, the same device
+        # was a token under devname and clear under devs in one record,
+        # which hands over exactly the pairing the flag withholds.
+        masked = full_masker.mask_result(
+            {"devname": DEV_NAME, "subject_details": {"devs": [DEV_NAME]}}
+        )
+
+        assert DEV_NAME not in str(masked)
+        assert masked["subject_details"]["devs"] == [masked["devname"]]
+
+    def test_source_link_tail_is_sealed(self, masker: OutputMasker):
+        # The reputation source puts the indicator in the query string.
+        link = f"https://ioc.example.org/search?query={BAD_DOMAIN}"
+        masked = masker.mask_result({"sources": [{"source": "cts", "link": link}]})
+        out = masked["sources"][0]["link"]
+
+        assert BAD_DOMAIN not in str(masked)
+        assert "url-" in out  # sealed, not burned: it resolves back
+
+    def test_source_link_round_trips(self, masker: OutputMasker):
+        from fortianalyzer_mcp.masking.unmask import ArgUnmasker
+
+        link = f"https://ioc.example.org/search?query={BAD_DOMAIN}"
+        masked = masker.mask_result({"link": link})["link"]
+
+        assert ArgUnmasker(FPEEngine(KEY)).resolve_url(masked) == link
