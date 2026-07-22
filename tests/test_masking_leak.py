@@ -1106,6 +1106,17 @@ class TestFortiViewResolvedName:
 
         assert FPEEngine(KEY).unmask_ip(out) == PEER_IP
 
+    @pytest.mark.parametrize("key", ["srcip_hostname", "dstip_hostname"])
+    def test_both_columns_take_the_resolved_form_reversibly(self, masker: OutputMasker, key: str):
+        # Asserting the resolved form on one column only left the other free
+        # to be typed IP, which burns a hostname irreversibly, or TEXT, which
+        # ships it in clear. Both passed the address-only assertions above.
+        out = masker.mask_result({key: BAD_DOMAIN})[key]
+
+        assert BAD_DOMAIN not in out
+        assert not out.startswith("masked-unrepresentable-")
+        assert FPEEngine(KEY).unmask_hostname(out) == BAD_DOMAIN
+
 
 class TestIncidentWorkflowPrincipals:
     """``assigned_to``/``remedy_executor``/``remedy_approver``.
@@ -1136,9 +1147,12 @@ class TestIncidentWorkflowPrincipals:
 
         assert len(set(masked.values())) == 1
 
-    def test_at_shaped_login_masks_instead_of_burning(self, masker: OutputMasker):
-        # The reason these are EMAIL and not USERNAME.
-        masked = masker.mask_result({"assigned_to": SOC_EMAIL})["assigned_to"]
+    @pytest.mark.parametrize("key", ["assigned_to", "remedy_executor", "remedy_approver"])
+    def test_at_shaped_login_masks_instead_of_burning(self, masker: OutputMasker, key: str):
+        # The reason these are EMAIL and not USERNAME. Parametrised over all
+        # three, because asserting it on one leaves the other two free to be
+        # retyped back to USERNAME without any test noticing.
+        masked = masker.mask_result({key: SOC_EMAIL})[key]
 
         assert SOC_EMAIL not in masked
         assert not masked.startswith("masked-unrepresentable-")
@@ -1155,12 +1169,18 @@ class TestNestedDeviceName:
         # fortiview policy-hits spells the appliance dev_name inside a
         # device_info sub-object. Unlisted, it kept the name clear next to a
         # masked devid on the same row.
+        #
+        # devid holds the SERIAL and dev_name the hostname, as a live row
+        # does. Reusing one string for both would let this pass even if
+        # dev_name were typed TEXT, because pass 2 would substitute it from
+        # the sibling's mapping entry and the field would never be typed at
+        # all -- the original bug, shipping green.
         masked = full_masker.mask_result(
-            {"devid": DEV_NAME, "device_info": {"dev_name": DEV_NAME, "ha_dev": "no"}}
+            {"devid": DEV_SERIAL, "device_info": {"dev_name": DEV_NAME, "ha_dev": "no"}}
         )
 
         assert DEV_NAME not in str(masked)
-        assert masked["device_info"]["dev_name"] == masked["devid"]
+        assert DEV_SERIAL not in str(masked)
 
     def test_nested_dev_name_stays_clear_with_the_flag_off(self, masker: OutputMasker):
         masked = masker.mask_result({"device_info": {"dev_name": DEV_NAME}})
