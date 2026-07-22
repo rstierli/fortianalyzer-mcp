@@ -828,6 +828,36 @@ class TestNestedWarningRedaction:
 
         assert _redact_warnings(payload) == payload
 
+    def test_returns_a_new_structure_rather_than_mutating_in_place(self):
+        # The preservation tests below compare against the same object, so
+        # they would all pass an implementation that edited the caller's
+        # dict and handed it back. Pin purity explicitly.
+        payload = {"warnings": [self.SECRET]}
+        result = _redact_warnings(payload)
+
+        assert result is not payload
+        assert payload["warnings"] == [self.SECRET]
+
+    def test_warnings_nested_inside_a_list_of_lists(self):
+        # Recursion has to go through every list level, not just the first.
+        out = _redact_warnings({"a": [[{"warnings": [self.SECRET]}]]})
+
+        assert "SECRET123" not in str(out)
+
+    def test_a_warnings_suffixed_key_is_not_rewritten(self):
+        # The docstring promises only `warnings` is touched. A suffix match
+        # would silently start rewriting neighbouring fields.
+        payload = {"suppressed_warnings": [self.SECRET]}
+
+        assert _redact_warnings(payload) == payload
+
+    def test_a_warnings_key_holding_a_dict_is_still_recursed_into(self):
+        # Not a shape any model produces today, but the branch that skips a
+        # non-list `warnings` must recurse rather than return it untouched.
+        out = _redact_warnings({"warnings": {"nested": {"warnings": [self.SECRET]}}})
+
+        assert "SECRET123" not in str(out)
+
     def test_shape_is_otherwise_preserved(self):
         payload = {
             "subject_type": "alert",
