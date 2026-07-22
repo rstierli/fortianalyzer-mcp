@@ -625,6 +625,118 @@ class TestTargetDeviceIdentityConsistency:
     every other device-identity carrier: half-masked estate identity would
     pair each token with its clear serial two keys away."""
 
+    def test_list_valued_device_stays_clear_in_device_target(self, masker: OutputMasker):
+        masked = masker.mask_result(
+            {"devs": [DEV_NAME], "target": [{"name": "device", "value": DEV_NAME}]}
+        )
+
+        assert masked["target"][0]["value"] == DEV_NAME
+
+    def test_list_valued_device_stays_clear_in_unknown_target(self, masker: OutputMasker):
+        masked = masker.mask_result(
+            {"devs": [DEV_NAME], "target": [{"name": "unknown", "value": DEV_NAME}]}
+        )
+
+        assert masked["target"][0]["value"] == DEV_NAME
+        assert "masked-unrepresentable-" not in masked["target"][0]["value"]
+
+    def test_two_list_valued_devices_stay_clear_in_targets(self, masker: OutputMasker):
+        masked = masker.mask_result(
+            {
+                "devs": [DEV_NAME, DEV_PEER],
+                "target": [
+                    {"name": "device", "value": DEV_NAME},
+                    {"name": "device", "value": DEV_PEER},
+                ],
+            }
+        )
+
+        assert [entry["value"] for entry in masked["target"]] == [DEV_NAME, DEV_PEER]
+
+    def test_list_valued_device_absent_from_target_is_unchanged(self, masker: OutputMasker):
+        masked = masker.mask_result(
+            {"devs": [DEV_NAME], "target": [{"name": "device", "value": DEV_PEER}]}
+        )
+
+        assert masked["devs"] == [DEV_NAME]
+        assert masked["target"][0]["value"] != DEV_PEER
+
+    def test_non_device_value_alongside_device_list_still_masks(self, masker: OutputMasker):
+        masked = masker.mask_result({"devs": [DEV_NAME], "srcname": ENDPOINT_NAME})
+
+        assert masked["devs"] == [DEV_NAME]
+        assert masked["srcname"] != ENDPOINT_NAME
+
+    def test_list_valued_device_still_masks_when_flag_on(self, full_masker: OutputMasker):
+        masked = full_masker.mask_result({"devs": [DEV_NAME]})
+
+        assert masked["devs"][0] != DEV_NAME
+
+    def test_a_comma_inside_a_list_element_is_not_split(self, masker: OutputMasker):
+        """The split is for the string form only, and deliberately so.
+
+        Whatever lands in the keep set is exempted from masking inside
+        ``target``, so splitting exempts each part on its own. A string has
+        to be split because FAZ joins aggregated device names into one
+        value; a list is already that split form, so splitting its elements
+        would widen the exemption for nothing.
+        """
+        analyst = "analyst-example"
+        masked = masker.mask_result(
+            {
+                "devs": [f"{DEV_NAME},{analyst}"],
+                "target": [{"name": "user", "value": analyst}],
+            }
+        )
+
+        assert masked["target"][0]["value"] != analyst
+
+    def test_whitespace_around_a_list_element_is_stripped(self, masker: OutputMasker):
+        """The string branch strips; the list branch must agree.
+
+        Without it, a name padded by the appliance fails the exact-string
+        match and the same device masks in ``target`` while staying clear
+        under ``devs``, which is the inconsistency this set exists to close.
+        """
+        masked = masker.mask_result(
+            {
+                "devs": [f"  {DEV_NAME}  "],
+                "target": [{"name": "device", "value": DEV_NAME}],
+            }
+        )
+
+        assert masked["target"][0]["value"] == DEV_NAME
+
+    def test_a_non_string_list_element_is_not_admitted(self, masker: OutputMasker):
+        """Whatever enters the keep set is exempted from masking.
+
+        Stringifying arbitrary elements would let a bare id exempt any
+        ``target`` value that happens to render the same way, so only real
+        string names are collected.
+        """
+        masked = masker.mask_result(
+            {"devs": [1305], "target": [{"name": "device", "value": "1305"}]}
+        )
+
+        assert masked["target"][0]["value"] != "1305"
+
+    def test_a_dict_nested_in_a_list_element_is_still_walked(self, masker: OutputMasker):
+        """A non-string list element keeps its device-identity keys.
+
+        Before lists were handled here they fell through to the recursive
+        walk, so ``devs: [{"devname": ...}]`` contributed the nested name.
+        The list branch must not cut that path off: it takes string
+        elements whole and walks the rest.
+        """
+        masked = masker.mask_result(
+            {
+                "devs": [{"devname": DEV_NAME}],
+                "target": [{"name": "device", "value": DEV_NAME}],
+            }
+        )
+
+        assert masked["target"][0]["value"] == DEV_NAME
+
     def test_estate_serial_in_target_stays_clear_when_flag_off(self, masker: OutputMasker):
         masked = masker.mask_result(ALERT)
         entry = masked["target"][4]

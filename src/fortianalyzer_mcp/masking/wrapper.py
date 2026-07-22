@@ -441,14 +441,42 @@ class OutputMasker:
         ``target[].value``) must leave it clear too. Masking it in one
         place while ``devid`` shows it two keys away is not privacy, it is
         a token-to-serial correlation gift.
+
+        A device-identity key may carry a list of names rather than one
+        string: ``devs`` on an alert's ``subject_details`` is list-valued,
+        and until it was handled here a device named only there stayed
+        clear under ``devs`` while the same name masked inside ``target``,
+        which is the pairing this set exists to prevent.
+
+        The comma split applies to the string form ONLY. A string is split
+        because FAZ joins aggregated device names into one value
+        (``fortigate`` on a multi-device fortiview row), and every part is
+        then a device name. A list is already that split form, so
+        splitting its elements again would add nothing and would widen the
+        one hazard this set has: whatever lands in it is exempted from
+        masking inside ``target``, so a value carrying a comma exempts each
+        part independently of whether that part names a device.
         """
         out: set[str] = set()
 
         def walk(node: Any) -> None:
             if isinstance(node, dict):
                 for key, value in node.items():
-                    if key.lower() in DEVICE_IDENTITY_TYPES and isinstance(value, str):
-                        out.update(part.strip() for part in value.split(","))
+                    if key.lower() in DEVICE_IDENTITY_TYPES:
+                        if isinstance(value, str):
+                            out.update(part.strip() for part in value.split(","))
+                        elif isinstance(value, list | tuple):
+                            # String elements are taken whole; anything else
+                            # (a dict nesting devname deeper) is walked, as
+                            # every non-string value already was before the
+                            # list form was handled here.
+                            for item in value:
+                                if isinstance(item, str):
+                                    out.add(item.strip())
+                                else:
+                                    walk(item)
+                        else:
+                            walk(value)
                     elif key.lower() in COMPOSITE_DEVICE_VDOM and isinstance(value, str):
                         for part in value.split(","):
                             match = _DEVVDS_RE.match(part.strip())
