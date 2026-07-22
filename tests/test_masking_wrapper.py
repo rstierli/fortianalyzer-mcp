@@ -10,7 +10,7 @@ import re
 
 import pytest
 
-from fortianalyzer_mcp.masking.fields import FIELD_TYPES
+from fortianalyzer_mcp.masking.fields import DOMAIN, EMAIL, FIELD_TYPES, TEXT
 from fortianalyzer_mcp.masking.fpe_engine import FPEEngine
 from fortianalyzer_mcp.masking.wrapper import OutputMasker, install_masking
 
@@ -55,11 +55,18 @@ class TestFieldTable:
             "dsthost",
             "srcuser",
             "remotename",
-            "email",
-            "message",
-            "domain",
         ):
             assert dead not in FIELD_TYPES
+
+    def test_names_dead_in_logview_but_live_on_another_reader(self):
+        # These three left the list above because a real tool response
+        # carries them: UEBA end-users answer under "email", a fortiview
+        # top-websites row names the browsed site "domain", and every tool
+        # error answers under "message". Absent from get_log_fields is not
+        # absent from a tool response.
+        assert FIELD_TYPES["email"] == EMAIL
+        assert FIELD_TYPES["domain"] == DOMAIN
+        assert FIELD_TYPES["message"] == TEXT
 
     def test_core_fields_present(self):
         for name in (

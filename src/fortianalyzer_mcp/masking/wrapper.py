@@ -469,6 +469,7 @@ class OutputMasker:
         if isinstance(obj, dict):
             paired = self._mask_threat_pair(obj, mapping)
             paired.update(self._mask_incident_reporter(obj, mapping))
+            paired.update(self._mask_indicator_pair(obj, mapping))
             return {
                 key: paired[key] if key in paired else self._mask_entry(key, value, mapping, keep)
                 for key, value in obj.items()
@@ -506,6 +507,40 @@ class OutputMasker:
         if value not in siblings:
             return {}
         return {key: self._mask_scalar(USERNAME, value, mapping)}
+
+    def _mask_indicator_pair(self, obj: dict[str, Any], mapping: dict[str, str]) -> dict[str, str]:
+        """SOAR ``value``/``type``: the IOC itself, typed by its sibling.
+
+        ``get_indicator_enrichment`` and ``get_linked_indicators`` return
+        the indicator under the key ``value``, which is far too generic to
+        allowlist outright: the same name carries a severity band, a count
+        and a config setting elsewhere in the API, and typing it globally
+        would mask ``"high"`` as a hostname. The sibling ``type`` decides
+        instead, exactly as ``obf_url`` decides for ``threat`` -- SOAR
+        writes it on every indicator row and it names the value's class.
+
+        Only IP, Domain and URL are recognised, which is the set the reader
+        tools accept. Any other ``type`` (or none) leaves ``value`` alone,
+        so the generic use of the name is untouched.
+        """
+        key = _find_key(obj, "value")
+        type_key = _find_key(obj, "type")
+        if key is None or type_key is None:
+            return {}
+        value = obj[key]
+        if not isinstance(value, str) or not value.strip() or value.strip() in SKIP_VALUES:
+            return {}
+        kind = obj[type_key]
+        if not isinstance(kind, str):
+            return {}
+        lowered = kind.strip().lower()
+        if lowered == "ip":
+            return {key: self._mask_scalar(IP, value, mapping)}
+        if lowered == "domain":
+            return {key: self._mask_scalar(DOMAIN, value, mapping)}
+        if lowered == "url":
+            return {key: self._mask_url_full(value, mapping)}
+        return {}
 
     def _mask_threat_pair(self, obj: dict[str, Any], mapping: dict[str, str]) -> dict[str, str]:
         """fortiview ``threat``/``obf_url``: masked together, as domains (#40).
