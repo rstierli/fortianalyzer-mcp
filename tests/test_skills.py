@@ -32,7 +32,14 @@ from fortianalyzer_mcp.skills.models import (
 
 WAVE1_SKILL_IDS = {"incidents", "reports", "log_search", "triage", "incident_summary"}
 WAVE2_DATA_ACCESS_IDS = {"asset_lookup", "identity_lookup", "alert_rules"}
-REGISTERED_SKILL_IDS = WAVE1_SKILL_IDS | WAVE2_DATA_ACCESS_IDS
+WAVE2_ENRICHMENT_IDS = {
+    "threat_intel",
+    "identity_profile",
+    "app_usage",
+    "network_context",
+    "risk_assessment",
+}
+REGISTERED_SKILL_IDS = WAVE1_SKILL_IDS | WAVE2_DATA_ACCESS_IDS | WAVE2_ENRICHMENT_IDS
 
 GET_INCIDENTS = "fortianalyzer_mcp.tools.incident_tools.get_incidents"
 GET_INCIDENT = "fortianalyzer_mcp.tools.incident_tools.get_incident"

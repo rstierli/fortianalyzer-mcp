@@ -168,6 +168,8 @@ VALID_FORTIVIEW_VIEWS = {
     "top-websites",
     "top-threats",
     "top-cloud-applications",
+    "top-countries",  # Top destination countries (geo) — network_context skill
+    "site-to-site-ipsec",  # Site-to-site IPsec tunnels — network_context skill
     "policy-hits",  # Per-policy hit counts (correct endpoint)
     "policy-line",  # Time-series policy data
 }

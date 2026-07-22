@@ -15,18 +15,28 @@ from fortianalyzer_mcp.skills import handlers
 from fortianalyzer_mcp.skills.models import (
     AlertRulesParams,
     AlertRulesResult,
+    AppUsageParams,
+    AppUsageResult,
     AssetLookupParams,
     AssetLookupResult,
     IdentityLookupParams,
     IdentityLookupResult,
+    IdentityProfileParams,
+    IdentityProfileResult,
     IncidentsParams,
     IncidentsResult,
     IncidentSummary,
     IncidentSummaryParams,
     LogSearchParams,
     LogSearchResult,
+    NetworkContextParams,
+    NetworkContextResult,
     ReportsParams,
     ReportsResult,
+    RiskAssessmentParams,
+    RiskAssessmentResult,
+    ThreatIntelParams,
+    ThreatIntelResult,
     TriageParams,
     TriageResult,
 )
@@ -102,6 +112,59 @@ SKILLS: dict[str, SkillSpec] = {
             params_model=AlertRulesParams,
             output_model=AlertRulesResult,
             handler=handlers.run_alert_rules,
+        ),
+        SkillSpec(
+            id="threat_intel",
+            tier="enrichment",
+            description="Per-indicator reputation enrichment (IP/URL/Domain): stored "
+            "SOAR verdict, confidence and status for explicit indicators or those "
+            "linked to an alert/incident, plus the threat-landscape context. "
+            "Reads stored enrichment only. Requires SOAR.",
+            params_model=ThreatIntelParams,
+            output_model=ThreatIntelResult,
+            handler=handlers.run_threat_intel,
+        ),
+        SkillSpec(
+            id="identity_profile",
+            tier="enrichment",
+            description="Context bundle for one user: the UEBA identity record, "
+            "the user's associated endpoints, and recent auth-failure/VPN event "
+            "activity. Requires UEBA; the activity search uses one logview "
+            "search slot.",
+            params_model=IdentityProfileParams,
+            output_model=IdentityProfileResult,
+            handler=handlers.run_identity_profile,
+        ),
+        SkillSpec(
+            id="app_usage",
+            tier="enrichment",
+            description="Application usage profile for a time window: top "
+            "applications, top websites, top cloud applications (shadow-IT "
+            "signal), and DLP events. Each section degrades independently.",
+            params_model=AppUsageParams,
+            output_model=AppUsageResult,
+            handler=handlers.run_app_usage,
+        ),
+        SkillSpec(
+            id="network_context",
+            tier="enrichment",
+            description="Network-layer context bundle for a time window: top "
+            "destinations, top sources, top destination countries (geo), and "
+            "site-to-site IPsec tunnels — each section best-effort.",
+            params_model=NetworkContextParams,
+            output_model=NetworkContextResult,
+            handler=handlers.run_network_context,
+        ),
+        SkillSpec(
+            id="risk_assessment",
+            tier="enrichment",
+            description="Transparent composite 0-100 risk score for one endpoint "
+            "or end-user over three dimensions (CVE severity counts, threat "
+            "detections, auth failures), exposing every raw input, subscore, "
+            "weight and band. Requires UEBA.",
+            params_model=RiskAssessmentParams,
+            output_model=RiskAssessmentResult,
+            handler=handlers.run_risk_assessment,
         ),
         SkillSpec(
             id="triage",

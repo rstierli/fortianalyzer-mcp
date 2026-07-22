@@ -440,3 +440,355 @@ class IncidentSummary(BaseModel):
     counts: dict[str, int] = Field(description="alerts / evidence_logs totals")
     time_range: str
     warnings: list[str] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------- #
+# threat_intel (Enrichment)                                             #
+# --------------------------------------------------------------------- #
+
+
+class IndicatorSpec(BaseModel):
+    """One explicit indicator to enrich."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    value: str = Field(description="The indicator value (an IP, URL or domain)")
+    type: Literal["IP", "URL", "Domain"]
+
+
+class ThreatIntelParams(BaseModel):
+    """Parameters for the ``threat_intel`` skill.
+
+    Subjects come from ``indicators`` (explicit) and/or from the SOAR
+    indicators linked to ``alert_id``/``incident_id`` (resolved); at
+    least one source is required, and both may be combined (the union is
+    enriched, de-duplicated).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    adom: str | None = None
+    indicators: list[IndicatorSpec] | None = Field(
+        default=None, description="Explicit indicators to enrich (IP/URL/Domain)"
+    )
+    alert_id: str | None = Field(
+        default=None, description="Resolve and enrich the indicators linked to this alert"
+    )
+    incident_id: str | None = Field(
+        default=None, description="Resolve and enrich the indicators linked to this incident"
+    )
+    detail_level: Literal["standard", "extended"] = Field(
+        default="standard",
+        description='"extended" attaches the raw enrichment-detail from the reputation source',
+    )
+    time_range: str | None = Field(
+        default=None,
+        description='Optional window ("7-day" or "start|end") for the linked-indicator '
+        "and enrichment lookups; omit to search all time (SOAR otherwise drops "
+        "indicators older than 7 days). The threat-landscape context uses this window "
+        'too ("24-hour" when omitted).',
+    )
+    include_threat_landscape: bool = Field(
+        default=True, description="Include the FortiView top-threats context section"
+    )
+
+    @model_validator(mode="after")
+    def _subject_sources(self) -> "ThreatIntelParams":
+        if not self.indicators and not self.alert_id and not self.incident_id:
+            raise ValueError('provide "indicators", "alert_id" or "incident_id"')
+        if self.alert_id and self.incident_id:
+            raise ValueError('provide at most one of "alert_id" or "incident_id"')
+        return self
+
+
+class IndicatorEnrichmentRecord(BaseModel):
+    """One indicator with its stored SOAR reputation.
+
+    ``reputation``/``confidence``/``status`` are verbatim convenience
+    copies of the row's ``enrichment-*`` fields; ``record`` is the full
+    matched indicator row. All three are ``None`` (and ``record`` is
+    ``None``) when the lookup failed or SOAR holds no row for the value —
+    the accompanying warning names which.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    value: str
+    type: str
+    reputation: str | None = Field(
+        default=None,
+        description="'enrichment-reputation', verbatim "
+        "(Good/Suspicious/Malicious/NoReputationAvailable)",
+    )
+    confidence: int | str | None = Field(
+        default=None, description="'enrichment-confidence' (0-100), verbatim"
+    )
+    status: str | None = Field(default=None, description="'enrichment-status', verbatim")
+    record: dict[str, Any] | None = Field(
+        default=None,
+        description="Matched FAZ indicator row, verbatim (uuids; plus "
+        "'enrichment-detail' at detail_level='extended')",
+    )
+
+
+class ThreatIntelResult(BaseModel):
+    """Output of the ``threat_intel`` skill.
+
+    Honest caveat: this reads *stored* SOAR enrichment only — it never
+    triggers a new reputation lookup. An indicator FAZ has not yet
+    enriched comes back with reputation ``NoReputationAvailable`` or with
+    no matched row at all; that means "not looked up", not "clean".
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    indicators: list[IndicatorEnrichmentRecord]
+    indicator_count: int
+    threat_landscape: list[dict[str, Any]] | FeatureGap = Field(
+        description="Top threats in the window, verbatim — or the gap marker"
+    )
+    warnings: list[str] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------- #
+# identity_profile (Enrichment)                                         #
+# --------------------------------------------------------------------- #
+
+
+class IdentityProfileParams(BaseModel):
+    """Parameters for the ``identity_profile`` skill. Exactly one of
+    ``euid`` or ``username`` identifies the user."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    adom: str | None = None
+    euid: int | None = Field(default=None, description="End-user ID (scoped server-side)")
+    username: str | None = Field(
+        default=None,
+        description="Case-insensitive EXACT match on the user name ('euname'); "
+        "use the identity_lookup skill for substring discovery",
+    )
+    detail_level: Literal["basic", "standard", "extended"] = Field(
+        default="standard",
+        description='Detail for the user record; "extended" adds contact fields',
+    )
+    time_range: str = Field(default="24-hour", description="Window for the recent-activity search")
+    activity_limit: int = Field(
+        default=100, ge=1, le=1000, description="Max activity log rows returned"
+    )
+    include_endpoints: bool = Field(
+        default=True, description="Attach the user's associated endpoints"
+    )
+    include_activity: bool = Field(
+        default=True,
+        description="Attach recent auth-failure/VPN event logs (consumes one logview search slot)",
+    )
+
+    @model_validator(mode="after")
+    def _exactly_one_identifier(self) -> "IdentityProfileParams":
+        if (self.euid is None) == (self.username is None):
+            raise ValueError('provide exactly one of "euid" or "username"')
+        return self
+
+
+class IdentityProfileResult(BaseModel):
+    """Output of the ``identity_profile`` skill."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    user: dict[str, Any] = Field(description="FAZ UEBA end-user record, verbatim")
+    endpoints: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="UEBA endpoint records whose 'user' association list names this user, verbatim",
+    )
+    recent_activity: list[dict[str, Any]] | FeatureGap = Field(
+        description="Auth-failure / VPN event-log rows for the user in the "
+        "window, verbatim — or the gap marker"
+    )
+    counts: dict[str, int] = Field(description="endpoints / activity_rows totals")
+    time_range: str
+    warnings: list[str] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------- #
+# app_usage (Enrichment)                                                #
+# --------------------------------------------------------------------- #
+
+
+class AppUsageParams(BaseModel):
+    """Parameters for the ``app_usage`` skill."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    adom: str | None = None
+    time_range: str = Field(
+        default="24-hour",
+        description='Preset ("1-hour".."30-day") or custom "start|end"',
+    )
+    device: str | None = Field(
+        default=None,
+        description="Device filter (serial number or name), forwarded to every section",
+    )
+    top_limit: int = Field(
+        default=20, ge=1, le=100, description="Top-N size for each FortiView section"
+    )
+    include_dlp: bool = Field(
+        default=True,
+        description="Include the DLP events section (the skill's only slot-bounded log search)",
+    )
+    dlp_limit: int = Field(default=100, ge=1, le=1000, description="Max DLP events returned")
+
+
+class AppUsageResult(BaseModel):
+    """Output of the ``app_usage`` skill.
+
+    A context bundle with no single subject: every section is best-effort
+    and degrades independently to a ``FeatureGap``, so a partial result is
+    still a success. Rows are verbatim FAZ records.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    applications: list[dict[str, Any]] | FeatureGap = Field(
+        description="Top applications in the window, verbatim — or the gap marker"
+    )
+    websites: list[dict[str, Any]] | FeatureGap = Field(
+        description="Top websites in the window, verbatim — or the gap marker"
+    )
+    cloud_applications: list[dict[str, Any]] | FeatureGap = Field(
+        description="Top cloud/SaaS applications (shadow-IT signal), verbatim — or the gap marker"
+    )
+    dlp_events: list[dict[str, Any]] | FeatureGap = Field(
+        description="DLP log rows in the window, verbatim — or the gap marker"
+    )
+    counts: dict[str, int] = Field(description="Row count per section (0 for gap sections)")
+    time_range: str
+    warnings: list[str] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------- #
+# network_context (Enrichment)                                          #
+# --------------------------------------------------------------------- #
+
+
+class NetworkContextParams(BaseModel):
+    """Parameters for the ``network_context`` skill."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    adom: str | None = None
+    time_range: str = Field(
+        default="24-hour",
+        description='Preset ("1-hour".."30-day") or custom "start|end"',
+    )
+    device: str | None = Field(
+        default=None, description="Device filter (name or serial), forwarded to every read"
+    )
+    top_limit: int = Field(default=20, ge=1, le=100, description="Max rows per section")
+    include_geo: bool = Field(default=True, description="Include the top-countries (geo) section")
+    include_vpn: bool = Field(default=True, description="Include the IPsec VPN tunnel section")
+
+
+class NetworkContextResult(BaseModel):
+    """Output of the ``network_context`` skill. Rows are verbatim FortiView rows."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    top_destinations: list[dict[str, Any]] | FeatureGap = Field(
+        description="Top destination IPs in the window, verbatim — or the gap marker"
+    )
+    top_sources: list[dict[str, Any]] | FeatureGap = Field(
+        description="Top source IPs in the window, verbatim — or the gap marker"
+    )
+    top_countries: list[dict[str, Any]] | FeatureGap = Field(
+        description="Top destination countries (geo), verbatim — or the gap marker"
+    )
+    vpn_tunnels: list[dict[str, Any]] | FeatureGap = Field(
+        description="Site-to-site IPsec tunnel rows, verbatim — or the gap marker"
+    )
+    counts: dict[str, int] = Field(description="Rows per section (0 for a gap section)")
+    time_range: str
+    warnings: list[str] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------- #
+# risk_assessment (Enrichment)                                          #
+# --------------------------------------------------------------------- #
+
+
+class RiskAssessmentParams(BaseModel):
+    """Parameters for the ``risk_assessment`` skill. Exactly one entity required."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    adom: str | None = None
+    epid: int | None = Field(default=None, description="UEBA endpoint ID to score")
+    euid: int | None = Field(default=None, description="UEBA end-user ID to score")
+    time_range: str = Field(
+        default="7-day", description="Window for the threat and auth-failure dimensions"
+    )
+    detectby: Literal["FortiClient", "FortiGate"] | None = Field(
+        default=None, description="Vulnerability detector filter, forwarded to the CVE reader"
+    )
+
+    @model_validator(mode="after")
+    def _exactly_one_entity(self) -> "RiskAssessmentParams":
+        if (self.epid is None) == (self.euid is None):
+            raise ValueError('provide exactly one of "epid" or "euid"')
+        return self
+
+
+class RiskDimension(BaseModel):
+    """One scored risk dimension: raw inputs, normalized subscore, weight.
+
+    ``raw_counts`` holds the exact inputs the subscore was computed from
+    (severity counts, or ``{"failures": n}``). It is empty when the
+    dimension's read was unavailable — that case is always named in the
+    result's ``warnings``, so an empty read is distinguishable from a
+    genuine zero.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    raw_counts: dict[str, int] = Field(
+        description="Raw inputs behind the subscore (empty when the read was unavailable)"
+    )
+    subscore: int = Field(ge=0, le=100, description="Normalized 0-100 dimension score")
+    weight: float = Field(description="This dimension's weight in the composite")
+
+
+class RiskAssessmentResult(BaseModel):
+    """Output of the ``risk_assessment`` skill — a fully auditable score.
+
+    Formula (deterministic, no inference; weights are the module-level
+    constants ``_W_VULN``/``_W_THREAT``/``_W_AUTH`` in ``handlers``):
+
+    - vulnerability = min(100, critical*25 + high*10 + medium*3 + low*1)
+      over CVE severity counts for the entity's endpoint(s)
+    - threat = min(100, critical*25 + high*10 + medium*3) over threat
+      detections tied to the entity in the window
+    - auth_failure = min(100, failures*5) over event-log auth failures
+      (``action==failure``) tied to the entity in the window
+    - composite_score = round(0.40*vulnerability + 0.35*threat
+      + 0.25*auth_failure)
+    - band: 0-24 "low", 25-49 "medium", 50-74 "high", 75-100 "critical"
+
+    Severity labels are matched case-insensitively; labels outside the
+    scoring table still appear in ``raw_counts`` but contribute 0 points.
+    A dimension whose read failed scores 0 **and is named in warnings** —
+    the composite then covers only the available dimensions and is never
+    silently presented as complete.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    entity: dict[str, Any] = Field(
+        description="The scored entity: type, id, and the verbatim UEBA record"
+    )
+    vulnerability: RiskDimension
+    threat: RiskDimension
+    auth_failure: RiskDimension
+    composite_score: int = Field(ge=0, le=100, description="Weighted composite, rounded")
+    band: Literal["low", "medium", "high", "critical"]
+    time_range: str
+    warnings: list[str] = Field(default_factory=list)

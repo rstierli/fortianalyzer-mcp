@@ -71,6 +71,8 @@ async def run_fortiview(
             - "top-websites": Top websites accessed
             - "top-threats": Top security threats detected
             - "top-cloud-applications": Top cloud/SaaS apps
+            - "top-countries": Top destination countries (geo)
+            - "site-to-site-ipsec": Site-to-site IPsec VPN tunnels
             - "policy-hits": Per-policy hit counts (recommended)
             - "policy-line": Time-series policy data
         adom: ADOM name (default: from config DEFAULT_ADOM)
