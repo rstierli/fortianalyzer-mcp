@@ -44,6 +44,18 @@ Out of scope here, by design:
   keeps the model able to reason about which appliance saw what, at the
   cost of fingerprinting the estate: a leak test still finds the firewall
   name and serial in a masked record unless the flag is on.
+- ``vpntunnel`` (fortiview ``site-to-site-ipsec``) names an IPsec tunnel
+  and therefore the two sites it joins, and it is deliberately left clear
+  for 2.10.0. Typing it would cost more than it buys: a tunnel name is a
+  free-form operator label, so while ``hq-to-branch`` and
+  ``site_a-site_b`` mask and round-trip, anything carrying a space or
+  punctuation (``to-DC (primary)``, ``tunnel#1``) falls outside the
+  hostname alphabet and burns to an irreversible placeholder, and an
+  uppercase name comes back lowercased. Burning readable operator labels
+  to close an off-by-default gap on a lower-sensitivity field is the
+  wrong trade. Closing it properly needs the ``devvds`` treatment, a
+  composite handler that lifts the maskable part out first, and that is
+  a GA decision rather than a beta patch.
 - ``incident_reporter`` is polymorphic: a username on a manually created
   incident, an alert id on an auto-raised one, so it carries no type
   here. The username case is decided per record instead: when the value
