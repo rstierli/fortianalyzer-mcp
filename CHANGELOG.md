@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **SOAR indicator readers returned empty against real data (missing `time-range`).** `get_indicator_enrichment` and `get_linked_indicators` omitted the `time-range` parameter, so the FortiAnalyzer SOAR API applied its documented **7-day default window** and silently dropped older indicators — the readers returned `[]` even when the appliance held enriched indicators. Both now send an unbounded `time-range` by default (matching the GUI's "show all") and accept an optional `time_range` argument to narrow it. This shipped un-noticed because the reference estate had no populated indicators when the readers landed (#64); the first real enriched indicator exposed it. Live-validated end-to-end (a real Malicious URL now returns `enrichment-reputation`/`enrichment-confidence`/`enrichment-status`).
+- **`get_indicator_enrichment` queried the wrong endpoint.** The reputation is served inline on the indicator **list** endpoint, not `/indicator/enrichment/{nil-uuid}` (which returns nothing without a real enrichment UUID). The reader now resolves the indicator by a `value`/`type` filter on the list endpoint and, for `detail_level="extended"`, follows the row's real `enrichment-uuid` to `/indicator/enrichment/{uuid}` for the raw source detail. The single-quoted filter value rejects an embedded quote up front (no IP/URL/domain legitimately contains one), closing a filter-injection vector.
+
 ### Security
 
 - **Masking closes the remaining boundary leaks tracked in [#71](https://github.com/rstierli/fortianalyzer-mcp/issues/71).** Malformed `target` shapes and map keys now fail closed while preserving device-identity keep values, mixed-case composite siblings receive the same masking treatment as lowercase keys, and a URL with a marked host token that cannot decrypt now passes through whole instead of exposing a resolved tail beside the stale token.

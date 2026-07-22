@@ -123,19 +123,61 @@ class TestSoarClientMethods:
         with pytest.raises(ValueError, match="exactly one"):
             await mock_client.get_linked_indicators(adom="root")
 
-    async def test_enrichment_url_and_params(self, mock_client: FortiAnalyzerClient) -> None:
+    async def test_enrichment_resolves_via_list_filter(
+        self, mock_client: FortiAnalyzerClient
+    ) -> None:
+        # Reputation lives on the indicator list endpoint (the enrichment/{uuid}
+        # path only works with a real uuid); resolve by a value+type filter and
+        # always send a time-range (SOAR defaults to 7 days otherwise).
         from unittest.mock import AsyncMock, patch
 
         with patch.object(mock_client, "get", AsyncMock(return_value=[])) as req:
             await mock_client.get_indicator_enrichment(
                 adom="root", indicator_value="8.8.8.8", indicator_type="IP"
             )
-        url = req.await_args.args[0]
-        assert url.startswith("/soar/adom/root/indicator/enrichment/")
+        assert req.await_args.args[0] == "/soar/adom/root/indicator"
         kwargs = req.await_args.kwargs
-        assert kwargs["indicator-type"] == "IP"
-        assert kwargs["indicator-value"] == "8.8.8.8"
-        assert kwargs["detail-level"] == "standard"
+        assert kwargs["filter"] == "value=='8.8.8.8' and type=='IP'"
+        assert kwargs["time-range"] == mock_client._WIDE_TIME_RANGE
+
+    async def test_enrichment_rejects_quote_in_value(
+        self, mock_client: FortiAnalyzerClient
+    ) -> None:
+        # A single quote would break out of the value=='...' filter clause.
+        with pytest.raises(ValueError, match="single quote"):
+            await mock_client.get_indicator_enrichment(
+                adom="root", indicator_value="x' or '1'=='1", indicator_type="URL"
+            )
+
+    async def test_enrichment_extended_follows_enrichment_uuid(
+        self, mock_client: FortiAnalyzerClient
+    ) -> None:
+        # extended attaches the raw detail by following the row's real
+        # enrichment-uuid to the enrichment/{uuid} endpoint.
+        from unittest.mock import AsyncMock, patch
+
+        async def fake_get(url: str, **_: object) -> object:
+            if url == "/soar/adom/root/indicator":
+                return [
+                    {"value": "8.8.8.8", "enrichment-uuid": "e-9", "enrichment-reputation": "Good"}
+                ]
+            return [{"enrichment-detail": [{"source": "vt"}]}]
+
+        with patch.object(mock_client, "get", AsyncMock(side_effect=fake_get)) as req:
+            rows = await mock_client.get_indicator_enrichment(
+                adom="root", indicator_value="8.8.8.8", indicator_type="IP", detail_level="extended"
+            )
+        assert rows[0]["enrichment-detail"] == [{"enrichment-detail": [{"source": "vt"}]}]
+        assert req.await_args_list[1].args[0] == "/soar/adom/root/indicator/enrichment/e-9"
+
+    async def test_linked_indicators_send_time_range(
+        self, mock_client: FortiAnalyzerClient
+    ) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        with patch.object(mock_client, "get", AsyncMock(return_value=[])) as req:
+            await mock_client.get_linked_indicators(adom="root", incident_id="IN00000019")
+        assert req.await_args.kwargs["time-range"] == mock_client._WIDE_TIME_RANGE
 
     async def test_enrichment_uses_supplied_uuid(self, mock_client: FortiAnalyzerClient) -> None:
         from unittest.mock import AsyncMock, patch

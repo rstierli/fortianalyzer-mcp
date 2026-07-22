@@ -1941,21 +1941,33 @@ class FortiAnalyzerClient:
 
     _NIL_UUID = "00000000-0000-0000-0000-000000000000"
 
+    # SOAR indicator reads apply a default 7-day time-range when the request
+    # omits one (documented in the FNDN soar.indicator.get spec), which hides
+    # older indicators. This unbounded window matches the GUI's "show all"
+    # behaviour; callers narrow it via the ``time_range`` argument.
+    _WIDE_TIME_RANGE = {"start": "1970-01-01 00:00:00", "end": "2099-12-31 23:59:59"}
+
     async def get_linked_indicators(
         self,
         adom: str,
         alert_id: str | None = None,
         incident_id: str | None = None,
         filter: str | None = None,
+        time_range: dict[str, str] | None = None,
     ) -> Any:
         """Get IOC indicators linked to an alert or an incident.
 
         FNDN: GET /soar/adom/{adom}/alert/indicator     (alert-id)
               GET /soar/adom/{adom}/incident/indicator  (incident-id)
 
-        Exactly one of ``alert_id`` / ``incident_id`` must be given.
+        Exactly one of ``alert_id`` / ``incident_id`` must be given. A
+        ``time-range`` is always sent (default: unbounded) because the SOAR
+        API otherwise filters to the last 7 days and drops older indicators.
         """
-        params: dict[str, Any] = {"apiver": API_VERSION}
+        params: dict[str, Any] = {
+            "apiver": API_VERSION,
+            "time-range": time_range or self._WIDE_TIME_RANGE,
+        }
         if filter:
             params["filter"] = filter
         if alert_id:
@@ -1973,24 +1985,62 @@ class FortiAnalyzerClient:
         indicator_type: str,
         enrichment_uuid: str | None = None,
         detail_level: str = "standard",
+        time_range: dict[str, str] | None = None,
     ) -> Any:
         """Get IOC reputation/enrichment for an indicator.
 
-        FNDN: GET /soar/adom/{adom}/indicator/enrichment/{enrichment_uuid}
+        The reputation lives on the indicator list endpoint
+        (``/soar/adom/{adom}/indicator``): each row carries
+        ``enrichment-reputation`` (Good/Suspicious/Malicious/
+        NoReputationAvailable), ``enrichment-confidence`` (0-100),
+        ``enrichment-status`` and an ``enrichment-uuid``. The reader resolves
+        the indicator by a ``value``/``type`` filter and, for
+        ``detail_level="extended"``, follows the row's real ``enrichment-uuid``
+        to ``/indicator/enrichment/{uuid}`` for the raw source detail.
 
-        Addressable by ``indicator-type`` + ``indicator-value`` (verified
-        live) — the enrichment UUID path segment defaults to a nil UUID
-        when not supplied, since FAZ resolves by type+value. Returns
-        reputation (Good/Suspicious/Malicious/NoReputationAvailable),
-        confidence 0-100 and (extended) enrichment-detail.
+        A ``time-range`` is always sent (default: unbounded) — the SOAR API
+        otherwise applies a 7-day default and returns nothing for an indicator
+        seen earlier. ``enrichment_uuid``, when supplied, addresses the detail
+        endpoint directly and skips the value lookup.
         """
-        uuid = enrichment_uuid or self._NIL_UUID
-        return await self.get(
-            f"/soar/adom/{adom}/indicator/enrichment/{uuid}",
+        tr = time_range or self._WIDE_TIME_RANGE
+
+        # Direct-by-uuid path (caller already has the enrichment uuid).
+        if enrichment_uuid and enrichment_uuid != self._NIL_UUID:
+            return await self.get(
+                f"/soar/adom/{adom}/indicator/enrichment/{enrichment_uuid}",
+                apiver=API_VERSION,
+                **{"detail-level": detail_level, "time-range": tr},
+            )
+
+        # Resolve the indicator by value+type on the list endpoint, where the
+        # enrichment fields are returned inline. The value is single-quoted in
+        # the filter expression, so reject an embedded quote up front (an IP /
+        # URL / domain never legitimately contains one).
+        if "'" in indicator_value:
+            raise ValueError("indicator_value must not contain a single quote")
+        filter_expr = f"value=='{indicator_value}' and type=='{indicator_type}'"
+        result = await self.get(
+            f"/soar/adom/{adom}/indicator",
             apiver=API_VERSION,
-            **{
-                "indicator-type": indicator_type,
-                "indicator-value": indicator_value,
-                "detail-level": detail_level,
-            },
+            limit=100,
+            filter=filter_expr,
+            **{"time-range": tr},
         )
+        rows = result if isinstance(result, list) else (result.get("data") or [])
+
+        if detail_level == "extended":
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                euid = row.get("enrichment-uuid")
+                if euid and euid != self._NIL_UUID:
+                    try:
+                        row["enrichment-detail"] = await self.get(
+                            f"/soar/adom/{adom}/indicator/enrichment/{euid}",
+                            apiver=API_VERSION,
+                            **{"detail-level": "extended", "time-range": tr},
+                        )
+                    except Exception as exc:  # detail is best-effort enrichment
+                        logger.warning("enrichment detail fetch failed for %s: %s", euid, exc)
+        return rows

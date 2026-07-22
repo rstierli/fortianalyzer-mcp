@@ -2,17 +2,20 @@
 
 Read-only readers over the SOAR indicator API, added as building blocks
 for the Wave-2 ``threat_intel`` / ``investigate`` skills. Feature-gated:
-these require SOAR to be licensed on the FortiAnalyzer (and enrichment
-requires a reputation source, e.g. a VirusTotal/FortiGuard connector,
-to have populated indicator data).
+these require SOAR to be licensed on the FortiAnalyzer, and enrichment
+requires a reputation source (e.g. a VirusTotal/FortiGuard connector) to
+have populated the indicator's reputation.
 
-Only the GET reads are exposed. The bare ``/indicator/enrichment`` path
-is add-only; reputation is read by indicator type+value (or UUID) through
-``/indicator/enrichment/{uuid}``. Based on the FNDN SOAR (soar.json) spec.
+Reputation is read from the indicator list endpoint, where each row carries
+``enrichment-reputation`` / ``enrichment-confidence`` / ``enrichment-status``
+inline; ``detail_level="extended"`` follows the row's ``enrichment-uuid`` to
+``/indicator/enrichment/{uuid}`` for the raw source detail. Based on the FNDN
+SOAR (soar.json) spec.
 
-Note: the request shapes here are verified live against a real appliance;
-the enrichment *payload* shape is spec-derived and not yet live-validated,
-because the reference estate currently has no populated SOAR indicators.
+Every read sends an unbounded ``time-range`` by default: the SOAR API applies
+a 7-day default window when none is given (per the spec) and silently drops
+older indicators. Live-validated against a real appliance with populated,
+enriched indicators.
 """
 
 import logging
@@ -21,6 +24,7 @@ from typing import Any
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.server import get_faz_client, mcp
 from fortianalyzer_mcp.utils.responses import redact
+from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import get_default_adom, validate_adom
 
 logger = logging.getLogger(__name__)
@@ -37,12 +41,27 @@ def _get_client() -> FortiAnalyzerClient:
     return client
 
 
+async def _parse_time_range(time_range: str | None) -> dict[str, str] | None:
+    """Parse an optional time-range string into FAZ's ``{start,end}`` dict.
+
+    Returns ``None`` when no range is given, so the client applies its
+    unbounded default (SOAR otherwise filters to the last 7 days).
+    """
+    if not time_range:
+        return None
+    if "|" in time_range:
+        return parse_time_range(time_range)
+    faz_tz = await _get_client().get_system_timezone()
+    return parse_time_range(time_range, faz_tz=faz_tz)
+
+
 @mcp.tool()
 async def get_linked_indicators(
     adom: str | None = None,
     alert_id: str | None = None,
     incident_id: str | None = None,
     filter: str | None = None,
+    time_range: str | None = None,
 ) -> dict[str, Any]:
     """Get IOC indicators linked to an alert or an incident.
 
@@ -55,6 +74,9 @@ async def get_linked_indicators(
         alert_id: Alert ID to look up indicators for
         incident_id: Incident ID to look up indicators for
         filter: Optional filter expression (indicator-uuid/type/value/status)
+        time_range: Optional window ("7-day", "30-day" or "start|end").
+            Omit to search all time (SOAR otherwise defaults to the last 7
+            days and drops older indicators).
 
     Provide exactly one of ``alert_id`` or ``incident_id``.
 
@@ -73,13 +95,14 @@ async def get_linked_indicators(
                 "status": "error",
                 "message": "Validation error: provide exactly one of 'alert_id' or 'incident_id'",
             }
+        tr = await _parse_time_range(time_range)
         client = _get_client()
 
         subject = f"alert {alert_id}" if alert_id else f"incident {incident_id}"
         logger.info(f"Getting linked indicators for {subject} in ADOM {adom}")
 
         result = await client.get_linked_indicators(
-            adom=adom, alert_id=alert_id, incident_id=incident_id, filter=filter
+            adom=adom, alert_id=alert_id, incident_id=incident_id, filter=filter, time_range=tr
         )
         return {"status": "success", "data": result}
     except Exception as e:
@@ -94,30 +117,39 @@ async def get_indicator_enrichment(
     adom: str | None = None,
     enrichment_uuid: str | None = None,
     detail_level: str = "standard",
+    time_range: str | None = None,
 ) -> dict[str, Any]:
     """Get IOC reputation/enrichment for an indicator.
 
     Returns the stored reputation for an IP, URL or domain: verdict
-    (Good/Suspicious/Malicious/NoReputationAvailable), confidence (0-100)
-    and source. With detail_level "extended", also returns the raw
-    enrichment detail. Reads existing enrichment only — it does not trigger
-    a new lookup. Requires SOAR licensed with a reputation source.
+    (``enrichment-reputation`` = Good/Suspicious/Malicious/
+    NoReputationAvailable), ``enrichment-confidence`` (0-100), status and the
+    indicator/enrichment UUIDs. With detail_level "extended", also attaches
+    the raw ``enrichment-detail`` from the reputation source. Reads existing
+    enrichment only — it does not trigger a new lookup. Requires SOAR
+    licensed with a reputation source that has enriched the indicator.
 
     Args:
         indicator_value: The indicator value (e.g. an IP, URL or domain)
         indicator_type: "IP", "URL" or "Domain"
         adom: ADOM name (default: from config DEFAULT_ADOM)
-        enrichment_uuid: Optional enrichment UUID (resolves by type+value
-            when omitted)
+        enrichment_uuid: Optional enrichment UUID; addresses the enrichment
+            detail directly (skips the value lookup) when supplied
         detail_level: "standard" or "extended" (default: "standard")
+        time_range: Optional window ("7-day", "30-day" or "start|end").
+            Omit to search all time (SOAR otherwise defaults to the last 7
+            days and returns nothing for an indicator seen earlier).
 
     Returns:
-        dict with the enrichment record under "data"
+        dict with the matched indicator record(s) under "data" (empty list
+        when the indicator is unknown or not yet enriched)
 
     Example:
         >>> result = await get_indicator_enrichment(
         ...     indicator_value="8.8.8.8", indicator_type="IP"
         ... )
+        >>> for ind in result["data"]:
+        ...     print(ind.get("enrichment-reputation"), ind.get("enrichment-confidence"))
     """
     try:
         adom = validate_adom(adom or get_default_adom())
@@ -135,6 +167,7 @@ async def get_indicator_enrichment(
                 "message": f"Validation error: Invalid detail_level "
                 f"'{detail_level}'. Must be one of: {valid}",
             }
+        tr = await _parse_time_range(time_range)
         client = _get_client()
 
         logger.info(f"Getting indicator enrichment for a {indicator_type} in ADOM {adom}")
@@ -145,6 +178,7 @@ async def get_indicator_enrichment(
             indicator_type=indicator_type,
             enrichment_uuid=enrichment_uuid,
             detail_level=detail_level,
+            time_range=tr,
         )
         return {"status": "success", "data": result}
     except Exception as e:
