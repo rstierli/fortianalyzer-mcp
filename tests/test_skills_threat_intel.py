@@ -52,6 +52,48 @@ ENRICHED_DOMAIN = {
 }
 THREATS = [{"threat": "Backdoor.Agent", "threatweight": 500, "incidents": 3}]
 
+# Extended record with the real two-engine detail shape (FortiGuard + VirusTotal).
+EXTENDED_URL = {
+    "value": "http://mal.example/x",
+    "type": "URL",
+    "enrichment-reputation": "Malicious",
+    "enrichment-confidence": 90,
+    "enrichment-status": "Completed",
+    "indicator-uuid": "iu-x",
+    "enrichment-uuid": "eu-x",
+    "enrichment-detail": [
+        {
+            "enrichment-reputation": "Malicious",
+            "enrichment-detail": [
+                {
+                    "data": {
+                        "response": [
+                            {
+                                "wf_cate": "Malicious Websites",
+                                "confidence": "High",
+                                "reference_url": "https://ioc.fortiguard.com/search?query=x",
+                            }
+                        ]
+                    },
+                    "source": "FortiGuard-CTS",
+                },
+                {
+                    "data": {
+                        "type": "url",
+                        "links": {"self": "https://www.virustotal.com/gui/url/abc/detection"},
+                        "attributes": {
+                            "categories": {"alphaMountain.ai": "Malicious"},
+                            "total_votes": {"harmless": 1, "malicious": 1},
+                            "web_category": "domain_parking",
+                            "reputation": 0,
+                        },
+                    }
+                },
+            ],
+        }
+    ],
+}
+
 EXPLICIT_TWO = [
     {"value": "203.0.113.7", "type": "IP"},
     {"value": "good.example.com", "type": "Domain"},
@@ -105,6 +147,40 @@ class TestThreatIntel:
         assert threats.call_args.kwargs["time_range"] == "24-hour"
         assert result.threat_landscape == THREATS
         assert result.warnings == []
+
+    async def test_extended_summarizes_per_source_verdicts(self):
+        with (
+            t(GET_ENRICH, return_value=ok(data=[EXTENDED_URL])),
+            t(GET_TOP_THREATS, return_value=ok(data=THREATS)),
+        ):
+            result = await handlers.run_threat_intel(
+                ThreatIntelParams(
+                    indicators=[{"value": "http://mal.example/x", "type": "URL"}],
+                    detail_level="extended",
+                )
+            )
+        rec = result.indicators[0]
+        assert rec.reputation == "Malicious"
+        by_source = {s.source: s.model_dump() for s in rec.sources}
+        assert set(by_source) == {"FortiGuard-CTS", "VirusTotal"}
+        assert by_source["FortiGuard-CTS"]["verdict"] == "Malicious Websites"
+        assert by_source["FortiGuard-CTS"]["confidence"] == "High"
+        assert by_source["FortiGuard-CTS"]["link"].startswith("https://ioc.fortiguard.com/")
+        vt = by_source["VirusTotal"]
+        assert vt["link"].startswith("https://www.virustotal.com/")
+        # extra="allow" preserves engine-specific detail (votes/categories)
+        assert vt["votes"] == {"harmless": 1, "malicious": 1}
+        assert vt["categories"] == {"alphaMountain.ai": "Malicious"}
+
+    async def test_standard_detail_has_no_source_breakdown(self):
+        with (
+            t(GET_ENRICH, return_value=ok(data=[ENRICHED_IP])),
+            t(GET_TOP_THREATS, return_value=ok(data=THREATS)),
+        ):
+            result = await handlers.run_threat_intel(
+                ThreatIntelParams(indicators=[{"value": "203.0.113.7", "type": "IP"}])
+            )
+        assert result.indicators[0].sources == []
 
     async def test_alert_resolution_feeds_enrichment(self):
         linked = [

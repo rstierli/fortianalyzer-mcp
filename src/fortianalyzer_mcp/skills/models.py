@@ -501,14 +501,39 @@ class ThreatIntelParams(BaseModel):
         return self
 
 
+class EnrichmentSource(BaseModel):
+    """One reputation engine's verdict, normalized from the raw detail.
+
+    FortiGuard and VirusTotal (and any other configured connector) each
+    report in their own shape; this flattens the signal a SOC analyst
+    reads first — the source name, its category/verdict, confidence, and a
+    link to the source's own page. Extra fields vary by engine (e.g.
+    VirusTotal's per-vendor ``categories`` and community ``votes``), so
+    unknown keys are allowed. The verbatim per-source payload always
+    remains under ``record['enrichment-detail']``.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    source: str = Field(description="Reputation engine, e.g. 'FortiGuard-CTS' or 'VirusTotal'")
+    verdict: str | None = Field(
+        default=None, description="This engine's category/verdict for the indicator"
+    )
+    confidence: str | int | None = Field(default=None, description="This engine's confidence")
+    link: str | None = Field(default=None, description="URL to this engine's own report")
+
+
 class IndicatorEnrichmentRecord(BaseModel):
     """One indicator with its stored SOAR reputation.
 
     ``reputation``/``confidence``/``status`` are verbatim convenience
-    copies of the row's ``enrichment-*`` fields; ``record`` is the full
-    matched indicator row. All three are ``None`` (and ``record`` is
-    ``None``) when the lookup failed or SOAR holds no row for the value —
-    the accompanying warning names which.
+    copies of the row's ``enrichment-*`` fields (FAZ's fused verdict across
+    engines); ``sources`` breaks that verdict down per reputation engine
+    (populated only at ``detail_level='extended'``, where the raw per-source
+    detail is fetched); ``record`` is the full matched indicator row. The
+    reputation fields are ``None`` (and ``record`` is ``None``) when the
+    lookup failed or SOAR holds no row for the value — the accompanying
+    warning names which.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -517,13 +542,17 @@ class IndicatorEnrichmentRecord(BaseModel):
     type: str
     reputation: str | None = Field(
         default=None,
-        description="'enrichment-reputation', verbatim "
+        description="FAZ fused 'enrichment-reputation', verbatim "
         "(Good/Suspicious/Malicious/NoReputationAvailable)",
     )
     confidence: int | str | None = Field(
-        default=None, description="'enrichment-confidence' (0-100), verbatim"
+        default=None, description="Fused 'enrichment-confidence' (0-100), verbatim"
     )
     status: str | None = Field(default=None, description="'enrichment-status', verbatim")
+    sources: list[EnrichmentSource] = Field(
+        default_factory=list,
+        description="Per-engine verdict breakdown (extended detail only; empty otherwise)",
+    )
     record: dict[str, Any] | None = Field(
         default=None,
         description="Matched FAZ indicator row, verbatim (uuids; plus "

@@ -1153,6 +1153,78 @@ def _severity_points(counts: dict[str, int], points: dict[str, int]) -> int:
 # --------------------------------------------------------------------- #
 
 
+def _summarize_enrichment_sources(record: dict[str, Any]) -> list[dict[str, Any]]:
+    """Normalize the per-engine verdicts from an extended enrichment record.
+
+    Each reputation source (``FortiGuard-CTS``, ``VirusTotal``, ...) reports
+    in its own shape; this flattens them to a uniform ``{source, verdict,
+    confidence, link, ...}`` summary a SOC analyst can read at a glance. The
+    verbatim per-source payload stays under ``record['enrichment-detail']``.
+    Best-effort and defensive — an unrecognized shape is summarized as far
+    as possible, never dropped and never raised on. Empty when the record
+    carries no per-source detail (i.e. not ``detail_level='extended'``).
+    """
+    entries: list[dict[str, Any]] = []
+
+    def _collect(node: Any) -> None:
+        # A source entry is a dict carrying a ``data`` payload; do not recurse
+        # into it (its own ``data`` is the payload, not another source).
+        if isinstance(node, dict):
+            if isinstance(node.get("data"), dict):
+                entries.append(node)
+            else:
+                for value in node.values():
+                    _collect(value)
+        elif isinstance(node, list):
+            for value in node:
+                _collect(value)
+
+    _collect(record.get("enrichment-detail"))
+
+    summaries: list[dict[str, Any]] = []
+    for entry in entries:
+        data = entry.get("data") or {}
+        raw_links = data.get("links")
+        links: dict[str, Any] = raw_links if isinstance(raw_links, dict) else {}
+        raw_attrs = data.get("attributes")
+        attrs: dict[str, Any] | None = raw_attrs if isinstance(raw_attrs, dict) else None
+        summary: dict[str, Any]
+        if attrs is not None or "virustotal.com" in str(links.get("self", "")):
+            # VirusTotal shape: data.attributes + data.links.self.
+            summary = {"source": entry.get("source") or "VirusTotal"}
+            if attrs:
+                if attrs.get("categories"):
+                    summary["categories"] = attrs["categories"]
+                if attrs.get("total_votes"):
+                    summary["votes"] = attrs["total_votes"]
+                if attrs.get("web_category"):
+                    summary["verdict"] = attrs["web_category"]
+                if "reputation" in attrs:
+                    summary["reputation_score"] = attrs["reputation"]
+            if links.get("self"):
+                summary["link"] = links["self"]
+        else:
+            # FortiGuard / generic ``data.response[]`` shape.
+            summary = {"source": entry.get("source") or "unknown"}
+            response = data.get("response")
+            first = (
+                response[0]
+                if isinstance(response, list) and response and isinstance(response[0], dict)
+                else {}
+            )
+            verdict = first.get("wf_cate") or first.get("ioc_cate") or first.get("av_cate")
+            if verdict:
+                summary["verdict"] = verdict
+            if first.get("confidence"):
+                summary["confidence"] = first["confidence"]
+            if first.get("malware_name"):
+                summary["malware"] = first["malware_name"]
+            if first.get("reference_url"):
+                summary["link"] = first["reference_url"]
+        summaries.append(summary)
+    return summaries
+
+
 async def run_threat_intel(params: ThreatIntelParams) -> ThreatIntelResult:
     """Stored SOAR reputation for a set of IP/URL/Domain indicators.
 
@@ -1246,6 +1318,7 @@ async def run_threat_intel(params: ThreatIntelParams) -> ThreatIntelResult:
                 reputation=matched.get("enrichment-reputation"),
                 confidence=matched.get("enrichment-confidence"),
                 status=matched.get("enrichment-status"),
+                sources=_summarize_enrichment_sources(matched),  # type: ignore[arg-type]
                 record=matched,
             )
         )
