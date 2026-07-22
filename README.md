@@ -3,7 +3,7 @@
 [![CI](https://github.com/rstierli/fortianalyzer-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/rstierli/fortianalyzer-mcp/actions/workflows/ci.yml)
 [![Python Version](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-2.9.1-green)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.10.0-green)](CHANGELOG.md)
 [![FortiAnalyzer](https://img.shields.io/badge/FortiAnalyzer-7.0%20%7C%207.2%20%7C%207.4%20%7C%207.6%20%7C%208.0-red)](README.md)
 
 A Model Context Protocol (MCP) server for FortiAnalyzer JSON-RPC API. This server enables AI assistants like Claude to interact with FortiAnalyzer for log analysis, reporting, security monitoring, and SOC operations.
@@ -22,7 +22,7 @@ This MCP server provides a comprehensive interface to FortiAnalyzer's capabiliti
 - Manage security alerts and incidents
 - Perform IOC (Indicators of Compromise) analysis
 - Manage devices and ADOMs
-- Run higher-level SOC workflows via the skills layer (beta): incident correlation, triage, incident summaries
+- Run higher-level SOC workflows via the skills layer (beta): incident correlation, triage, indicator/threat-intel enrichment, asset & identity lookups, risk scoring, and full incident investigation
 - Optionally pseudonymize IOC/PII data before it reaches the model, reversibly (beta)
 
 ## Features
@@ -38,7 +38,7 @@ This MCP server provides a comprehensive interface to FortiAnalyzer's capabiliti
 | **IOC Analysis** | Run IOC rescans, check license status, view rescan history |
 | **Device Management** | List/add/delete devices, manage device groups and VDOMs |
 | **System** | System status, HA status, ADOM management, task monitoring |
-| **Skills Layer** *(beta)* | `faz_skill` dispatcher: opinionated multi-tool orchestrations (incident correlation, triage, incident summaries) with validated, versioned output schemas — off by default |
+| **Skills Layer** *(beta)* | `faz_skill` dispatcher: 14 opinionated multi-tool orchestrations across data-access, enrichment, and analysis tiers (incident correlation, triage, threat-intel, asset/identity lookups, risk scoring, full investigation) with validated, versioned output schemas — off by default |
 | **Data Masking** *(beta)* | Reversible FPE masking of IOC/PII fields (IPs, MACs, hostnames, usernames, domains, emails) in tool outputs, with automatic unmasking of tokens in tool arguments — off by default |
 
 ## Requirements
@@ -628,15 +628,26 @@ the summed per-slice total.
 
 With `FAZ_SKILLS_ENABLED=true`, one additional tool is registered: `faz_skill(skill, params)` — a dispatcher for opinionated multi-tool orchestrations that return validated, versioned structured results (`schema_version` in every response). Off by default; no behavior change unless enabled.
 
-This is **Wave 1** of the skills roadmap — 5 of 18 planned skills. Wave 2 (enrichment: asset/identity/threat-intel/network/app/risk lookups) and Wave 3 (behavioral analysis: hunt, root-cause, impact) are designed but not yet implemented; see [RFC #44](https://github.com/rstierli/fortianalyzer-mcp/issues/44). The 5 shipped:
+This is **Waves 1–2** of the skills roadmap — **14 of 18 planned skills**. Wave 3 (behavioral analysis: hunt, root-cause, impact) is designed but not yet implemented; see [RFC #44](https://github.com/rstierli/fortianalyzer-mcp/issues/44). The 14 shipped, grouped by tier:
 
 | Skill | Tier | What it does |
 |---|---|---|
 | `incidents` | data access | Incidents in a time window, each with attachment-correlated alerts |
 | `reports` | data access | List generated reports, or fetch one by task ID (PDF/HTML/CSV/XML) |
 | `log_search` | data access | Filter-based log search returning verbatim rows (slot-safe: one search per call) |
+| `asset_lookup` | data access | UEBA endpoint profiles with attributed CVE records and per-severity counts |
+| `identity_lookup` | data access | Verbatim UEBA end-user records (`extended` detail adds contact fields) |
+| `alert_rules` | data access | Detection-rule catalogue: basic + correlation handlers as class-labelled records |
+| `threat_intel` | enrichment | Stored SOAR reputation for explicit indicators or those linked to an alert/incident, with a normalized multi-source verdict breakdown (FortiGuard + VirusTotal) and the threat landscape |
+| `identity_profile` | enrichment | A user's UEBA record + their endpoints + recent auth-failure/VPN activity |
+| `app_usage` | enrichment | Top applications / websites / cloud apps (shadow-IT signal) + DLP events |
+| `network_context` | enrichment | Top destinations / sources + geo (top-countries) + site-to-site IPsec tunnels |
+| `risk_assessment` | enrichment | Transparent, fully-auditable composite 0-100 score over CVE / threat / auth-failure dimensions |
 | `triage` | analysis | Evidence bundle + deterministic severity-derived assessment for one alert or incident |
 | `incident_summary` | analysis | Structured incident summary: related alerts with evidence logs, threat landscape, timeline |
+| `investigate` | analysis | One consolidated investigation of an alert/incident — triage + summary + indicator enrichment + asset/identity context, composed from the skills above; each section degrades independently |
+
+Every skill returns a versioned pydantic result (`schema_version` in every response), takes `extra="forbid"` params, and is read-only. Enrichment/context sections degrade independently to a documented `FeatureGap` marker when a data source is unlicensed or unavailable — only a failed *subject* fails the skill.
 
 In normal use you describe the task in natural language and the model builds the `faz_skill` call; the JSON forms below are what that produces (all parameters except the ones noted are optional, with sensible defaults).
 
@@ -670,6 +681,35 @@ faz_skill(skill="triage", params={"alert_id": "202606121000000041", "context_tim
 ```jsonc
 faz_skill(skill="incident_summary", params={"incident_id": "IN00000019"})
 faz_skill(skill="incident_summary", params={"incident_id": "IN00000019", "time_range": "30-day", "max_alerts": 25})
+```
+
+**`asset_lookup` / `identity_lookup` / `alert_rules`** — UEBA and detection-rule data access:
+```jsonc
+faz_skill(skill="asset_lookup", params={"hostname": "ws-finance"})       // endpoints + attributed CVEs
+faz_skill(skill="asset_lookup", params={"epids": [4561], "include_vulnerabilities": true})
+faz_skill(skill="identity_lookup", params={"username": "roland", "detail_level": "extended"})
+faz_skill(skill="alert_rules", params={"handler_type": "correlation"})
+```
+
+**`threat_intel`** — stored SOAR reputation (needs SOAR licensed); explicit indicators or those linked to a subject:
+```jsonc
+faz_skill(skill="threat_intel", params={"indicators": [{"value": "203.0.113.7", "type": "IP"}]})
+faz_skill(skill="threat_intel", params={"incident_id": "IN00000019", "detail_level": "extended"})
+```
+With `detail_level="extended"`, each indicator carries a `sources[]` breakdown normalizing every reputation engine — e.g. FortiGuard-CTS verdict alongside the VirusTotal detection ratio — while the verbatim per-engine payload stays under `record.enrichment-detail`.
+
+**`identity_profile` / `app_usage` / `network_context` / `risk_assessment`** — enrichment bundles:
+```jsonc
+faz_skill(skill="identity_profile", params={"euid": 3})                  // user + endpoints + auth activity
+faz_skill(skill="app_usage", params={"time_range": "24-hour"})          // apps/websites/cloud + DLP
+faz_skill(skill="network_context", params={"time_range": "7-day"})      // top dests/sources + geo + IPsec
+faz_skill(skill="risk_assessment", params={"euid": 3})                   // transparent composite 0-100 score
+```
+
+**`investigate`** — one consolidated view of a subject, composed from the skills above (`alert_id` **or** `incident_id`):
+```jsonc
+faz_skill(skill="investigate", params={"incident_id": "IN00000019"})
+faz_skill(skill="investigate", params={"alert_id": "202606121000000041", "detail_level": "extended"})
 ```
 
 - `faz_skill(skill="list")` (alias `"describe"`) returns the machine-readable catalogue including each skill's parameter and output JSON schema.
