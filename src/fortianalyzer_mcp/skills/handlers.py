@@ -1193,12 +1193,22 @@ def _summarize_enrichment_sources(record: dict[str, Any]) -> list[dict[str, Any]
             # VirusTotal shape: data.attributes + data.links.self.
             summary = {"source": entry.get("source") or "VirusTotal"}
             if attrs:
+                # The headline verdict is the engine detection ratio, not the
+                # web_category label (which is a taxonomy tag, e.g.
+                # "domain_parking", and reads as benign next to a real verdict).
+                stats = attrs.get("last_analysis_stats")
+                if isinstance(stats, dict):
+                    total = sum(v for v in stats.values() if isinstance(v, int))
+                    flagged = int(stats.get("malicious", 0)) + int(stats.get("suspicious", 0))
+                    if total:
+                        summary["verdict"] = f"{flagged}/{total} engines flagged"
+                    summary["detections"] = stats
                 if attrs.get("categories"):
                     summary["categories"] = attrs["categories"]
+                if attrs.get("web_category"):
+                    summary["web_category"] = attrs["web_category"]
                 if attrs.get("total_votes"):
                     summary["votes"] = attrs["total_votes"]
-                if attrs.get("web_category"):
-                    summary["verdict"] = attrs["web_category"]
                 if "reputation" in attrs:
                     summary["reputation_score"] = attrs["reputation"]
             if links.get("self"):

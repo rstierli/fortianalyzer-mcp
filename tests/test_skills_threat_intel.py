@@ -85,6 +85,12 @@ EXTENDED_URL = {
                             "categories": {"alphaMountain.ai": "Malicious"},
                             "total_votes": {"harmless": 1, "malicious": 1},
                             "web_category": "domain_parking",
+                            "last_analysis_stats": {
+                                "harmless": 56,
+                                "malicious": 3,
+                                "suspicious": 0,
+                                "undetected": 33,
+                            },
                             "reputation": 0,
                         },
                     }
@@ -168,6 +174,11 @@ class TestThreatIntel:
         assert by_source["FortiGuard-CTS"]["link"].startswith("https://ioc.fortiguard.com/")
         vt = by_source["VirusTotal"]
         assert vt["link"].startswith("https://www.virustotal.com/")
+        # Headline verdict is the detection ratio (malicious+suspicious / total),
+        # not the web_category label.
+        assert vt["verdict"] == "3/92 engines flagged"
+        assert vt["detections"]["malicious"] == 3
+        assert vt["web_category"] == "domain_parking"
         # extra="allow" preserves engine-specific detail (votes/categories)
         assert vt["votes"] == {"harmless": 1, "malicious": 1}
         assert vt["categories"] == {"alphaMountain.ai": "Malicious"}
