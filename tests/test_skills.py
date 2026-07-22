@@ -19,7 +19,7 @@ from pydantic import ValidationError
 
 from fortianalyzer_mcp.skills import handlers
 from fortianalyzer_mcp.skills.catalog import SKILLS, catalogue
-from fortianalyzer_mcp.skills.dispatcher import faz_skill
+from fortianalyzer_mcp.skills.dispatcher import _redact_warnings, faz_skill
 from fortianalyzer_mcp.skills.models import (
     SCHEMA_VERSION,
     FeatureGap,
@@ -771,3 +771,113 @@ class TestSkillsFlag:
 
         monkeypatch.delenv("FAZ_SKILLS_ENABLED", raising=False)
         assert Settings(FORTIANALYZER_HOST="192.0.2.1").FAZ_SKILLS_ENABLED is False
+
+
+class TestNestedWarningRedaction:
+    """A composed skill keeps a copy of each section's warnings.
+
+    The dispatcher scrubs what it is handed. While it read one top-level
+    key, only the composing handler's prefixed copies were scrubbed and
+    every original shipped verbatim alongside them.
+    """
+
+    SECRET = "session=SECRET123 expired"
+
+    def test_top_level_warnings_still_redacted(self):
+        out = _redact_warnings({"warnings": [self.SECRET]})
+
+        assert "SECRET123" not in out["warnings"][0]
+        assert "REDACTED" in out["warnings"][0]
+
+    def test_nested_warnings_are_redacted(self):
+        out = _redact_warnings(
+            {
+                "warnings": [f"triage: {self.SECRET}"],
+                "triage": {"warnings": [self.SECRET]},
+                "threat_intel": {"warnings": [self.SECRET]},
+            }
+        )
+
+        assert "SECRET123" not in str(out)
+
+    def test_warnings_inside_a_list_of_sections_are_redacted(self):
+        out = _redact_warnings({"sections": [{"warnings": [self.SECRET]}]})
+
+        assert "SECRET123" not in str(out)
+
+    def test_deeply_nested_warnings_are_redacted(self):
+        out = _redact_warnings({"a": {"b": {"c": {"warnings": [self.SECRET]}}}})
+
+        assert "SECRET123" not in str(out)
+
+    def test_non_warning_fields_are_untouched(self):
+        # Redaction is deliberately narrow: it rewrites this one key and
+        # nothing else, so a field that happens to contain a key=value pair
+        # keeps its exact content.
+        payload = {"headline": self.SECRET, "reason": self.SECRET, "count": 3}
+
+        assert _redact_warnings(payload) == payload
+
+    def test_non_string_warning_elements_survive(self):
+        payload = {"warnings": [{"structured": "shape"}, 7, None]}
+
+        assert _redact_warnings(payload) == payload
+
+    def test_a_warnings_key_that_is_not_a_list_is_left_alone(self):
+        payload = {"warnings": "not a list"}
+
+        assert _redact_warnings(payload) == payload
+
+    def test_shape_is_otherwise_preserved(self):
+        payload = {
+            "subject_type": "alert",
+            "counts": {"endpoints": 2},
+            "rows": [{"a": 1}, {"b": [1, 2]}],
+        }
+
+        assert _redact_warnings(payload) == payload
+
+    async def test_dispatcher_scrubs_a_nested_section_end_to_end(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The helper is wired in, not just present.
+
+        Uses a stub skill whose output nests another section's warnings,
+        which is the shape a composing skill produces.
+        """
+        from pydantic import BaseModel
+
+        from fortianalyzer_mcp.skills import dispatcher as dispatcher_module
+
+        class Section(BaseModel):
+            warnings: list[str] = []
+
+        class Composed(BaseModel):
+            warnings: list[str] = []
+            section: Section
+
+        class StubParams(BaseModel):
+            pass
+
+        async def handler(_params: StubParams) -> Composed:
+            return Composed(
+                warnings=[f"section: {self.SECRET}"],
+                section=Section(warnings=[self.SECRET]),
+            )
+
+        from fortianalyzer_mcp.skills.catalog import SkillSpec
+
+        spec = SkillSpec(
+            id="stub_composed",
+            tier="analysis",
+            description="stub",
+            params_model=StubParams,
+            output_model=Composed,
+            handler=handler,
+        )
+        monkeypatch.setitem(dispatcher_module.SKILLS, "stub_composed", spec)
+
+        result = await faz_skill(skill="stub_composed", params={})
+
+        assert result["status"] == "success"
+        assert "SECRET123" not in str(result)

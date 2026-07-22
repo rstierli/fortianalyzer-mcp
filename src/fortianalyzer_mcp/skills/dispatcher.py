@@ -25,6 +25,33 @@ logger = logging.getLogger(__name__)
 _SKILL_IDS = ", ".join(sorted(SKILLS))
 
 
+def _redact_warnings(node: Any) -> Any:
+    """Redact every ``warnings`` list of strings in ``node``, at any depth.
+
+    Reading the top-level key alone was enough while every skill returned a
+    flat result. A skill that composes other skills is not flat: each
+    composed section keeps its own ``warnings``, and the composing handler
+    copies them upward with a section prefix. Only the copies were reaching
+    the chokepoint, so each warning shipped twice, once scrubbed and once
+    verbatim. Whichever of the two an operator reads is a coin toss, which
+    is the same as not scrubbing at all.
+
+    Only ``warnings`` is rewritten, and only its string elements, so no
+    other field shape is touched. See issue #68 M4 for why this scrubbing
+    exists at all.
+    """
+    if isinstance(node, dict):
+        return {
+            key: [redact(item) if isinstance(item, str) else item for item in value]
+            if key == "warnings" and isinstance(value, list)
+            else _redact_warnings(value)
+            for key, value in node.items()
+        }
+    if isinstance(node, list):
+        return [_redact_warnings(item) for item in node]
+    return node
+
+
 @mcp.tool()
 async def faz_skill(skill: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
     """Run a FortiAnalyzer skill: an opinionated multi-tool orchestration
@@ -97,15 +124,12 @@ async def faz_skill(skill: str, params: dict[str, Any] | None = None) -> dict[st
             skill=skill,
         )
 
-    dumped = result.model_dump()
     # The success path does not go through error_response, so scrub the
     # caller-facing warnings here too: a degraded sub-call can carry raw FAZ
     # exception text (internal hostnames, session/token material) into a
     # warning. Redacting at the source covers today's warnings; this is the
     # belt-and-suspenders chokepoint for any warning shape. See issue #68 M4.
-    warnings = dumped.get("warnings")
-    if isinstance(warnings, list):
-        dumped["warnings"] = [redact(w) if isinstance(w, str) else w for w in warnings]
+    dumped = _redact_warnings(result.model_dump())
     return {
         "status": "success",
         "skill": skill,
