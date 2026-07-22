@@ -60,6 +60,54 @@ class TestScalarResolution:
         assert unmasker.resolve_scalar("host-###") == "host-###"
 
 
+class TestPrefixedGroupBy:
+    """``groupby1``/``groupby2`` are ``"<field>:<value>"``; the output side
+    masks the inner value by the inner field's type, so the inverse must
+    resolve by that type too, not by the untyped outer key."""
+
+    @pytest.mark.parametrize("outer", ["groupby1", "groupby2"])
+    @pytest.mark.parametrize(
+        ("inner", "raw"),
+        [
+            ("srcip", "192.0.2.102"),  # IP: unmarked token, needs the inner type
+            ("srcip", "2001:db8::1"),  # IPv6: value keeps its own colons
+            ("dstip", "203.0.113.9"),
+            ("qname", "bad.example.com"),  # DOMAIN: marked token
+            ("endpoint", "workstation-14"),  # IP_OR_HOST: hostname form
+        ],
+    )
+    def test_round_trips_through_filter_and_arg(
+        self,
+        masker: OutputMasker,
+        unmasker: ArgUnmasker,
+        outer: str,
+        inner: str,
+        raw: str,
+    ):
+        masked = masker.mask_result({outer: f"{inner}:{raw}"})[outer]
+        assert raw not in masked  # the value half really was masked on output
+
+        assert unmasker.unmask_filter(f'{outer}=="{masked}"') == f'{outer}=="{inner}:{raw}"'
+        assert unmasker.unmask_args({outer: masked})[outer] == f"{inner}:{raw}"
+
+    def test_comma_joined_inner_values_each_resolve(
+        self, masker: OutputMasker, unmasker: ArgUnmasker
+    ):
+        original = "srcip:192.0.2.102,192.0.2.103"
+        masked = masker.mask_result({"groupby1": original})["groupby1"]
+
+        assert unmasker.unmask_args({"groupby1": masked})["groupby1"] == original
+
+    def test_untyped_inner_field_is_left_alone(self, unmasker: ArgUnmasker):
+        # The output side does not mask an untyped inner field, so the
+        # inverse must not transform it either.
+        assert unmasker.resolve_prefixed("action:deny") == "action:deny"
+        assert unmasker.unmask_args({"groupby1": "action:deny"})["groupby1"] == "action:deny"
+
+    def test_a_string_with_no_colon_passes_through(self, unmasker: ArgUnmasker):
+        assert unmasker.resolve_prefixed("no-colon-here") == "no-colon-here"
+
+
 class TestFilterExpressions:
     @pytest.mark.parametrize("op", ["==", "!=", "<=", ">=", "=~", "!~", "~", "="])
     def test_all_operators_resolve_masked_ip(

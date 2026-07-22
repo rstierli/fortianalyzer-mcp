@@ -51,6 +51,7 @@ import re
 from typing import Any
 
 from fortianalyzer_mcp.masking.fields import (
+    COMPOSITE_PREFIXED,
     COMPOSITE_URL_FULL,
     FIELD_TYPES,
     IP,
@@ -196,6 +197,31 @@ class ArgUnmasker:
         prefix = f"{parts.scheme}://" if parts.scheme else "//"
         return f"{prefix}{netloc}{resolved_tail}"
 
+    # -- prefixed group-by values (alert groupby1/groupby2) ---------------- #
+
+    def resolve_prefixed(self, value: str) -> str:
+        """Inverse of ``wrapper._mask_prefixed``.
+
+        The output side masks the inner value of a ``"<fieldname>:<value>"``
+        group-by string by the INNER field's type, so the inverse must too:
+        the outer key (``groupby1``) has no type, so resolving the string as
+        a whole leaves the token untouched and a filter built from it matches
+        zero rows. Split on the first colon only, so an IPv6 inner value
+        keeps its own colons, resolve the value by the inner field's type,
+        and reassemble. Mirrors the mask side's per-element comma handling.
+        """
+        field, sep, raw = value.partition(":")
+        if not sep or not raw:
+            return value
+        vtype = FIELD_TYPES.get(field.lower())
+        if "," in raw:
+            resolved = ",".join(self.resolve_scalar(part, vtype) for part in raw.split(","))
+        else:
+            resolved = self.resolve_scalar(raw, vtype)
+        if resolved == raw:
+            return value
+        return f"{field}{sep}{resolved}"
+
     # -- filter expressions ------------------------------------------------ #
 
     def unmask_filter(self, expression: str) -> str:
@@ -211,6 +237,8 @@ class ArgUnmasker:
             raw = match.group("value")
             if field.lower() in COMPOSITE_URL_FULL:
                 resolved = self.resolve_url(raw)
+            elif field.lower() in COMPOSITE_PREFIXED:
+                resolved = self.resolve_prefixed(raw)
             else:
                 vtype = FIELD_TYPES.get(field.lower())
                 resolved = self.resolve_scalar(raw, vtype)
@@ -246,6 +274,8 @@ class ArgUnmasker:
                 return self.unmask_filter(value)
             if lowered in COMPOSITE_URL_FULL:
                 return self.resolve_url(value)
+            if lowered in COMPOSITE_PREFIXED:
+                return self.resolve_prefixed(value)
             vtype = FIELD_TYPES.get(lowered)
             if vtype in (IP, MAC, IP_OR_HOST):
                 # comma-joined multi-values, same convention as the output side
