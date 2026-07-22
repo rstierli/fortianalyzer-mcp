@@ -41,7 +41,7 @@ APPS = [
 ]
 WEBSITES = [{"domain": "youtube.com", "bandwidth": 800_000}]
 CLOUD_APPS = [{"app": "Dropbox", "bandwidth": 123_456}]
-DLP_LOGS = [{"filename": "payroll.xlsx", "action": "block", "srcip": "192.168.1.10"}]
+DLP_LOGS = [{"filename": "payroll.xlsx", "action": "block", "srcip": "192.0.2.10"}]
 
 
 class TestAppUsageCatalog:
@@ -63,10 +63,10 @@ class TestAppUsage:
             t(QUERY_LOGS, return_value=ok(logs=DLP_LOGS, tid=7)) as logs,
         ):
             result = await handlers.run_app_usage(
-                AppUsageParams(device="FG100FTK19001333", top_limit=25, dlp_limit=50)
+                AppUsageParams(device="FGT60F0000000000", top_limit=25, dlp_limit=50)
             )
         assert apps.call_args.kwargs["limit"] == 25
-        assert apps.call_args.kwargs["device"] == "FG100FTK19001333"
+        assert apps.call_args.kwargs["device"] == "FGT60F0000000000"
         assert apps.call_args.kwargs["time_range"] == "24-hour"
         assert logs.call_args.kwargs["logtype"] == "dlp"
         assert logs.call_args.kwargs["limit"] == 50

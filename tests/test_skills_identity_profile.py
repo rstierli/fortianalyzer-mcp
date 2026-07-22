@@ -110,8 +110,12 @@ class TestIdentityProfile:
 
     async def test_username_partial_match_is_not_found(self):
         with t(GET_ENDUSERS, return_value=ok(data=[USER_ALICE, USER_ALICE_ADMIN])):
-            with pytest.raises(handlers.SkillExecutionError, match="no UEBA end-user"):
+            with pytest.raises(handlers.SkillExecutionError, match="no UEBA end-user") as exc:
                 await handlers.run_identity_profile(IdentityProfileParams(username="alic"))
+        # The error names the parameter, never the caller's value: with masking
+        # on, unmask_args has already resolved a token to the real username, so
+        # echoing it here would leak cleartext on the empty-mapping failure path.
+        assert "alic" not in str(exc.value)
 
     async def test_unknown_euid_raises(self):
         with t(GET_ENDUSERS, return_value=ok(data=[USER_ALICE])):

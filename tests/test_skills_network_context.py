@@ -53,10 +53,10 @@ def by_view(**responses: dict[str, Any]) -> Any:
 
 ERR = {"status": "error", "message": "boom"}
 DEST_ROWS = [
-    {"dstip": "142.250.203.100", "bandwidth": 9001, "sessions": 12},
-    {"dstip": "104.16.132.229", "bandwidth": 4500, "sessions": 7},
+    {"dstip": "198.51.100.100", "bandwidth": 9001, "sessions": 12},
+    {"dstip": "198.51.100.229", "bandwidth": 4500, "sessions": 7},
 ]
-SRC_ROWS = [{"srcip": "192.168.254.10", "bandwidth": 8000, "sessions": 20}]
+SRC_ROWS = [{"srcip": "192.0.2.10", "bandwidth": 8000, "sessions": 20}]
 GEO_ROWS = [{"country": "Switzerland", "traffic_in": 100, "traffic_out": 200}]
 VPN_ROWS = [{"vpntunnel": "hq-to-branch", "traffic_in": 10, "traffic_out": 20}]
 

@@ -49,7 +49,7 @@ def logs_ok(failures: int, **overrides: Any) -> dict[str, Any]:
     return ok(**payload)
 
 
-ENDPOINT = {"epid": 1025, "epname": "WS-ALPHA", "epip": "192.168.1.10"}
+ENDPOINT = {"epid": 1025, "epname": "WS-ALPHA", "epip": "192.0.2.10"}
 ENDUSER = {"euid": 7, "euname": "alice"}
 
 # crit 1 / high 1 / med 1 / low 1 -> vuln = 25 + 10 + 3 + 1 = 39
@@ -104,9 +104,9 @@ class TestEndpointScoring:
         assert eps.call_args.kwargs["detail_level"] == "simple"
         assert vulns.call_args.kwargs["epids"] == [1025]
         assert fortiview.call_args.kwargs["view_name"] == "top-threats"
-        assert fortiview.call_args.kwargs["filter"] == "srcip==192.168.1.10"
+        assert fortiview.call_args.kwargs["filter"] == "srcip==192.0.2.10"
         assert logs.call_args.kwargs["logtype"] == "event"
-        assert logs.call_args.kwargs["filter"] == "action==failure and srcip==192.168.1.10"
+        assert logs.call_args.kwargs["filter"] == "action==failure and srcip==192.0.2.10"
 
         assert result.entity == {"type": "endpoint", "epid": 1025, "record": ENDPOINT}
         assert result.vulnerability.raw_counts == {

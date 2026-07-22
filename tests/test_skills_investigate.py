@@ -84,7 +84,7 @@ ENRICHED_IP = {
     "enrichment-uuid": "eu-0001",
 }
 THREATS = [{"threat": "Backdoor.Agent", "threatweight": 500, "incidents": 3}]
-ENDPOINT = {"epid": 7, "epname": "ws-finance-01", "epip": "10.0.0.7"}
+ENDPOINT = {"epid": 7, "epname": "ws-finance-01", "epip": "192.0.2.7"}
 ENDUSER = {"euid": 3, "euname": "roland"}
 
 

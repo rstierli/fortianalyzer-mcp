@@ -1397,7 +1397,11 @@ async def run_identity_profile(params: IdentityProfileParams) -> IdentityProfile
     else:
         needle = str(params.username).lower()
         matches = [u for u in users if str(u.get("euname") or "").lower() == needle]
-        wanted = f"username {params.username!r}"
+        # Name the parameter, never echo the caller's value: with masking on,
+        # unmask_args has already resolved a token to the real username, and a
+        # no-match error/warning here would hand that cleartext back to the
+        # model on the empty-mapping failure path masking cannot re-cover.
+        wanted = "the requested username"
     if not matches:
         raise SkillExecutionError(f"no UEBA end-user matches {wanted}")
     user = matches[0]
