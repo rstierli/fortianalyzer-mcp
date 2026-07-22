@@ -821,3 +821,85 @@ class RiskAssessmentResult(BaseModel):
     band: Literal["low", "medium", "high", "critical"]
     time_range: str
     warnings: list[str] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------- #
+# investigate (Analysis)                                                #
+# --------------------------------------------------------------------- #
+
+
+class InvestigateParams(BaseModel):
+    """Parameters for the ``investigate`` skill. Exactly one subject required."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    adom: str | None = None
+    alert_id: str | None = None
+    incident_id: str | None = None
+    time_range: str = Field(
+        default="7-day",
+        description="Window for the summary, indicator and threat-landscape "
+        "sections (and the triage surrounding-activity context)",
+    )
+    detail_level: Literal["standard", "extended"] = Field(
+        default="standard",
+        description="Indicator-enrichment detail, passed through to the threat_intel composition",
+    )
+    include_threat_landscape: bool = Field(
+        default=True, description="Include the FortiView top-threats context section"
+    )
+    include_entities: bool = Field(
+        default=True,
+        description="Attach UEBA asset/identity context for endpoint/user ids "
+        "carried by the subject",
+    )
+
+    @model_validator(mode="after")
+    def _exactly_one_subject(self) -> "InvestigateParams":
+        if bool(self.alert_id) == bool(self.incident_id):
+            raise ValueError('provide exactly one of "alert_id" or "incident_id"')
+        return self
+
+
+class Investigation(BaseModel):
+    """Output of the ``investigate`` skill — one consolidated analyst view.
+
+    Pure composition: every section is the validated output of an existing
+    skill (triage / incident_summary / threat_intel / asset_lookup /
+    identity_lookup), nested by reference — no fields are renamed or
+    re-shaped. ``triage`` is the subject section and the skill's only hard
+    fail; every other section degrades independently to a ``FeatureGap``.
+    Each nested result keeps its own ``warnings``; the top-level
+    ``warnings`` list aggregates them all with a section prefix. The nested
+    triage result's ``enrichment`` slot stays a gap by design — this
+    skill's ``threat_intel`` section is its Wave-2 replacement.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    subject_type: Literal["alert", "incident"]
+    headline: str = Field(
+        description="Deterministic one-line rollup (mapped priority plus "
+        "per-section counts) — derived, no inference"
+    )
+    triage: TriageResult = Field(
+        description="Evidence bundle + deterministic assessment for the subject"
+    )
+    summary: IncidentSummary | FeatureGap = Field(
+        description="Deep summary of the subject incident (or the incident the "
+        "alert is attached to) — or the gap marker"
+    )
+    threat_intel: ThreatIntelResult | FeatureGap = Field(
+        description="Reputation enrichment of the subject's linked indicators, "
+        "with the threat-landscape context — or the gap marker"
+    )
+    assets: AssetLookupResult | FeatureGap = Field(
+        description="UEBA asset profiles for endpoint ids carried by the "
+        "subject — or the gap marker"
+    )
+    identities: IdentityLookupResult | FeatureGap = Field(
+        description="UEBA identity records for end-user ids carried by the "
+        "subject — or the gap marker"
+    )
+    time_range: str
+    warnings: list[str] = Field(default_factory=list)

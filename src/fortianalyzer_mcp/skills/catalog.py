@@ -27,6 +27,8 @@ from fortianalyzer_mcp.skills.models import (
     IncidentsResult,
     IncidentSummary,
     IncidentSummaryParams,
+    InvestigateParams,
+    Investigation,
     LogSearchParams,
     LogSearchResult,
     NetworkContextParams,
@@ -184,6 +186,18 @@ SKILLS: dict[str, SkillSpec] = {
             params_model=IncidentSummaryParams,
             output_model=IncidentSummary,
             handler=handlers.run_incident_summary,
+        ),
+        SkillSpec(
+            id="investigate",
+            tier="analysis",
+            description="Consolidated investigation of one alert or incident, "
+            "composed from existing skills: triage evidence + assessment, the "
+            "deep incident summary, linked-indicator reputation enrichment "
+            "(requires SOAR), and UEBA asset/identity context for entities "
+            "the subject carries — each section degrading independently.",
+            params_model=InvestigateParams,
+            output_model=Investigation,
+            handler=handlers.run_investigate,
         ),
     )
 }

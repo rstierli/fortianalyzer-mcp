@@ -39,7 +39,10 @@ WAVE2_ENRICHMENT_IDS = {
     "network_context",
     "risk_assessment",
 }
-REGISTERED_SKILL_IDS = WAVE1_SKILL_IDS | WAVE2_DATA_ACCESS_IDS | WAVE2_ENRICHMENT_IDS
+WAVE2_ANALYSIS_IDS = {"investigate"}
+REGISTERED_SKILL_IDS = (
+    WAVE1_SKILL_IDS | WAVE2_DATA_ACCESS_IDS | WAVE2_ENRICHMENT_IDS | WAVE2_ANALYSIS_IDS
+)
 
 GET_INCIDENTS = "fortianalyzer_mcp.tools.incident_tools.get_incidents"
 GET_INCIDENT = "fortianalyzer_mcp.tools.incident_tools.get_incident"

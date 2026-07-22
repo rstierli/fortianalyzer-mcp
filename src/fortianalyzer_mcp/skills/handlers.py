@@ -45,6 +45,8 @@ from fortianalyzer_mcp.skills.models import (
     IncidentSummary,
     IncidentSummaryParams,
     IndicatorEnrichmentRecord,
+    InvestigateParams,
+    Investigation,
     LogSearchParams,
     LogSearchResult,
     NetworkContextParams,
@@ -1815,6 +1817,212 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
         ),
         composite_score=composite,
         band=_risk_band(composite),  # type: ignore[arg-type]
+        time_range=params.time_range,
+        warnings=warnings,
+    )
+
+
+# --------------------------------------------------------------------- #
+# investigate (Wave 2)                                                  #
+# --------------------------------------------------------------------- #
+
+# Candidate subject fields that may carry linked entity ids. Alert
+# extra-details carry "epids"/"euids" (live-verified: triage's
+# subject_details is {alertid, devs, epids, euids}); which fields an
+# incident record carries is not pinned down across builds, so the
+# singular forms are candidates and a miss degrades to a FeatureGap
+# rather than a guess.
+_SUBJECT_EPID_KEYS = ("epids", "epid")
+_SUBJECT_EUID_KEYS = ("euids", "euid")
+
+
+def _subject_entity_ids(carriers: list[dict[str, Any]], keys: tuple[str, ...]) -> list[int]:
+    """Integer entity ids from the first carrier/key that yields any.
+
+    Follows the risk_assessment id-coercion convention: ints and digit
+    strings count, anything else is dropped rather than guessed at.
+    """
+    for carrier in carriers:
+        for key in keys:
+            if key not in carrier:
+                continue
+            value = carrier[key]
+            ids: list[int] = []
+            for candidate in value if isinstance(value, list) else [value]:
+                if isinstance(candidate, bool):
+                    continue
+                if isinstance(candidate, int):
+                    ids.append(candidate)
+                elif isinstance(candidate, str) and candidate.isdigit():
+                    ids.append(int(candidate))
+            if ids:
+                return ids
+    return []
+
+
+def _investigation_headline(
+    subject_type: str,
+    subject_id: str,
+    triage: TriageResult,
+    threat_intel: ThreatIntelResult | FeatureGap,
+    assets: AssetLookupResult | FeatureGap,
+    identities: IdentityLookupResult | FeatureGap,
+) -> str:
+    """Deterministic one-line rollup: the mapped priority plus counts.
+
+    Built only from values already present in the composed results — no
+    inference; gap sections are simply omitted.
+    """
+    parts = [f"{subject_type} {subject_id}: priority {triage.assessment.priority}"]
+    if isinstance(threat_intel, ThreatIntelResult):
+        malicious = sum(
+            1
+            for record in threat_intel.indicators
+            if str(record.reputation or "").lower() == "malicious"
+        )
+        parts.append(f"{threat_intel.indicator_count} linked indicators ({malicious} malicious)")
+    if isinstance(assets, AssetLookupResult):
+        parts.append(f"{assets.endpoint_count} linked endpoints")
+    if isinstance(identities, IdentityLookupResult):
+        parts.append(f"{identities.user_count} linked users")
+    return "; ".join(parts)
+
+
+async def run_investigate(params: InvestigateParams) -> Investigation:
+    """One consolidated investigation view for one alert or incident.
+
+    Pure composition over existing skills — no reads of its own:
+    ``run_triage`` resolves the subject (the only hard fail), then
+    ``run_incident_summary`` (the subject incident, or the incident the
+    alert is attached to), ``run_threat_intel`` (linked-indicator
+    enrichment) and ``run_asset_lookup``/``run_identity_lookup`` (for
+    entity ids the subject itself carries) each degrade independently to
+    a ``FeatureGap`` plus a prefixed warning.
+    """
+    warnings: list[str] = []
+    subject_type = "alert" if params.alert_id else "incident"
+    subject_id = str(params.alert_id or params.incident_id)
+
+    triage = await run_triage(
+        TriageParams(
+            adom=params.adom,
+            alert_id=params.alert_id,
+            incident_id=params.incident_id,
+            context_time_range=params.time_range,
+        )
+    )
+    warnings.extend(f"triage: {w}" for w in triage.warnings)
+
+    # Deep incident summary: the subject incident, or the incident the
+    # alert is attached to (resolved authoritatively by triage).
+    summary: IncidentSummary | FeatureGap
+    summary_incid = params.incident_id
+    if summary_incid is None:
+        related_incids = [
+            str(rel["incid"])
+            for rel in triage.related
+            if isinstance(rel, dict) and rel.get("incid")
+        ]
+        summary_incid = related_incids[0] if related_incids else None
+        if len(related_incids) > 1:
+            warnings.append(
+                f"{len(related_incids)} incidents linked to alert {params.alert_id}; "
+                f"summarizing incident {summary_incid}"
+            )
+    if summary_incid is None:
+        summary = FeatureGap(
+            reason=f"alert {params.alert_id} is not attached to any incident; nothing to summarize"
+        )
+    else:
+        try:
+            summary = await run_incident_summary(
+                IncidentSummaryParams(
+                    adom=params.adom,
+                    incident_id=summary_incid,
+                    time_range=params.time_range,
+                    # The threat landscape lives on the threat_intel section;
+                    # fetching it here too would duplicate the FortiView read.
+                    include_top_threats=False,
+                )
+            )
+            warnings.extend(f"summary: {w}" for w in summary.warnings)
+        except SkillExecutionError as exc:
+            warnings.append(f"incident summary unavailable: {exc}")
+            summary = FeatureGap(reason=f"incident summary unavailable: {exc}")
+
+    # Indicator enrichment: threat_intel on the same subject. Its subject
+    # call (linked-indicator resolution) is enrichment from this skill's
+    # point of view, so its hard fail degrades to a gap here.
+    threat_intel: ThreatIntelResult | FeatureGap
+    try:
+        threat_intel = await run_threat_intel(
+            ThreatIntelParams(
+                adom=params.adom,
+                alert_id=params.alert_id,
+                incident_id=params.incident_id,
+                detail_level=params.detail_level,
+                time_range=params.time_range,
+                include_threat_landscape=params.include_threat_landscape,
+            )
+        )
+        warnings.extend(f"threat_intel: {w}" for w in threat_intel.warnings)
+    except SkillExecutionError as exc:
+        warnings.append(f"indicator enrichment unavailable: {exc}")
+        threat_intel = FeatureGap(reason=f"indicator enrichment unavailable: {exc}")
+
+    # Asset / identity context: only for entity ids the subject itself
+    # carries; anything less direct would be a guess and degrades to a
+    # gap instead.
+    assets: AssetLookupResult | FeatureGap
+    identities: IdentityLookupResult | FeatureGap
+    if not params.include_entities:
+        assets = FeatureGap(reason="disabled by include_entities=false")
+        identities = FeatureGap(reason="disabled by include_entities=false")
+    else:
+        carriers = [triage.subject]
+        if triage.subject_details is not None:
+            carriers.append(triage.subject_details)
+        epids = _subject_entity_ids(carriers, _SUBJECT_EPID_KEYS)
+        euids = _subject_entity_ids(carriers, _SUBJECT_EUID_KEYS)
+
+        if not epids:
+            assets = FeatureGap(
+                reason=f"{subject_type} {subject_id} carries no endpoint ids "
+                f"({'/'.join(_SUBJECT_EPID_KEYS)}); asset linkage would be a guess"
+            )
+        else:
+            try:
+                assets = await run_asset_lookup(AssetLookupParams(adom=params.adom, epids=epids))
+                warnings.extend(f"assets: {w}" for w in assets.warnings)
+            except SkillExecutionError as exc:
+                warnings.append(f"asset context unavailable: {exc}")
+                assets = FeatureGap(reason=f"asset context unavailable: {exc}")
+
+        if not euids:
+            identities = FeatureGap(
+                reason=f"{subject_type} {subject_id} carries no end-user ids "
+                f"({'/'.join(_SUBJECT_EUID_KEYS)}); identity linkage would be a guess"
+            )
+        else:
+            try:
+                identities = await run_identity_lookup(
+                    IdentityLookupParams(adom=params.adom, euids=euids)
+                )
+                warnings.extend(f"identities: {w}" for w in identities.warnings)
+            except SkillExecutionError as exc:
+                warnings.append(f"identity context unavailable: {exc}")
+                identities = FeatureGap(reason=f"identity context unavailable: {exc}")
+
+    return Investigation(
+        subject_type=subject_type,  # type: ignore[arg-type]
+        headline=_investigation_headline(
+            subject_type, subject_id, triage, threat_intel, assets, identities
+        ),
+        triage=triage,
+        summary=summary,
+        threat_intel=threat_intel,
+        assets=assets,
+        identities=identities,
         time_range=params.time_range,
         warnings=warnings,
     )
