@@ -296,6 +296,11 @@ DEVICE_IDENTITY_TYPES: dict[str, str] = {
     # the sibling "devname" masked, handing over the token-to-name pairing
     # the flag exists to withhold.
     "devs": HOSTNAME,
+    # fortiview policy-hits nests the reporting appliance a second time,
+    # under device_info.dev_name, spelled with an underscore. Same class as
+    # devname and the same failure devs had: it defeated the flag instead
+    # of following it, keeping the name clear beside a masked devid.
+    "dev_name": HOSTNAME,
 }
 
 #: ``target[].name`` values, mapped to the type of the sibling ``value``.

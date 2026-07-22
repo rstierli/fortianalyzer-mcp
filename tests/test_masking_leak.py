@@ -1146,3 +1146,23 @@ class TestIncidentWorkflowPrincipals:
     def test_empty_slot_is_untouched(self, masker: OutputMasker):
         # The live shape on an estate that does not work incidents.
         assert masker.mask_result({"assigned_to": ""})["assigned_to"] == ""
+
+
+class TestNestedDeviceName:
+    """``device_info.dev_name``: the appliance, spelled a second way."""
+
+    def test_nested_dev_name_follows_the_flag_too(self, full_masker: OutputMasker):
+        # fortiview policy-hits spells the appliance dev_name inside a
+        # device_info sub-object. Unlisted, it kept the name clear next to a
+        # masked devid on the same row.
+        masked = full_masker.mask_result(
+            {"devid": DEV_NAME, "device_info": {"dev_name": DEV_NAME, "ha_dev": "no"}}
+        )
+
+        assert DEV_NAME not in str(masked)
+        assert masked["device_info"]["dev_name"] == masked["devid"]
+
+    def test_nested_dev_name_stays_clear_with_the_flag_off(self, masker: OutputMasker):
+        masked = masker.mask_result({"device_info": {"dev_name": DEV_NAME}})
+
+        assert masked["device_info"]["dev_name"] == DEV_NAME
