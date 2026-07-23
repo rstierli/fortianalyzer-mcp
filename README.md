@@ -712,6 +712,27 @@ faz_skill(skill="investigate", params={"incident_id": "IN00000019"})
 faz_skill(skill="investigate", params={"alert_id": "202606121000000041", "detail_level": "extended"})
 ```
 
+### How an analyst uses skills
+
+The point of skills is that the analyst works in **intent** — plain questions — and the model builds the right `faz_skill` call. No memorizing tools or JSON. A real first-tier triage of one incident:
+
+> **"An incident just fired — IN00000020. What am I looking at?"**
+> → `faz_skill(skill="investigate", params={"incident_id": "IN00000020"})`
+>
+> One call returns the triage assessment, the triggering alert, the affected asset, identity context, and the threat landscape. The analyst instantly sees: *a smart TV on the guest VLAN, a DNS query to a "botnet C&C" that is actually a Netflix image CDN, already blocked at the firewall.*
+
+> **"That domain looks like a CDN, not real C&C. Is anything they hit actually malicious?"**
+> → `faz_skill(skill="threat_intel", params={"incident_id": "IN00000020"})`
+>
+> Multi-source reputation (FortiGuard + VirusTotal, normalized) separates a truly-bad indicator from a noisy categorization — so the analyst does not chase a false positive.
+
+> **"Is that host doing anything unusual on the network, and is the perimeter healthy?"**
+> → `faz_skill(skill="network_context")`
+>
+> Top talkers, geo spread, and site-to-site VPN tunnel health in one structured result.
+
+Three plain-English questions replace ~15 raw tool calls (`get_incident`, `get_alerts`, `get_alert_logs`, `get_endpoints`, `get_indicator_enrichment`, `run_fortiview` ×N, poll, correlate). Every skill returns a **validated, versioned** result with honest gaps (`"no UEBA user for this euid"`, `"VPN widened to 90-day"`), so the analyst trusts what is present and knows what is missing.
+
 - `faz_skill(skill="list")` (alias `"describe"`) returns the machine-readable catalogue including each skill's parameter and output JSON schema.
 - All skills are read-only and additive — zero changes to the existing tools.
 - Requires FortiAnalyzer **7.6.7+**. Not available in `FAZ_TOOL_MODE=dynamic` (beta limitation).
