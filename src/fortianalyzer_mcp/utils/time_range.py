@@ -21,6 +21,32 @@ from zoneinfo import ZoneInfo
 
 _TIMESTAMP_FMT = "%Y-%m-%d %H:%M:%S"
 
+# Accepted custom-range inputs, most precise first. FAZ documents only the
+# seconds form ('yyyy-MM-dd HH:mm:ss') on every version (7.2-8.0), so these
+# lenient inputs are always normalized back to _TIMESTAMP_FMT on output.
+_CUSTOM_TS_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d")
+
+
+def _parse_custom_timestamp(value: str, *, is_end: bool) -> datetime:
+    """Parse one side of a custom ``start|end`` range, tolerantly.
+
+    Accepts full ``YYYY-MM-DD HH:MM:SS``, minute precision
+    ``YYYY-MM-DD HH:MM`` (seconds default to ``:00``), and date-only
+    ``YYYY-MM-DD``. A date-only *end* covers the whole day (``23:59:59``)
+    so an inclusive ``day1|day2`` range works as written. Raises
+    ``ValueError`` if none of the accepted shapes match.
+    """
+    for fmt in _CUSTOM_TS_FORMATS:
+        try:
+            dt = datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+        if fmt == "%Y-%m-%d" and is_end:
+            dt = dt.replace(hour=23, minute=59, second=59)
+        return dt
+    raise ValueError(f"unrecognized timestamp {value!r}")
+
+
 # Preset relative ranges. Keys are caller-facing strings; values are
 # the size of the window ending at "now". Order roughly small -> large.
 _RANGE_MAP: dict[str, timedelta] = {
@@ -87,15 +113,21 @@ def parse_time_range(
                 f"Custom time_range must be 'start|end' with non-empty parts, got {time_range!r}"
             )
         try:
-            start_dt = datetime.strptime(start, _TIMESTAMP_FMT)
-            end_dt = datetime.strptime(end, _TIMESTAMP_FMT)
+            start_dt = _parse_custom_timestamp(start, is_end=False)
+            end_dt = _parse_custom_timestamp(end, is_end=True)
         except ValueError as exc:
             raise ValueError(
-                f"Custom time_range timestamps must be 'YYYY-MM-DD HH:MM:SS', got {time_range!r}"
+                "Custom time_range timestamps must be 'YYYY-MM-DD HH:MM:SS' "
+                "(the seconds, or the whole time, may be omitted), "
+                f"got {time_range!r}"
             ) from exc
         if start_dt > end_dt:
             raise ValueError(f"Custom time_range start must be <= end, got {time_range!r}")
-        return {"start": start, "end": end}
+        # Normalize to the seconds form FAZ documents on every version.
+        return {
+            "start": start_dt.strftime(_TIMESTAMP_FMT),
+            "end": end_dt.strftime(_TIMESTAMP_FMT),
+        }
 
     delta = _RANGE_MAP.get(time_range)
     if delta is None:

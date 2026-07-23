@@ -94,6 +94,29 @@ class TestParseTimeRangeCustom:
         with pytest.raises(ValueError, match="start must be <= end"):
             parse_time_range("2024-01-02 00:00:00|2024-01-01 00:00:00")
 
+    def test_minute_precision_normalizes_to_seconds(self) -> None:
+        # The GUI emits minute precision; we accept it and pad to the
+        # seconds form FAZ documents on every version.
+        result = parse_time_range("2024-08-15 10:19|2026-07-23 10:19")
+        assert result == {"start": "2024-08-15 10:19:00", "end": "2026-07-23 10:19:00"}
+
+    def test_date_only_covers_the_whole_end_day(self) -> None:
+        result = parse_time_range("2024-08-15|2026-07-23")
+        assert result == {"start": "2024-08-15 00:00:00", "end": "2026-07-23 23:59:59"}
+
+    def test_mixed_precision_range(self) -> None:
+        result = parse_time_range("2024-08-15|2026-07-23 08:30")
+        assert result == {"start": "2024-08-15 00:00:00", "end": "2026-07-23 08:30:00"}
+
+    def test_seconds_precision_still_verbatim(self) -> None:
+        # Normalizing must not perturb an already-seconds range.
+        result = parse_time_range("2024-01-01 00:00:00|2024-01-02 23:59:59")
+        assert result == {"start": "2024-01-01 00:00:00", "end": "2024-01-02 23:59:59"}
+
+    def test_still_rejects_nonsense_timestamp(self) -> None:
+        with pytest.raises(ValueError, match="timestamps must be"):
+            parse_time_range("2024-13-40 99:99|2026-07-23")
+
 
 class TestParseTimeRangeAnchor:
     """Explicit anchor support for LogView-clock alignment."""
