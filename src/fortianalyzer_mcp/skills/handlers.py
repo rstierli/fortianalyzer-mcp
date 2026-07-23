@@ -1585,6 +1585,44 @@ async def run_app_usage(params: AppUsageParams) -> AppUsageResult:
 _GEO_VIEW = "top-countries"
 _VPN_VIEW = "site-to-site-ipsec"
 
+# The site-to-site IPsec FortiView buckets by tunnel session, not by traffic
+# in the window, so long-lived low-traffic tunnels only surface over a wide
+# lookback (live-observed: absent at 24h/7-day, present at 30-90 days on
+# FAZ 7.6.7/8.0.0). The VPN section is therefore floored to a wide window
+# independent of the short window the traffic/geo sections want.
+_VPN_MIN_WINDOW = "90-day"
+_WINDOW_RANK = {
+    "now": 0,
+    "5-min": 1,
+    "15-min": 2,
+    "30-min": 3,
+    "1-hour": 4,
+    "2-hour": 5,
+    "6-hour": 6,
+    "12-hour": 7,
+    "24-hour": 8,
+    "1-day": 8,
+    "2-day": 9,
+    "7-day": 10,
+    "30-day": 11,
+    "90-day": 12,
+}
+
+
+def _vpn_window(time_range: str) -> str:
+    """Floor a requested window to ``_VPN_MIN_WINDOW`` for the VPN section.
+
+    A custom ``start|end`` range is the caller's explicit intent and passes
+    through unchanged; a preset shorter than the floor is widened, and a
+    preset at or above the floor (or an unrecognized token) is kept as-is.
+    """
+    if "|" in time_range:
+        return time_range
+    requested = _WINDOW_RANK.get(time_range)
+    if requested is None or requested >= _WINDOW_RANK[_VPN_MIN_WINDOW]:
+        return time_range
+    return _VPN_MIN_WINDOW
+
 
 async def run_network_context(params: NetworkContextParams) -> NetworkContextResult:
     """Network-layer context bundle: top destinations/sources, geo, VPN.
@@ -1617,9 +1655,16 @@ async def run_network_context(params: NetworkContextParams) -> NetworkContextRes
     if params.include_geo:
         attempted.append("top_countries")
         coros.append(_call(get_fortiview_data, view_name=_GEO_VIEW, **common))
+    vpn_window = params.time_range
     if params.include_vpn:
         attempted.append("vpn_tunnels")
-        coros.append(_call(get_fortiview_data, view_name=_VPN_VIEW, **common))
+        # The VPN view is session-bucketed; a short window silently returns
+        # nothing even for active tunnels, so it runs over a widened window
+        # (an explicit vpn_time_range wins).
+        vpn_window = params.vpn_time_range or _vpn_window(params.time_range)
+        coros.append(
+            _call(get_fortiview_data, view_name=_VPN_VIEW, **{**common, "time_range": vpn_window})
+        )
 
     results = await _gather_bounded(coros)
 
@@ -1642,6 +1687,15 @@ async def run_network_context(params: NetworkContextParams) -> NetworkContextRes
         sections["top_countries"] = FeatureGap(reason="disabled by include_geo=false")
     if not params.include_vpn:
         sections["vpn_tunnels"] = FeatureGap(reason="disabled by include_vpn=false")
+    elif isinstance(sections.get("vpn_tunnels"), list):
+        if vpn_window != params.time_range:
+            warnings.append(
+                f"vpn_tunnels queried over {vpn_window}, not the requested "
+                f"{params.time_range}: the site-to-site IPsec FortiView is "
+                "session-bucketed and does not surface tunnels in short windows"
+            )
+        if not sections["vpn_tunnels"]:
+            warnings.append(f"no site-to-site IPsec tunnels in the {vpn_window} window")
 
     counts = {
         label: (len(rows) if isinstance(rows, list) else 0) for label, rows in sections.items()

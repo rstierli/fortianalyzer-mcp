@@ -89,10 +89,12 @@ class TestNetworkContext:
         assert dest.call_args.kwargs["time_range"] == "7-day"
         assert dest.call_args.kwargs["device"] == "FGT100F"
         assert dest.call_args.kwargs["limit"] == 5
-        assert {c.kwargs["view_name"] for c in fortiview.call_args_list} == {
-            "top-countries",
-            "site-to-site-ipsec",
-        }
+        fv = {c.kwargs["view_name"]: c.kwargs for c in fortiview.call_args_list}
+        assert set(fv) == {"top-countries", "site-to-site-ipsec"}
+        # geo uses the requested window; the session-bucketed VPN view is
+        # floored to 90-day so long-lived tunnels are not silently dropped.
+        assert fv["top-countries"]["time_range"] == "7-day"
+        assert fv["site-to-site-ipsec"]["time_range"] == "90-day"
         assert result.top_destinations == DEST_ROWS
         assert result.top_sources == SRC_ROWS
         assert result.top_countries == GEO_ROWS
@@ -104,7 +106,73 @@ class TestNetworkContext:
             "vpn_tunnels": 1,
         }
         assert result.time_range == "7-day"
-        assert result.warnings == []
+        # tunnels present, so only the window-widening note surfaces
+        assert any("queried over 90-day" in w for w in result.warnings)
+        assert not any("no site-to-site" in w for w in result.warnings)
+
+    async def test_vpn_window_floored_and_override(self):
+        with (
+            t(GET_TOP_DESTINATIONS, return_value=ok(data=DEST_ROWS)),
+            t(GET_TOP_SOURCES, return_value=ok(data=SRC_ROWS)),
+            t(
+                GET_FORTIVIEW_DATA,
+                side_effect=by_view(
+                    top_countries=ok(data=GEO_ROWS), site_to_site_ipsec=ok(data=VPN_ROWS)
+                ),
+            ) as fortiview,
+        ):
+            result = await handlers.run_network_context(
+                NetworkContextParams(time_range="24-hour", vpn_time_range="30-day")
+            )
+        fv = {c.kwargs["view_name"]: c.kwargs for c in fortiview.call_args_list}
+        # explicit override wins over the floor
+        assert fv["site-to-site-ipsec"]["time_range"] == "30-day"
+        assert fv["top-countries"]["time_range"] == "24-hour"
+        assert any("queried over 30-day" in w for w in result.warnings)
+
+    async def test_wide_window_not_widened_no_note(self):
+        with (
+            t(GET_TOP_DESTINATIONS, return_value=ok(data=DEST_ROWS)),
+            t(GET_TOP_SOURCES, return_value=ok(data=SRC_ROWS)),
+            t(
+                GET_FORTIVIEW_DATA,
+                side_effect=by_view(
+                    top_countries=ok(data=GEO_ROWS), site_to_site_ipsec=ok(data=VPN_ROWS)
+                ),
+            ) as fortiview,
+        ):
+            result = await handlers.run_network_context(NetworkContextParams(time_range="90-day"))
+        fv = {c.kwargs["view_name"]: c.kwargs for c in fortiview.call_args_list}
+        assert fv["site-to-site-ipsec"]["time_range"] == "90-day"
+        assert not any("queried over" in w for w in result.warnings)
+
+    async def test_empty_vpn_section_warns(self):
+        with (
+            t(GET_TOP_DESTINATIONS, return_value=ok(data=DEST_ROWS)),
+            t(GET_TOP_SOURCES, return_value=ok(data=SRC_ROWS)),
+            t(
+                GET_FORTIVIEW_DATA,
+                side_effect=by_view(
+                    top_countries=ok(data=GEO_ROWS), site_to_site_ipsec=ok(data=[])
+                ),
+            ),
+        ):
+            result = await handlers.run_network_context(NetworkContextParams(time_range="90-day"))
+        assert result.vpn_tunnels == []
+        assert any(
+            "no site-to-site IPsec tunnels in the 90-day window" in w for w in result.warnings
+        )
+
+    def test_vpn_window_helper(self):
+        assert handlers._vpn_window("24-hour") == "90-day"
+        assert handlers._vpn_window("7-day") == "90-day"
+        assert handlers._vpn_window("30-day") == "90-day"
+        assert handlers._vpn_window("90-day") == "90-day"
+        # custom range and unknown tokens are the caller's intent, untouched
+        assert handlers._vpn_window("2024-01-01 00:00:00|2024-02-01 00:00:00") == (
+            "2024-01-01 00:00:00|2024-02-01 00:00:00"
+        )
+        assert handlers._vpn_window("1-year") == "1-year"
 
     async def test_failed_section_degrades_to_warning_and_gap(self):
         geo_err = {"status": "error", "message": "Validation error: Invalid FortiView view"}

@@ -710,6 +710,13 @@ class NetworkContextParams(BaseModel):
         default="24-hour",
         description='Preset ("1-hour".."30-day") or custom "start|end"',
     )
+    vpn_time_range: str | None = Field(
+        default=None,
+        description="Window for the VPN section only. The site-to-site IPsec "
+        "FortiView is session-bucketed, so long-lived tunnels only appear over "
+        "a wide lookback; when unset the section is floored to 90-day "
+        "independent of time_range.",
+    )
     device: str | None = Field(
         default=None, description="Device filter (name or serial), forwarded to every read"
     )
