@@ -556,18 +556,27 @@ async def get_top_cloud_applications(
     device: str | None = None,
     time_range: str = "1-hour",
     limit: int = 10,
-    sort_by: str = "bandwidth",
+    sort_by: str = "sessions",
 ) -> dict[str, Any]:
-    """Get top cloud/SaaS applications.
+    """Get top cloud/SaaS applications (Shadow IT view).
 
     Returns the most used cloud and SaaS applications.
+
+    Note: this view has no ``bandwidth`` column — its byte columns are
+    ``total_size``/``upload_size``/``download_size``, and those are
+    **always 0** because FortiGate app-ctrl logs carry no byte counts (a
+    known FortiOS logging limitation). So the default sort is ``sessions``
+    (usage), not bytes; ``d_risk`` (risk score) is the other useful sort.
+    Sorting by a non-existent column (e.g. ``bandwidth``) raises a
+    FortiAnalyzer DB error, so stick to columns this view actually has:
+    ``sessions``, ``d_risk``, ``num_loginids``, ``total_size`` (0).
 
     Args:
         adom: ADOM name (default: from config DEFAULT_ADOM)
         device: Device filter (serial number or name, optional)
         time_range: Time range (default: "1-hour")
         limit: Number of top cloud apps to return (default: 10)
-        sort_by: Sort field (default: "bandwidth")
+        sort_by: Sort field (default: "sessions"; "d_risk" also useful)
 
     Returns:
         dict with top cloud applications data

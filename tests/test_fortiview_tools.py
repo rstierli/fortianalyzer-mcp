@@ -193,3 +193,25 @@ class TestFortiViewViews:
         """
         with pytest.raises(ValidationError, match="Invalid FortiView view"):
             validate_fortiview_view(view)
+
+
+class TestCloudApplicationsSortDefault:
+    """The Shadow-IT cloud-apps view has no ``bandwidth`` column (its byte
+    columns are ``total_size``/... and always 0 — FGT app-ctrl logs carry no
+    bytes). Sorting by ``bandwidth`` raised a FAZ ``Missing columns`` DB
+    error, so the default must be a real, populated column."""
+
+    async def test_default_sort_is_sessions_not_bandwidth(self) -> None:
+        from unittest.mock import patch
+
+        from fortianalyzer_mcp.tools.fortiview_tools import get_top_cloud_applications
+
+        with patch(
+            "fortianalyzer_mcp.tools.fortiview_tools.get_fortiview_data",
+            autospec=True,
+            return_value={"status": "success", "data": []},
+        ) as gfd:
+            await get_top_cloud_applications()
+        assert gfd.call_args.kwargs["view_name"] == "top-cloud-applications"
+        assert gfd.call_args.kwargs["sort_by"] == "sessions"
+        assert gfd.call_args.kwargs["sort_by"] != "bandwidth"
