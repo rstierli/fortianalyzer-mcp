@@ -1069,3 +1069,120 @@ class TestDeviceListAndSourceLink:
         masked = masker.mask_result({"link": link})["link"]
 
         assert ArgUnmasker(FPEEngine(KEY)).resolve_url(masked) == link
+
+
+class TestFortiViewResolvedName:
+    """``srcip_hostname``/``dstip_hostname``: the resolved twin of a masked address.
+
+    FortiView puts the reverse-resolved name for a row's address here, and
+    the address itself when nothing resolves. Untyped, the second case
+    handed the raw address back beside its own token, which gives away the
+    token-to-raw pairing and not just the one value.
+    """
+
+    def test_unresolved_row_no_longer_leaks_the_address(self, masker: OutputMasker):
+        row = {"dstip": PEER_IP, "dstip_hostname": PEER_IP, "sessions": 3}
+        out = masker.mask_result({"data": [row]})["data"][0]
+
+        assert PEER_IP not in str(out)
+
+    def test_the_pair_agrees_so_no_pairing_is_disclosed(self, masker: OutputMasker):
+        # The whole point: one raw value must not appear as a token under
+        # one key and in clear under its sibling in the same row.
+        row = {"srcip": PEER_IP, "srcip_hostname": PEER_IP}
+        out = masker.mask_result({"data": [row]})["data"][0]
+
+        assert out["srcip"] == out["srcip_hostname"]
+
+    def test_resolved_row_masks_the_name_and_reverses(self, masker: OutputMasker):
+        row = {"dstip": PEER_IP, "dstip_hostname": BAD_DOMAIN}
+        out = masker.mask_result({"data": [row]})["data"][0]
+
+        assert BAD_DOMAIN not in str(out)
+        assert FPEEngine(KEY).unmask_hostname(out["dstip_hostname"]) == BAD_DOMAIN
+
+    def test_address_form_stays_reversible(self, masker: OutputMasker):
+        out = masker.mask_result({"dstip_hostname": PEER_IP})["dstip_hostname"]
+
+        assert FPEEngine(KEY).unmask_ip(out) == PEER_IP
+
+    @pytest.mark.parametrize("key", ["srcip_hostname", "dstip_hostname"])
+    def test_both_columns_take_the_resolved_form_reversibly(self, masker: OutputMasker, key: str):
+        # Asserting the resolved form on one column only left the other free
+        # to be typed IP, which burns a hostname irreversibly, or TEXT, which
+        # ships it in clear. Both passed the address-only assertions above.
+        out = masker.mask_result({key: BAD_DOMAIN})[key]
+
+        assert BAD_DOMAIN not in out
+        assert not out.startswith("masked-unrepresentable-")
+        assert FPEEngine(KEY).unmask_hostname(out) == BAD_DOMAIN
+
+
+class TestIncidentWorkflowPrincipals:
+    """``assigned_to``/``remedy_executor``/``remedy_approver``.
+
+    Empty on an estate that does not work incidents, which is how they
+    escaped the leak tests that were built from live records.
+    """
+
+    @pytest.mark.parametrize("key", ["assigned_to", "remedy_executor", "remedy_approver"])
+    def test_workflow_principal_is_masked(self, masker: OutputMasker, key: str):
+        masked = masker.mask_result({"incid": "IN00000001", key: ANALYST})
+
+        assert ANALYST not in str(masked)
+
+    def test_one_analyst_keeps_one_token_across_every_slot(self, masker: OutputMasker):
+        # EMAIL falls back to username masking with no "@", so these agree
+        # with the USERNAME siblings. If they did not, the same person would
+        # read as several different principals in one record.
+        masked = masker.mask_result(
+            {
+                "reporter": ANALYST,
+                "lastuser": ANALYST,
+                "assigned_to": ANALYST,
+                "remedy_executor": ANALYST,
+                "remedy_approver": ANALYST,
+            }
+        )
+
+        assert len(set(masked.values())) == 1
+
+    @pytest.mark.parametrize("key", ["assigned_to", "remedy_executor", "remedy_approver"])
+    def test_at_shaped_login_masks_instead_of_burning(self, masker: OutputMasker, key: str):
+        # The reason these are EMAIL and not USERNAME. Parametrised over all
+        # three, because asserting it on one leaves the other two free to be
+        # retyped back to USERNAME without any test noticing.
+        masked = masker.mask_result({key: SOC_EMAIL})[key]
+
+        assert SOC_EMAIL not in masked
+        assert not masked.startswith("masked-unrepresentable-")
+
+    def test_empty_slot_is_untouched(self, masker: OutputMasker):
+        # The live shape on an estate that does not work incidents.
+        assert masker.mask_result({"assigned_to": ""})["assigned_to"] == ""
+
+
+class TestNestedDeviceName:
+    """``device_info.dev_name``: the appliance, spelled a second way."""
+
+    def test_nested_dev_name_follows_the_flag_too(self, full_masker: OutputMasker):
+        # fortiview policy-hits spells the appliance dev_name inside a
+        # device_info sub-object. Unlisted, it kept the name clear next to a
+        # masked devid on the same row.
+        #
+        # devid holds the SERIAL and dev_name the hostname, as a live row
+        # does. Reusing one string for both would let this pass even if
+        # dev_name were typed TEXT, because pass 2 would substitute it from
+        # the sibling's mapping entry and the field would never be typed at
+        # all -- the original bug, shipping green.
+        masked = full_masker.mask_result(
+            {"devid": DEV_SERIAL, "device_info": {"dev_name": DEV_NAME, "ha_dev": "no"}}
+        )
+
+        assert DEV_NAME not in str(masked)
+        assert DEV_SERIAL not in str(masked)
+
+    def test_nested_dev_name_stays_clear_with_the_flag_off(self, masker: OutputMasker):
+        masked = masker.mask_result({"device_info": {"dev_name": DEV_NAME}})
+
+        assert masked["device_info"]["dev_name"] == DEV_NAME

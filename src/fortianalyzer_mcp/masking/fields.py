@@ -177,6 +177,12 @@ FIELD_TYPES: dict[str, str] = {
     "hostname": HOSTNAME,
     "epname": IP_OR_HOST,
     "dstepname": IP_OR_HOST,
+    # fortiview top-sources/top-destinations: the resolved name for the
+    # sibling srcip/dstip, or that same address again when nothing
+    # resolves. Untyped, it handed back the raw address sitting beside its
+    # own token, which discloses the pairing and not just the value.
+    "srcip_hostname": IP_OR_HOST,
+    "dstip_hostname": IP_OR_HOST,
     "fqdn": HOSTNAME,
     "host": HOSTNAME,
     "dst_host": HOSTNAME,
@@ -230,6 +236,17 @@ FIELD_TYPES: dict[str, str] = {
     "endpoint": IP_OR_HOST,  # incident: an address or an endpoint name
     "reporter": USERNAME,  # incident: who raised it
     "lastuser": USERNAME,  # incident: who last touched it
+    # The incident workflow slots. Same principals as reporter/lastuser,
+    # and empty on an estate that does not work incidents, which is why
+    # they were missed. EMAIL rather than USERNAME because it is a strict
+    # superset here: a value with no "@" falls back to username masking and
+    # produces the IDENTICAL token, so one analyst keeps one token across
+    # all five keys, while an "@"-shaped login still masks instead of
+    # burning. A domain-qualified login (DOMAIN\\user) is outside both
+    # alphabets and still fails closed to a placeholder.
+    "assigned_to": EMAIL,
+    "remedy_executor": EMAIL,
+    "remedy_approver": EMAIL,
     "dstendpoint": IP_OR_HOST,  # inside the incident grpby JSON blob
     "srcendpoint": IP_OR_HOST,
     # --- response echo keys: tool responses reflect caller inputs at the
@@ -291,6 +308,11 @@ DEVICE_IDENTITY_TYPES: dict[str, str] = {
     # the sibling "devname" masked, handing over the token-to-name pairing
     # the flag exists to withhold.
     "devs": HOSTNAME,
+    # fortiview policy-hits nests the reporting appliance a second time,
+    # under device_info.dev_name, spelled with an underscore. Same class as
+    # devname and the same failure devs had: it defeated the flag instead
+    # of following it, keeping the name clear beside a masked devid.
+    "dev_name": HOSTNAME,
 }
 
 #: ``target[].name`` values, mapped to the type of the sibling ``value``.
