@@ -73,9 +73,6 @@ async def run_fortiview(
             - "top-cloud-applications": Top cloud/SaaS apps
             - "policy-hits": Per-policy hit counts (recommended)
             - "policy-line": Time-series policy data
-            - "traffic-summary": Overall traffic summary
-            - "fortiview-traffic": Detailed traffic view
-            - "fortiview-threats": Threat analysis view
         adom: ADOM name (default: from config DEFAULT_ADOM)
         device: Device filter (serial number or name, optional)
         time_range: Time range. Options:

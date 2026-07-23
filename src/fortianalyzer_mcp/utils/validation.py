@@ -156,7 +156,11 @@ VALID_LOG_TYPES = {
     "virtual-patch",
 }
 
-# FortiView view names
+# FortiView view names. Every name here is one FortiAnalyzer actually serves:
+# "traffic-summary", "fortiview-traffic" and "fortiview-threats" used to be
+# listed too, and all three answer "Cannot find FortiView '<name>'" on both
+# 7.6.7 and 8.0.0. Accepting them only moved the failure from a clear local
+# validation error to a server error one call later.
 VALID_FORTIVIEW_VIEWS = {
     "top-sources",
     "top-destinations",
@@ -166,9 +170,6 @@ VALID_FORTIVIEW_VIEWS = {
     "top-cloud-applications",
     "policy-hits",  # Per-policy hit counts (correct endpoint)
     "policy-line",  # Time-series policy data
-    "traffic-summary",
-    "fortiview-traffic",
-    "fortiview-threats",
 }
 
 # Severity levels

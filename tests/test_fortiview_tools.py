@@ -7,6 +7,11 @@ Follows the same pattern as test_system_tools.py to avoid server initialization.
 import pytest
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
+from fortianalyzer_mcp.utils.validation import (
+    VALID_FORTIVIEW_VIEWS,
+    ValidationError,
+    validate_fortiview_view,
+)
 
 
 class TestFortiViewHelpers:
@@ -162,8 +167,8 @@ class TestFortiViewViews:
     """Tests for different FortiView view names."""
 
     def test_valid_view_names(self) -> None:
-        """Test valid FortiView view name patterns."""
-        valid_views = [
+        """Every advertised view name is one the validator accepts."""
+        assert VALID_FORTIVIEW_VIEWS == {
             "top-sources",
             "top-destinations",
             "top-applications",
@@ -171,12 +176,17 @@ class TestFortiViewViews:
             "top-threats",
             "top-cloud-applications",
             "policy-hits",
-            "traffic-summary",
-            "fortiview-traffic",
-            "fortiview-threats",
-        ]
+            "policy-line",
+        }
+        for view in VALID_FORTIVIEW_VIEWS:
+            assert validate_fortiview_view(view) == view
 
-        for view in valid_views:
-            # All valid views should be strings and start with expected prefixes
-            assert isinstance(view, str)
-            assert view.startswith(("top-", "policy-", "traffic-", "fortiview-"))
+    @pytest.mark.parametrize("view", ["traffic-summary", "fortiview-traffic", "fortiview-threats"])
+    def test_views_faz_does_not_serve_are_rejected(self, view: str) -> None:
+        """FortiAnalyzer answers "Cannot find FortiView" for these on 7.6 and 8.0.
+
+        The old list accepted them, so the caller got a server error one round
+        trip later instead of a validation error naming the views that work.
+        """
+        with pytest.raises(ValidationError, match="Invalid FortiView view"):
+            validate_fortiview_view(view)
