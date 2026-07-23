@@ -175,6 +175,9 @@ class TestFortiViewViews:
             "top-websites",
             "top-threats",
             "top-cloud-applications",
+            # network_context skill; both live-verified on 7.6.7 and 8.0.0
+            "top-countries",
+            "site-to-site-ipsec",
             "policy-hits",
             "policy-line",
         }
