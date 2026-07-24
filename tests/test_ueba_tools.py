@@ -34,6 +34,20 @@ class _FakeClient:
         self.calls["get_endusers"] = kwargs
         return self.payload
 
+    async def get_endpoint_stats(self, **kwargs: Any) -> Any:
+        self.calls["get_endpoint_stats"] = kwargs
+        return self.payload
+
+    async def get_enduser_stats(self, **kwargs: Any) -> Any:
+        self.calls["get_enduser_stats"] = kwargs
+        return self.payload
+
+    async def get_system_timezone(self) -> Any:
+        # The stats readers parse a relative window, which touches the TZ.
+        from zoneinfo import ZoneInfo
+
+        return ZoneInfo("UTC")
+
 
 def _patch_client(monkeypatch: pytest.MonkeyPatch, payload: Any) -> _FakeClient:
     fake = _FakeClient(payload)
@@ -120,6 +134,88 @@ class TestGetEndusers:
 
 
 # --------------------------------------------------------------------- #
+# get_endpoint_stats                                                    #
+# --------------------------------------------------------------------- #
+
+
+class TestGetEndpointStats:
+    async def test_success_and_param_forwarding(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = _patch_client(
+            monkeypatch,
+            [{"total-count": "9", "new-count": "4", "identified-count": "0"}],
+        )
+        result = await ueba_tools.get_endpoint_stats(
+            adom="root", time_range="2026-07-17 00:00:00|2026-07-24 00:00:00", filter="category=IOT"
+        )
+        assert result["status"] == "success"
+        assert result["data"][0]["total-count"] == "9"
+        sent = fake.calls["get_endpoint_stats"]
+        assert sent["adom"] == "root"
+        assert sent["filter"] == "category=IOT"
+        assert sent["time_range"] == {
+            "start": "2026-07-17 00:00:00",
+            "end": "2026-07-24 00:00:00",
+        }
+
+    async def test_default_window_is_sent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = _patch_client(monkeypatch, [{"total-count": "0"}])
+        result = await ueba_tools.get_endpoint_stats(adom="root")
+        assert result["status"] == "success"
+        sent = fake.calls["get_endpoint_stats"]
+        assert set(sent["time_range"]) == {"start", "end"}
+        assert sent["filter"] is None
+
+    async def test_client_missing_returns_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(ueba_tools, "get_faz_client", lambda: None)
+        result = await ueba_tools.get_endpoint_stats(
+            time_range="2026-07-17 00:00:00|2026-07-24 00:00:00"
+        )
+        assert result["status"] == "error"
+
+
+# --------------------------------------------------------------------- #
+# get_enduser_stats                                                     #
+# --------------------------------------------------------------------- #
+
+
+class TestGetEnduserStats:
+    async def test_success_and_param_forwarding(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = _patch_client(monkeypatch, {"total-count": "2", "new-count": "0"})
+        result = await ueba_tools.get_enduser_stats(
+            adom="root",
+            time_range="2026-07-17 00:00:00|2026-07-24 00:00:00",
+            stats_item=["total-count"],
+        )
+        assert result["status"] == "success"
+        assert result["data"]["total-count"] == "2"
+        sent = fake.calls["get_enduser_stats"]
+        assert sent["adom"] == "root"
+        assert sent["stats_item"] == ["total-count"]
+        assert sent["time_range"] == {
+            "start": "2026-07-17 00:00:00",
+            "end": "2026-07-24 00:00:00",
+        }
+
+    async def test_rejects_invalid_stats_item(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_client(monkeypatch, {})
+        result = await ueba_tools.get_enduser_stats(
+            time_range="2026-07-17 00:00:00|2026-07-24 00:00:00",
+            stats_item=["total-count", "bogus"],
+        )
+        assert result["status"] == "error"
+        assert "Validation error" in result["message"]
+
+    async def test_default_stats_item_left_to_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = _patch_client(monkeypatch, {"total-count": "0"})
+        result = await ueba_tools.get_enduser_stats(
+            time_range="2026-07-17 00:00:00|2026-07-24 00:00:00"
+        )
+        assert result["status"] == "success"
+        # The reader forwards None; the client fills the FAZ-required default.
+        assert fake.calls["get_enduser_stats"]["stats_item"] is None
+
+
+# --------------------------------------------------------------------- #
 # client methods (endpoint URL + JSON-RPC params)                       #
 # --------------------------------------------------------------------- #
 
@@ -156,3 +252,64 @@ class TestUebaClientMethods:
             await mock_client.get_endpoint_vulnerabilities(adom="root", detectby="FortiGate")
         assert req.await_args.args[1] == "/ueba/adom/root/endpoints/vuln"
         assert req.await_args.kwargs["detectby"] == "FortiGate"
+
+    async def test_get_endpoint_stats_request_shape(self, mock_client: FortiAnalyzerClient) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        tr = {"start": "2026-07-17 00:00:00", "end": "2026-07-24 00:00:00"}
+        with patch.object(
+            mock_client,
+            "_generic_request",
+            AsyncMock(return_value=[{"total-count": "9"}]),
+        ) as req:
+            result = await mock_client.get_endpoint_stats(
+                adom="root", time_range=tr, filter="category=IOT"
+            )
+        assert req.await_args.args[0] == "get"
+        assert req.await_args.args[1] == "/ueba/adom/root/endpoints/stats"
+        kwargs = req.await_args.kwargs
+        assert kwargs["apiver"] == 3
+        assert kwargs["time-range"] == tr
+        assert kwargs["filter"] == "category=IOT"
+        assert result == [{"total-count": "9"}]
+
+    async def test_get_endpoint_stats_wraps_dict_result(
+        self, mock_client: FortiAnalyzerClient
+    ) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        tr = {"start": "2026-07-17 00:00:00", "end": "2026-07-24 00:00:00"}
+        with patch.object(
+            mock_client, "_generic_request", AsyncMock(return_value={"total-count": "9"})
+        ):
+            result = await mock_client.get_endpoint_stats(adom="root", time_range=tr)
+        assert result == [{"total-count": "9"}]
+
+    async def test_get_enduser_stats_request_shape(self, mock_client: FortiAnalyzerClient) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        tr = {"start": "2026-07-17 00:00:00", "end": "2026-07-24 00:00:00"}
+        with patch.object(
+            mock_client,
+            "_generic_request",
+            AsyncMock(return_value={"total-count": "2", "new-count": "0"}),
+        ) as req:
+            await mock_client.get_enduser_stats(adom="root", time_range=tr)
+        assert req.await_args.args[1] == "/ueba/adom/root/endusers/stats"
+        kwargs = req.await_args.kwargs
+        assert kwargs["apiver"] == 3
+        assert kwargs["time-range"] == tr
+        # FAZ requires stats-item alongside time-range; the client defaults it.
+        assert kwargs["stats-item"] == ["total-count", "new-count"]
+
+    async def test_get_enduser_stats_custom_stats_item(
+        self, mock_client: FortiAnalyzerClient
+    ) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        tr = {"start": "2026-07-17 00:00:00", "end": "2026-07-24 00:00:00"}
+        with patch.object(mock_client, "_generic_request", AsyncMock(return_value={})) as req:
+            await mock_client.get_enduser_stats(
+                adom="root", time_range=tr, stats_item=["total-count"]
+            )
+        assert req.await_args.kwargs["stats-item"] == ["total-count"]
