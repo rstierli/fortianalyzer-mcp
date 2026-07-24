@@ -34,11 +34,15 @@ from fortianalyzer_mcp.skills.models import (
     AssetLookupParams,
     AssetLookupResult,
     AssetRecord,
+    DeepInvestigateParams,
+    DeepInvestigation,
+    EntityImpact,
     FeatureGap,
     IdentityLookupParams,
     IdentityLookupResult,
     IdentityProfileParams,
     IdentityProfileResult,
+    Impact,
     IncidentRecord,
     IncidentsParams,
     IncidentsResult,
@@ -56,6 +60,8 @@ from fortianalyzer_mcp.skills.models import (
     RiskAssessmentParams,
     RiskAssessmentResult,
     RiskDimension,
+    RootCause,
+    RootCauseEvent,
     ThreatIntelParams,
     ThreatIntelResult,
     TimelineEntry,
@@ -2082,5 +2088,459 @@ async def run_investigate(params: InvestigateParams) -> Investigation:
         assets=assets,
         identities=identities,
         time_range=params.time_range,
+        warnings=warnings,
+    )
+
+
+# --------------------------------------------------------------------- #
+# investigate_deep (Wave 3)                                             #
+# --------------------------------------------------------------------- #
+
+# Forward lateral searches consume logview slots and per
+# [[feedback_real_world_test_window]] must stay bounded; a window wider
+# than a week is capped here (custom start|end ranges are the caller's
+# explicit intent and pass through). Reuses _WINDOW_RANK above.
+_DEEP_MAX_WINDOW = "7-day"
+
+
+def _cap_window(time_range: str) -> tuple[str, bool]:
+    """Cap a preset window at ``_DEEP_MAX_WINDOW``; report whether it was capped.
+
+    Custom ``start|end`` ranges and unrecognized tokens pass through
+    unchanged (the caller owns them); a preset wider than the floor is
+    narrowed to the floor.
+    """
+    if "|" in time_range:
+        return time_range, False
+    requested = _WINDOW_RANK.get(time_range)
+    if requested is None or requested <= _WINDOW_RANK[_DEEP_MAX_WINDOW]:
+        return time_range, False
+    return _DEEP_MAX_WINDOW, True
+
+
+def _root_cause_chain(triage: TriageResult) -> RootCause | FeatureGap:
+    """Backward chain to the earliest signal, from timestamped records only.
+
+    Deterministic and verbatim-sourced: every event is the incident/alert
+    subject, a related alert, or a triggering-log row the subject already
+    carries. Ordering is by timestamp (via ``_sort_key``); there is no
+    attribution or inferred causality — only the time ordering. Records
+    without a usable timestamp are dropped (they cannot be placed on the
+    chain), never guessed at.
+    """
+    events: list[RootCauseEvent] = []
+
+    subject = triage.subject
+    subj_ts = subject.get("timestamp") or subject.get("createtime") or subject.get("alerttime")
+    if subj_ts is not None:
+        if triage.subject_type == "incident":
+            ref = str(subject.get("incid") or "?")
+            desc = (
+                f"incident {ref}: {subject.get('name') or subject.get('description') or 'created'}"
+            )
+            events.append(
+                RootCauseEvent(
+                    timestamp=subj_ts, source="incident", reference=ref, description=desc
+                )
+            )
+        else:
+            ref = str(subject.get("alertid") or "?")
+            desc = f"alert {ref}: {subject.get('name') or subject.get('description') or 'raised'}"
+            events.append(
+                RootCauseEvent(timestamp=subj_ts, source="alert", reference=ref, description=desc)
+            )
+
+    for rel in triage.related:
+        if not isinstance(rel, dict):
+            continue
+        rel_ts = rel.get("timestamp") or rel.get("alerttime") or rel.get("createtime")
+        if rel_ts is None:
+            continue
+        if rel.get("alertid") is not None:
+            ref = str(rel.get("alertid"))
+            src: Any = "alert"
+            desc = f"alert {ref}: {rel.get('name') or rel.get('description') or 'raised'}"
+        elif rel.get("incid") is not None:
+            ref = str(rel.get("incid"))
+            src = "incident"
+            desc = f"incident {ref}: {rel.get('name') or rel.get('description') or 'created'}"
+        else:
+            continue
+        events.append(RootCauseEvent(timestamp=rel_ts, source=src, reference=ref, description=desc))
+
+    for row in triage.triggering_logs:
+        row_ts = row.get("itime") or row.get("timestamp") or row.get("eventtime")
+        if row_ts is None:
+            continue
+        ref = str(row.get("logid") or row.get("id") or "?")
+        desc = f"log {ref}: {row.get('logdesc') or row.get('msg') or row.get('subtype') or 'event'}"
+        events.append(
+            RootCauseEvent(timestamp=row_ts, source="log", reference=ref, description=desc)
+        )
+
+    if not events:
+        return FeatureGap(
+            reason="subject carries no timestamped alert/incident/log records to order into a chain"
+        )
+
+    ordered = sorted(events, key=lambda e: _sort_key(e.timestamp))
+    return RootCause(chain=ordered, earliest_signal=ordered[0], event_count=len(ordered))
+
+
+def _deep_headline(
+    subject_type: str,
+    subject_id: str,
+    base: Investigation | FeatureGap,
+    root_cause: RootCause | FeatureGap,
+    impact: Impact | FeatureGap,
+) -> str:
+    """Deterministic one-line rollup for the deep investigation.
+
+    Built only from values already present in the composed sections — no
+    inference; gap sections contribute a compact 'no data' note.
+    """
+    parts = [f"{subject_type} {subject_id}"]
+    if isinstance(base, Investigation):
+        parts.append(f"priority {base.triage.assessment.priority}")
+    if isinstance(root_cause, RootCause):
+        first = root_cause.earliest_signal
+        origin = f"{first.source} {first.reference}" if first else "?"
+        parts.append(f"root cause: {root_cause.event_count} events (earliest {origin})")
+    else:
+        parts.append("root cause: none")
+    if isinstance(impact, Impact):
+        touched = sum(v for e in impact.entities for v in e.counts.values())
+        parts.append(
+            f"impact: {impact.entity_count} entities, {touched} lateral rows "
+            f"({impact.lateral_searches_run} searches)"
+        )
+    else:
+        parts.append("impact: none")
+    return "; ".join(parts)
+
+
+async def _entity_impact(
+    adom: str | None,
+    entity_type: str,
+    entity_ref: str,
+    pivot: str | None,
+    logtypes: list[str],
+    time_range: str,
+    lateral_limit: int,
+    budget: int,
+    warnings: list[str],
+    epids: list[int],
+) -> tuple[EntityImpact, int]:
+    """Forward blast-radius for one entity: lateral log searches + assets.
+
+    Runs at most ``budget`` lateral ``log_search`` calls (one per log type,
+    in order); anything beyond the budget is dropped and named in
+    ``warnings`` — no silent truncation. Returns the ``EntityImpact`` and
+    the number of slots consumed. The ``asset_lookup`` is a plain GET (no
+    slot).
+    """
+    from fortianalyzer_mcp.tools.log_tools import query_logs
+
+    lateral: dict[str, list[dict[str, Any]] | FeatureGap] = {}
+    counts: dict[str, int] = {}
+    consumed = 0
+
+    for logtype in logtypes:
+        if pivot is None:
+            lateral[logtype] = FeatureGap(
+                reason=f"{entity_type} {entity_ref} yields no srcip/user pivot; "
+                "lateral search would be a guess"
+            )
+            continue
+        if consumed >= budget:
+            lateral[logtype] = FeatureGap(
+                reason=f"dropped by max_lateral_searches cap (budget {budget} exhausted)"
+            )
+            warnings.append(
+                f"impact[{entity_ref}]: lateral '{logtype}' search dropped by the "
+                f"fan-out cap (budget {budget})"
+            )
+            continue
+        consumed += 1
+        logs_res, err = await _call(
+            query_logs,
+            adom=adom,
+            logtype=logtype,
+            time_range=time_range,
+            filter=pivot,
+            limit=lateral_limit,
+        )
+        if logs_res is None:
+            lateral[logtype] = FeatureGap(reason=f"lateral '{logtype}' search unavailable: {err}")
+            warnings.append(f"impact[{entity_ref}]: {logtype} search unavailable: {err}")
+        else:
+            rows = logs_res.get("logs") or []
+            lateral[logtype] = rows
+            counts[logtype] = len(rows)
+            warnings.extend(
+                f"impact[{entity_ref}] {logtype}: {w}" for w in logs_res.get("warnings") or []
+            )
+
+    assets: AssetLookupResult | FeatureGap
+    if not epids:
+        assets = FeatureGap(
+            reason=f"{entity_type} {entity_ref} carries no endpoint id; asset lookup skipped"
+        )
+    else:
+        try:
+            assets = await run_asset_lookup(AssetLookupParams(adom=adom, epids=epids))
+            warnings.extend(f"impact[{entity_ref}] assets: {w}" for w in assets.warnings)
+            counts["assets"] = assets.endpoint_count
+        except SkillExecutionError as exc:
+            assets = FeatureGap(reason=f"asset lookup unavailable: {exc}")
+            warnings.append(f"impact[{entity_ref}]: asset lookup unavailable: {exc}")
+
+    return (
+        EntityImpact(
+            entity_type=entity_type,  # type: ignore[arg-type]
+            entity_ref=entity_ref,
+            pivot=pivot,
+            lateral_activity=lateral,
+            assets=assets,
+            counts=counts,
+        ),
+        consumed,
+    )
+
+
+async def _resolve_impact_entities(
+    adom: str | None,
+    epids: list[int],
+    euids: list[int],
+    ip: str | None,
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    """Resolve traced entities to their (type, ref, pivot, epids) tuples.
+
+    An endpoint's pivot is ``srcip==<epip>``; an end-user's is
+    ``user==<euname>``; a bare IP pivots on itself. A UEBA record that
+    carries no epip/euname yields no pivot (its lateral search degrades to
+    a gap, never a guess). The UEBA reads are plain GETs.
+    """
+    from fortianalyzer_mcp.tools.ueba_tools import get_endpoints, get_endusers
+    from fortianalyzer_mcp.utils.validation import sanitize_filter_value
+
+    resolved: list[dict[str, Any]] = []
+
+    for epid in epids:
+        eps_res, err = await _call(get_endpoints, adom=adom, epids=[epid], detail_level="simple")
+        record = None
+        if eps_res is None:
+            warnings.append(f"impact: endpoint {epid} lookup unavailable: {err}")
+        else:
+            record = next(
+                (ep for ep in _records(eps_res.get("data")) if str(ep.get("epid")) == str(epid)),
+                None,
+            )
+        pivot = None
+        epip = record.get("epip") if record else None
+        if epip:
+            pivot = f"srcip=={sanitize_filter_value(str(epip), 'epip')}"
+        resolved.append({"type": "endpoint", "ref": str(epid), "pivot": pivot, "epids": [epid]})
+
+    for euid in euids:
+        users_res, err = await _call(get_endusers, adom=adom, euids=[euid])
+        record = None
+        if users_res is None:
+            warnings.append(f"impact: end-user {euid} lookup unavailable: {err}")
+        else:
+            record = next(
+                (u for u in _records(users_res.get("data")) if str(u.get("euid")) == str(euid)),
+                None,
+            )
+        pivot = None
+        user_epids: list[int] = []
+        if record is not None:
+            euname = record.get("euname")
+            if euname:
+                pivot = f"user=={sanitize_filter_value(str(euname), 'euname')}"
+            for key in _ENDUSER_EPID_KEYS:
+                value = record.get(key)
+                for candidate in value if isinstance(value, list) else [value]:
+                    if isinstance(candidate, bool):
+                        continue
+                    if isinstance(candidate, int):
+                        user_epids.append(candidate)
+                    elif isinstance(candidate, str) and candidate.isdigit():
+                        user_epids.append(int(candidate))
+                if user_epids:
+                    break
+        resolved.append({"type": "enduser", "ref": str(euid), "pivot": pivot, "epids": user_epids})
+
+    if ip is not None:
+        pivot = f"srcip=={sanitize_filter_value(ip, 'ip')}"
+        resolved.append({"type": "ip", "ref": ip, "pivot": pivot, "epids": []})
+
+    return resolved
+
+
+def _parse_entity_subject(entity: str) -> tuple[list[int], list[int], str | None, str | None]:
+    """Parse a bare ``entity`` subject into (epids, euids, ip, error).
+
+    Accepts ``epid:N`` / ``euid:N`` (digit id) or a bare IPv4/IPv6 address.
+    Returns an error string (and empty selectors) for anything else, so the
+    caller can fail cleanly rather than guess.
+    """
+    text = entity.strip()
+    lowered = text.lower()
+    if lowered.startswith("epid:"):
+        rest = text[5:].strip()
+        if rest.isdigit():
+            return [int(rest)], [], None, None
+        return [], [], None, f"entity 'epid:' expects a numeric id, got {rest!r}"
+    if lowered.startswith("euid:"):
+        rest = text[5:].strip()
+        if rest.isdigit():
+            return [], [int(rest)], None, None
+        return [], [], None, f"entity 'euid:' expects a numeric id, got {rest!r}"
+    # Bare IP: a dotted/coloned token with no letters other than hex.
+    if any(sep in text for sep in (".", ":")) and " " not in text:
+        return [], [], text, None
+    return (
+        [],
+        [],
+        None,
+        (f"unrecognized entity {text!r}; use 'epid:N', 'euid:N' or a bare IP address"),
+    )
+
+
+async def run_investigate_deep(params: DeepInvestigateParams) -> DeepInvestigation:
+    """Deep, reactive investigation: backward to the earliest signal and
+    forward to the blast radius.
+
+    Composition over existing skills — it adds no new client methods:
+
+    - **Reactive subject (alert_id/incident_id):** runs ``run_investigate``
+      as the base bundle (triage + summary + threat_intel + asset/identity;
+      its only hard fail). ``root_cause`` orders the base triage's
+      subject/related-alerts/triggering-logs by timestamp to the earliest
+      signal — deterministic, no attribution. ``impact`` fans out from the
+      entity ids the subject carries.
+    - **Forward-only subject (entity = epid:N / euid:N / IP):** there is no
+      incident to trace, so ``base`` and ``root_cause`` are gaps; only the
+      forward ``impact`` pass runs on that single entity.
+
+    Slot cost: the forward pass runs **one logview search slot per traced
+    entity × swept log type**, hard-capped by ``max_lateral_searches``
+    (default 8); excess pairs are dropped and named in ``warnings``. Every
+    window is capped to ``_DEEP_MAX_WINDOW`` (7-day) unless a custom
+    ``start|end`` range is given. The base ``investigate`` composition and
+    the UEBA/asset reads consume no search slots.
+    """
+    warnings: list[str] = []
+    time_range, capped = _cap_window(params.time_range)
+    if capped:
+        warnings.append(
+            f"time_range {params.time_range!r} capped to {time_range!r} for the "
+            "slot-consuming forward searches"
+        )
+
+    if params.entity:
+        subject_type = "entity"
+        subject_id = params.entity
+    elif params.alert_id:
+        subject_type = "alert"
+        subject_id = params.alert_id
+    else:
+        subject_type = "incident"
+        subject_id = str(params.incident_id)
+
+    # --- Base investigate (reactive subjects only) ---------------------- #
+    base: Investigation | FeatureGap
+    root_cause: RootCause | FeatureGap
+    impact_epids: list[int] = []
+    impact_euids: list[int] = []
+    impact_ip: str | None = None
+
+    if subject_type == "entity":
+        base = FeatureGap(
+            reason="forward-only entity subject: no incident/alert to run the base investigation on"
+        )
+        root_cause = FeatureGap(
+            reason="forward-only entity subject: no incident timeline to trace backward"
+        )
+        epids, euids, ip, parse_err = _parse_entity_subject(params.entity or "")
+        if parse_err is not None:
+            raise SkillExecutionError(parse_err)
+        impact_epids, impact_euids, impact_ip = epids, euids, ip
+    else:
+        base = await run_investigate(
+            InvestigateParams(
+                adom=params.adom,
+                alert_id=params.alert_id,
+                incident_id=params.incident_id,
+                time_range=time_range,
+                detail_level=params.detail_level,
+                include_threat_landscape=params.include_threat_landscape,
+                include_entities=True,
+            )
+        )
+        warnings.extend(f"base: {w}" for w in base.warnings)
+        root_cause = _root_cause_chain(base.triage)
+        # Forward pass reuses the entity ids the base triage already resolved.
+        carriers = [base.triage.subject]
+        if base.triage.subject_details is not None:
+            carriers.append(base.triage.subject_details)
+        impact_epids = _subject_entity_ids(carriers, _SUBJECT_EPID_KEYS)
+        impact_euids = _subject_entity_ids(carriers, _SUBJECT_EUID_KEYS)
+
+    # --- Forward impact pass -------------------------------------------- #
+    impact: Impact | FeatureGap
+    if not params.include_impact:
+        impact = FeatureGap(reason="disabled by include_impact=false")
+    elif not (impact_epids or impact_euids or impact_ip):
+        impact = FeatureGap(
+            reason=f"{subject_type} {subject_id} carries no traceable entity "
+            "(epid/euid/ip); forward blast-radius would be a guess"
+        )
+    else:
+        entities = await _resolve_impact_entities(
+            params.adom, impact_epids, impact_euids, impact_ip, warnings
+        )
+        budget = params.max_lateral_searches
+        impacts: list[EntityImpact] = []
+        run_total = 0
+        for ent in entities:
+            entity_impact, consumed = await _entity_impact(
+                adom=params.adom,
+                entity_type=ent["type"],
+                entity_ref=ent["ref"],
+                pivot=ent["pivot"],
+                logtypes=params.impact_logtypes,
+                time_range=time_range,
+                lateral_limit=params.lateral_limit,
+                budget=budget - run_total,
+                warnings=warnings,
+                epids=ent["epids"],
+            )
+            impacts.append(entity_impact)
+            run_total += consumed
+        # A logtype dropped for lack of budget shows up as a gap whose reason
+        # names the cap; count those explicitly (never silently truncated).
+        dropped = sum(
+            1
+            for e in impacts
+            for section in e.lateral_activity.values()
+            if isinstance(section, FeatureGap) and "max_lateral_searches" in section.reason
+        )
+        impact = Impact(
+            entities=impacts,
+            entity_count=len(impacts),
+            lateral_searches_run=run_total,
+            lateral_searches_dropped=dropped,
+        )
+
+    return DeepInvestigation(
+        subject_type=subject_type,  # type: ignore[arg-type]
+        headline=_deep_headline(subject_type, subject_id, base, root_cause, impact),
+        base=base,
+        root_cause=root_cause,
+        impact=impact,
+        time_range=time_range,
         warnings=warnings,
     )
