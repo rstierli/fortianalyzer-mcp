@@ -910,3 +910,194 @@ class Investigation(BaseModel):
     )
     time_range: str
     warnings: list[str] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------- #
+# investigate_deep (Analysis)                                           #
+# --------------------------------------------------------------------- #
+
+
+class DeepInvestigateParams(BaseModel):
+    """Parameters for the ``investigate_deep`` skill.
+
+    Exactly one subject is required: a reactive ``incident_id`` XOR
+    ``alert_id`` (which runs the full backward+forward pass), or a bare
+    ``entity`` (an ``epid:N`` / ``euid:N`` / an IP) for the forward-only
+    blast-radius case (no incident to trace backward from).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    adom: str | None = None
+    alert_id: str | None = None
+    incident_id: str | None = None
+    entity: str | None = Field(
+        default=None,
+        description="Forward-only subject when there is no incident: an "
+        "endpoint id ('epid:6676'), an end-user id ('euid:42'), or a bare "
+        "IPv4/IPv6 address. Mutually exclusive with alert_id/incident_id.",
+    )
+    time_range: str = Field(
+        default="7-day",
+        description="Window for the base investigation, the root-cause ordering "
+        "and every forward lateral search. Windows wider than 7 days are "
+        "capped to 7-day (the forward searches consume slots); the cap is "
+        "reported in warnings.",
+    )
+    detail_level: Literal["standard", "extended"] = Field(
+        default="standard",
+        description="Indicator-enrichment detail, passed through to the base "
+        "investigate composition (reactive subjects only)",
+    )
+    include_threat_landscape: bool = Field(
+        default=True,
+        description="Include the FortiView top-threats context in the base investigate",
+    )
+    impact_logtypes: list[str] = Field(
+        default_factory=lambda: ["traffic", "dns", "app-ctrl", "dlp"],
+        description="Log types swept per entity in the forward (impact) pass. "
+        "Each (entity, logtype) pair is one logview search slot; the total "
+        "fan-out is capped by max_lateral_searches.",
+    )
+    max_lateral_searches: int = Field(
+        default=8,
+        ge=1,
+        le=20,
+        description="Hard cap on forward lateral log_search calls (slots). When "
+        "the entity×logtype matrix exceeds it, the excess is dropped and named "
+        "in warnings — never silently truncated.",
+    )
+    lateral_limit: int = Field(
+        default=100, ge=1, le=1000, description="Max rows per forward lateral search"
+    )
+    include_impact: bool = Field(
+        default=True, description="Run the forward (blast-radius) pass at all"
+    )
+
+    @model_validator(mode="after")
+    def _exactly_one_subject(self) -> "DeepInvestigateParams":
+        subjects = [self.alert_id, self.incident_id, self.entity]
+        provided = [s for s in subjects if s]
+        if len(provided) != 1:
+            raise ValueError('provide exactly one of "alert_id", "incident_id" or "entity"')
+        return self
+
+
+class RootCauseEvent(BaseModel):
+    """One dated event on the backward root-cause chain, verbatim-sourced.
+
+    Deterministic: every event is an observation lifted from an alert or a
+    triggering-log row the subject already carries — its timestamp and a
+    reference to the source record. No attribution, no inferred causality;
+    the chain is only the time ordering to the earliest signal.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    timestamp: int | str
+    source: Literal["incident", "alert", "log"]
+    reference: str = Field(description="The source record's id (incid/alertid/logid), verbatim")
+    description: str = Field(description="Derived one-liner from fields present on the record")
+
+
+class RootCause(BaseModel):
+    """The backward (root-cause) section: a time-ordered chain to the
+    earliest observed signal. Degrades to a ``FeatureGap`` when the subject
+    carries no timestamped events to order."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    chain: list[RootCauseEvent] = Field(
+        description="Events ordered oldest-first; chain[0] is the earliest signal"
+    )
+    earliest_signal: RootCauseEvent | None = Field(
+        default=None, description="Convenience copy of chain[0] (None when the chain is empty)"
+    )
+    event_count: int
+
+
+class EntityImpact(BaseModel):
+    """The forward blast-radius for one traced entity.
+
+    ``lateral_activity`` maps each swept log type to its verbatim rows (or a
+    ``FeatureGap`` when that search failed or was dropped by the fan-out
+    cap). ``pivot`` names the exact filter clause the searches ran on, so
+    the fan-out is auditable and never a guess.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    entity_type: Literal["endpoint", "enduser", "ip"]
+    entity_ref: str = Field(description="epid/euid/ip that identifies this entity, verbatim")
+    pivot: str | None = Field(
+        default=None, description="The srcip/user filter clause the lateral searches ran on"
+    )
+    lateral_activity: dict[str, list[dict[str, Any]] | FeatureGap] = Field(
+        default_factory=dict,
+        description="Per-logtype verbatim rows the entity touched — or a gap marker per type",
+    )
+    assets: AssetLookupResult | FeatureGap = Field(
+        description="UEBA asset profile for the entity's endpoint(s) — or the gap marker"
+    )
+    counts: dict[str, int] = Field(
+        default_factory=dict, description="Row count per available lateral section"
+    )
+
+
+class Impact(BaseModel):
+    """The forward (impact) section: what the subject's entities touched.
+
+    Degrades to a ``FeatureGap`` when the subject carries no traceable
+    entity (no epid/euid/ip); otherwise one ``EntityImpact`` per entity,
+    each of whose sub-sections degrades independently.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    entities: list[EntityImpact]
+    entity_count: int
+    lateral_searches_run: int = Field(description="Forward log_search slots actually consumed")
+    lateral_searches_dropped: int = Field(
+        description="Entity×logtype pairs skipped by the max_lateral_searches cap"
+    )
+
+
+class DeepInvestigation(BaseModel):
+    """Output of the ``investigate_deep`` skill.
+
+    A reactive deep dive: the Wave-2 ``investigate`` result as the base
+    bundle, plus a backward ``root_cause`` chain (time-ordered to the
+    earliest signal, deterministic — no attribution) and a forward
+    ``impact`` blast-radius (lateral log activity + affected assets per
+    traced entity). Every section degrades independently to a
+    ``FeatureGap``; the top-level ``warnings`` aggregate the nested ones
+    with a section prefix.
+
+    For a bare ``entity`` subject there is no incident to trace, so
+    ``base`` and ``root_cause`` are gaps and only the forward ``impact``
+    pass runs.
+
+    Slot cost: the forward pass runs up to ``max_lateral_searches`` logview
+    searches (one per traced entity × swept log type, capped); the base
+    ``investigate`` composition consumes none. See the handler docstring.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    subject_type: Literal["alert", "incident", "entity"]
+    headline: str = Field(
+        description="Deterministic one-line rollup (base priority when reactive, "
+        "plus root-cause and impact counts) — derived, no inference"
+    )
+    base: Investigation | FeatureGap = Field(
+        description="The Wave-2 investigate bundle for a reactive subject — or the "
+        "gap marker for a forward-only entity subject"
+    )
+    root_cause: RootCause | FeatureGap = Field(
+        description="Backward chain to the earliest signal — or the gap marker"
+    )
+    impact: Impact | FeatureGap = Field(
+        description="Forward blast-radius across the subject's entities — or the gap marker"
+    )
+    time_range: str
+    warnings: list[str] = Field(default_factory=list)
