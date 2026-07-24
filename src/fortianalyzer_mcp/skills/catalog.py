@@ -19,6 +19,8 @@ from fortianalyzer_mcp.skills.models import (
     AppUsageResult,
     AssetLookupParams,
     AssetLookupResult,
+    HuntParams,
+    HuntResult,
     IdentityLookupParams,
     IdentityLookupResult,
     IdentityProfileParams,
@@ -198,6 +200,22 @@ SKILLS: dict[str, SkillSpec] = {
             params_model=InvestigateParams,
             output_model=Investigation,
             handler=handlers.run_investigate,
+        ),
+        SkillSpec(
+            id="hunt",
+            tier="analysis",
+            description="Proactive hunt: sweep the estate for an indicator "
+            "(IP/URL/domain/hash), TTP or raw filter — verbatim matched log "
+            "rows across log types plus SOAR reputation — and/or profile one "
+            "entity (epid:/euid:) for abnormal behaviour. The behaviour half is "
+            "percentile-calibrated: an endpoint's FAZ risk_score ranked within "
+            "the estate's risk distribution, its per-severity vuln-stats, and "
+            "its behavioural/IOC alert detections (importance for end-users). "
+            "The sweep consumes one logview search slot per log type, "
+            "hard-capped and windowed. Requires UEBA for the behaviour half.",
+            params_model=HuntParams,
+            output_model=HuntResult,
+            handler=handlers.run_hunt,
         ),
     )
 }
