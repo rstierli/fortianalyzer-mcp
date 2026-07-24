@@ -910,3 +910,287 @@ class Investigation(BaseModel):
     )
     time_range: str
     warnings: list[str] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------- #
+# hunt (Analysis)                                                       #
+# --------------------------------------------------------------------- #
+
+
+class IndicatorSubject(BaseModel):
+    """One indicator to hunt for across the estate (an IOC)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    value: str = Field(description="The indicator value (IP, URL, domain, or file hash)")
+    type: Literal["IP", "URL", "Domain", "Hash"] = Field(
+        description="Indicator class; only IP/URL/Domain get SOAR reputation enrichment"
+    )
+
+
+class HuntParams(BaseModel):
+    """Parameters for the ``hunt`` skill. Exactly one subject is required.
+
+    Three mutually exclusive subject shapes, matching how an analyst opens
+    a hunt:
+
+    - ``indicator`` — an IOC (IP/URL/domain/hash) to sweep the estate for.
+    - ``entity`` — an ``epid:N`` / ``euid:N`` to profile for abnormal
+      behaviour (the behaviour half).
+    - ``filter`` and/or ``ttp`` — a free-form hypothesis to sweep on (a raw
+      FAZ filter expression and/or a TTP hint folded into the sweep filter).
+
+    The two halves are driven by which subject is given: an ``indicator``
+    or ``filter``/``ttp`` runs the hunt (sweep) half; an ``entity`` runs
+    the behaviour half. (An ``entity`` also runs a light entity-scoped
+    sweep so "look at this host" still surfaces where it appears.)
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    adom: str | None = None
+    indicator: IndicatorSubject | None = Field(
+        default=None, description="An IOC to sweep the estate for (hunt half)"
+    )
+    entity: str | None = Field(
+        default=None,
+        description="An entity to profile for abnormal behaviour: an endpoint "
+        "id ('epid:6676') or an end-user id ('euid:42'). Mutually exclusive "
+        "with indicator/filter/ttp.",
+    )
+    filter: str | None = Field(
+        default=None,
+        description="A raw FAZ filter expression to sweep on (hypothesis hunt). "
+        "Passed to the log sweep verbatim — the caller owns its correctness.",
+    )
+    ttp: str | None = Field(
+        default=None,
+        description="A TTP / technique hint. Combined with 'filter' into the "
+        "sweep filter as an 'attack' substring match when no filter is given; "
+        "recorded in the result either way. Not a MITRE lookup.",
+    )
+    time_range: str = Field(
+        default="7-day",
+        description="Window for the sweep, the behavioural detections and the "
+        "threat-landscape context. Windows wider than 7 days are capped to "
+        "7-day (the sweep consumes logview search slots); the cap is reported "
+        "in warnings.",
+    )
+    sweep_logtypes: list[str] = Field(
+        default_factory=lambda: ["traffic", "attack", "app-ctrl", "dns"],
+        description="Log types swept for the indicator/TTP/filter. Each is one "
+        "logview search slot; the total is capped by max_sweep_searches. "
+        "('attack' is FAZ's IPS log type; 'ips' is not a valid FAZ logtype.)",
+    )
+    max_sweep_searches: int = Field(
+        default=6,
+        ge=1,
+        le=20,
+        description="Hard cap on sweep log_search calls (slots). Log types "
+        "beyond the cap are dropped and named in warnings — never silently "
+        "truncated.",
+    )
+    sweep_limit: int = Field(
+        default=100, ge=1, le=1000, description="Max rows per sweep log search"
+    )
+    detail_level: Literal["standard", "extended"] = Field(
+        default="standard",
+        description="Indicator-enrichment detail passed through to threat_intel",
+    )
+    anomaly_percentile: float = Field(
+        default=90.0,
+        ge=0.0,
+        le=100.0,
+        description="Risk-percentile threshold for flagging an endpoint entity "
+        "anomalous. risk_score runs low in practice (0.06–0.25 on the worst "
+        "hosts), so the anomaly signal is the entity's rank WITHIN the estate's "
+        "current risk distribution, not a fixed score. An endpoint at or above "
+        "this percentile (and any endpoint carrying critical/high vuln-stats or "
+        "a behavioural detection) is flagged.",
+    )
+    include_threat_landscape: bool = Field(
+        default=True, description="Include the FortiView top-threats context section"
+    )
+    include_estate_stats: bool = Field(
+        default=True,
+        description="Attach the ADOM-wide UEBA count denominators (new/total "
+        "endpoints or end-users this window) for context, when the reader is "
+        "available. Estate-scale denominators only — never a per-entity "
+        "baseline; degrades to a gap when unavailable.",
+    )
+
+    @model_validator(mode="after")
+    def _exactly_one_subject(self) -> "HuntParams":
+        # indicator, entity and (filter|ttp) are the three subject shapes;
+        # exactly one shape must be provided. filter and ttp together count
+        # as a single (hypothesis) shape.
+        shapes = [
+            self.indicator is not None,
+            self.entity is not None,
+            (self.filter is not None or self.ttp is not None),
+        ]
+        if sum(shapes) != 1:
+            raise ValueError(
+                'provide exactly one subject: "indicator", "entity", or "filter"/"ttp"'
+            )
+        return self
+
+
+class SweepMatch(BaseModel):
+    """The sweep result for one log type: verbatim matched rows, or a gap.
+
+    ``rows`` are verbatim FAZ log rows the sweep filter matched. Degrades to
+    a ``FeatureGap`` when that search failed or was dropped by the fan-out
+    cap — never silently omitted.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    logtype: str
+    rows: list[dict[str, Any]] | FeatureGap = Field(
+        description="Verbatim matched rows — or the gap marker for this log type"
+    )
+    row_count: int = Field(default=0, description="Row count (0 for a gap section)")
+
+
+class HuntSweep(BaseModel):
+    """The hunt (sweep) half: where the indicator/TTP/filter appears.
+
+    ``pivot_filter`` is the exact filter clause every sweep search ran on,
+    so the hunt is auditable and never a guess. ``matches`` is one
+    ``SweepMatch`` per swept log type. ``threat_intel`` enriches an
+    IP/URL/Domain indicator with stored SOAR reputation (a gap for a hash,
+    a bare filter, or when SOAR is unavailable).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    pivot_filter: str | None = Field(
+        description="The filter clause the sweep searches ran on (None when no "
+        "usable sweep pivot could be derived)"
+    )
+    ttp: str | None = Field(default=None, description="The TTP hint, recorded verbatim")
+    matches: list[SweepMatch] = Field(default_factory=list)
+    threat_intel: ThreatIntelResult | FeatureGap = Field(
+        description="Stored SOAR reputation for an IP/URL/Domain indicator, plus "
+        "the threat-landscape context — or the gap marker"
+    )
+    total_matches: int = Field(description="Sum of row counts across every available match")
+    sweep_searches_run: int = Field(description="Sweep log_search slots actually consumed")
+    sweep_searches_dropped: int = Field(
+        description="Log types skipped by the max_sweep_searches cap"
+    )
+
+
+class EntityBehavior(BaseModel):
+    """The behaviour half for one entity — FAZ-provided signals only.
+
+    The anomaly call is **relative/percentile-based**, never a fixed
+    threshold: FAZ's ``risk_score`` runs low in practice (0.06–0.25 even on
+    the worst hosts), so an endpoint's real signal is where its risk_score
+    ranks *within the estate's current risk distribution* — carried here as
+    ``risk_percentile`` (0–100, the share of estate endpoints it scores at
+    or above) — plus its per-severity ``vuln_stats`` and its behavioural
+    alert-handler / IOC detections in the window.
+
+    End-users carry no ``risk_score`` (only ``importance``), so their
+    ``risk_score``/``risk_percentile`` are ``None`` and the anomaly call
+    leans on ``importance`` + behavioural detections.
+
+    ``anomalous`` is the derived verdict; ``anomaly_basis`` lists every
+    observation that fed it, so the call is fully auditable.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    entity_type: Literal["endpoint", "enduser"]
+    entity_ref: str = Field(description="epid/euid that identifies this entity, verbatim")
+    record: dict[str, Any] = Field(description="The FAZ UEBA record, verbatim")
+    risk_score: float | None = Field(
+        default=None, description="FAZ-computed endpoint risk_score, verbatim (None for end-users)"
+    )
+    risk_percentile: float | None = Field(
+        default=None,
+        description="The entity's risk_score rank within the estate distribution "
+        "(0–100; the % of endpoints scoring at or below it). None for end-users "
+        "or when the estate is too small to rank.",
+    )
+    importance: str | int | None = Field(
+        default=None, description="FAZ 'importance' for the entity, verbatim"
+    )
+    vuln_stats: dict[str, int] = Field(
+        default_factory=dict,
+        description="Per-severity vulnerability counts from the entity's UEBA "
+        "'vuln-stats' (cnt_cri/hig/med/low/inf), derived",
+    )
+    behavioral_detections: list[dict[str, Any]] | FeatureGap = Field(
+        description="The entity's behavioural alert-handler / IOC alerts in the "
+        "window, verbatim (FAZ's own anomaly detections) — or the gap marker"
+    )
+    detection_count: int = Field(default=0, description="Behavioural detections (0 for a gap)")
+    anomalous: bool = Field(description="Derived anomaly verdict (percentile + vuln + detections)")
+    anomaly_basis: list[str] = Field(
+        description="Every observation the anomaly verdict was derived from"
+    )
+
+
+class EstateContext(BaseModel):
+    """Estate-scale denominators for the window — context, not a baseline.
+
+    ADOM-wide UEBA count snapshots (total/new endpoints or end-users). Used
+    only to normalise the behaviour half ("this host is 1 of N"); never a
+    per-entity baseline. A ``FeatureGap`` when the reader is unavailable.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    endpoints: dict[str, Any] | FeatureGap = Field(
+        description="ADOM-wide endpoint count snapshot, verbatim — or the gap marker"
+    )
+    endusers: dict[str, Any] | FeatureGap = Field(
+        description="ADOM-wide end-user count snapshot, verbatim — or the gap marker"
+    )
+    ranked_endpoint_total: int = Field(
+        default=0,
+        description="Endpoints carrying a numeric risk_score used to build the "
+        "percentile distribution (the real denominator behind risk_percentile)",
+    )
+
+
+class HuntResult(BaseModel):
+    """Output of the ``hunt`` skill.
+
+    A proactive sweep: the ``sweep`` half (where an indicator/TTP/filter
+    appears across the estate, verbatim matched rows + SOAR reputation) and
+    the ``behavior`` half (one entity's FAZ-provided behavioural signals,
+    anomaly-scored by percentile). Which halves run depends on the subject;
+    an unused half is a ``FeatureGap``. Every section degrades independently;
+    the top-level ``warnings`` aggregate the nested ones with a prefix.
+
+    Slot cost: the sweep runs up to ``max_sweep_searches`` logview searches
+    (one per swept log type, capped); the behaviour half's UEBA/alert reads
+    are plain GETs. Windows are capped to 7-day for the slot-consuming
+    sweep. See the handler docstring.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    subject_type: Literal["indicator", "entity", "hypothesis"]
+    headline: str = Field(
+        description="Deterministic one-line rollup (subject + match/anomaly "
+        "counts) — derived, no inference"
+    )
+    sweep: HuntSweep | FeatureGap = Field(
+        description="The hunt half: estate sweep for the indicator/TTP/filter — "
+        "or the gap marker for a pure entity subject with no sweep pivot"
+    )
+    behavior: EntityBehavior | FeatureGap = Field(
+        description="The behaviour half: one entity's percentile-calibrated "
+        "anomaly profile — or the gap marker for a non-entity subject"
+    )
+    estate: EstateContext | FeatureGap = Field(
+        description="Estate-scale denominators for the window (context) — or the "
+        "gap marker when disabled/unavailable"
+    )
+    time_range: str
+    warnings: list[str] = Field(default_factory=list)

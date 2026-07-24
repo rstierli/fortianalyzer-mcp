@@ -34,7 +34,12 @@ from fortianalyzer_mcp.skills.models import (
     AssetLookupParams,
     AssetLookupResult,
     AssetRecord,
+    EntityBehavior,
+    EstateContext,
     FeatureGap,
+    HuntParams,
+    HuntResult,
+    HuntSweep,
     IdentityLookupParams,
     IdentityLookupResult,
     IdentityProfileParams,
@@ -45,6 +50,7 @@ from fortianalyzer_mcp.skills.models import (
     IncidentSummary,
     IncidentSummaryParams,
     IndicatorEnrichmentRecord,
+    IndicatorSpec,
     InvestigateParams,
     Investigation,
     LogSearchParams,
@@ -56,6 +62,7 @@ from fortianalyzer_mcp.skills.models import (
     RiskAssessmentParams,
     RiskAssessmentResult,
     RiskDimension,
+    SweepMatch,
     ThreatIntelParams,
     ThreatIntelResult,
     TimelineEntry,
@@ -2082,5 +2089,745 @@ async def run_investigate(params: InvestigateParams) -> Investigation:
         assets=assets,
         identities=identities,
         time_range=params.time_range,
+        warnings=warnings,
+    )
+
+
+# --------------------------------------------------------------------- #
+# hunt (Wave 3)                                                         #
+# --------------------------------------------------------------------- #
+
+# The sweep's log searches consume logview slots and per
+# [[feedback_real_world_test_window]] must stay bounded; a preset window
+# wider than a week is capped here. Custom start|end ranges are the
+# caller's explicit intent and pass through. Reuses _WINDOW_RANK above.
+_HUNT_MAX_WINDOW = "7-day"
+
+# UEBA endpoint 'vuln-stats' keys mapped to the readable severity labels the
+# result exposes. The appliance keys them cnt_<sev>; anything else is kept
+# verbatim under its own key so an unrecognised counter is never dropped.
+_VULN_STAT_LABELS = {
+    "cnt_cri": "critical",
+    "cnt_hig": "high",
+    "cnt_med": "medium",
+    "cnt_low": "low",
+    "cnt_inf": "info",
+}
+# vuln-stats severities that count as "serious" for the anomaly call.
+_SERIOUS_VULN_LABELS = ("critical", "high")
+
+# Behavioural alert-handler / IOC detection markers. FAZ's own anomaly
+# detections surface as alerts whose handler names carry these substrings
+# (e.g. Default-Botnet-Communication-Detection-By-Endpoint,
+# Compromised-Host-Detection-IOC-By-Threat). Matched case-insensitively
+# against the alert's handler/name fields — this is the single place to
+# widen the vocabulary once more handlers are live-verified.
+_BEHAVIORAL_MARKERS = (
+    "botnet",
+    "compromised",
+    "ioc",
+    "beacon",
+    "c2",
+    "command-and-control",
+    "anomaly",
+    "lateral",
+    "exfil",
+)
+# Alert fields that may name the handler / detection rule (build-varying).
+_ALERT_HANDLER_KEYS = ("alerttype", "eventtype", "triggername", "name", "logdesc")
+
+
+def _cap_hunt_window(time_range: str) -> tuple[str, bool]:
+    """Cap a preset window at ``_HUNT_MAX_WINDOW``; report whether it was capped.
+
+    Custom ``start|end`` ranges and unrecognized tokens pass through
+    unchanged (the caller owns them); a preset wider than the floor is
+    narrowed to the floor. Mirrors ``investigate_deep``'s ``_cap_window``.
+    """
+    if "|" in time_range:
+        return time_range, False
+    requested = _WINDOW_RANK.get(time_range)
+    if requested is None or requested <= _WINDOW_RANK[_HUNT_MAX_WINDOW]:
+        return time_range, False
+    return _HUNT_MAX_WINDOW, True
+
+
+def _vuln_stats_counts(record: dict[str, Any]) -> dict[str, int]:
+    """Per-severity vulnerability counts from a UEBA record's ``vuln-stats``.
+
+    Reads the endpoint's own FAZ-computed counters (not a CVE re-count).
+    Tolerates the counters living directly on the record or nested under a
+    ``vuln-stats`` dict. Non-integer / zero counters are dropped; unknown
+    counter keys are kept under their raw key so nothing is silently lost.
+    """
+    source = record.get("vuln-stats")
+    if not isinstance(source, dict):
+        source = record
+    counts: dict[str, int] = {}
+    for key, value in source.items():
+        # Live FAZ returns the counters as ints at detail_level='basic' but as
+        # digit strings at 'standard' (live-verified 7.6.7 + 8.0.0), so coerce.
+        count = _as_int(value)
+        if count is None or count <= 0:
+            continue
+        if key in _VULN_STAT_LABELS:
+            counts[_VULN_STAT_LABELS[key]] = count
+        elif str(key).startswith("cnt_"):
+            counts[str(key)] = count
+    return counts
+
+
+def _as_int(value: Any) -> int | None:
+    """Coerce an int or a digit string to int; anything else -> None.
+
+    UEBA vuln-stats counters arrive as ints or digit strings depending on
+    the detail level; ``scan_time`` and other non-numeric values are dropped.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        return int(value.strip())
+    return None
+
+
+def _as_float(value: Any) -> float | None:
+    """Coerce a number or numeric string to float; anything else -> None.
+
+    UEBA ``risk_score`` arrives as a float-valued string (e.g.
+    "0.2479...") on live 7.6.7/8.0.0, so a plain isinstance(float) check
+    would miss every host; this coerces it.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _risk_percentile(target: float, population: list[float]) -> float | None:
+    """Percentile rank of ``target`` within ``population`` (0–100).
+
+    The share of the population scoring at or below ``target`` — a standard
+    "percentile rank" (weak inequality, so the max scores 100.0). Returns
+    ``None`` for a population too small to rank meaningfully (< 2 scored
+    endpoints), so a one-host estate never reports a false "100th
+    percentile". Deterministic; no inference.
+    """
+    if len(population) < 2:
+        return None
+    at_or_below = sum(1 for value in population if value <= target)
+    return round(100.0 * at_or_below / len(population), 1)
+
+
+def _is_behavioral_alert(alert: dict[str, Any]) -> bool:
+    """Whether an alert reads as a FAZ behavioural / IOC detection.
+
+    Best-effort substring match of the behavioural markers against the
+    alert's handler/name fields. Case-insensitive; a miss simply excludes
+    the alert (it is not guessed onto the entity).
+    """
+    haystack = " ".join(str(alert.get(key) or "") for key in _ALERT_HANDLER_KEYS).lower()
+    return any(marker in haystack for marker in _BEHAVIORAL_MARKERS)
+
+
+async def _entity_behavioral_alerts(
+    adom: str | None,
+    pivot: str | None,
+    time_range: str,
+    warnings: list[str],
+    entity_ref: str,
+) -> list[dict[str, Any]] | FeatureGap:
+    """The entity's behavioural alert-handler / IOC alerts in the window.
+
+    One eventmgmt GET (no logview slot): alerts in the window filtered to
+    the entity's pivot (srcip==<epip> / user==<euname>), then narrowed to
+    the ones whose handler reads as a behavioural / IOC detection. FAZ's own
+    anomaly detections — the RFC's "strongest FAZ-provided behavioural
+    signal". Degrades to a ``FeatureGap`` when the read fails or the entity
+    yields no pivot to tie alerts to.
+    """
+    from fortianalyzer_mcp.tools.event_tools import get_alerts
+
+    if pivot is None:
+        return FeatureGap(
+            reason=f"entity {entity_ref} yields no srcip/user pivot; "
+            "behavioural detections cannot be tied to it"
+        )
+    alerts_res, err = await _call(
+        get_alerts, adom=adom, time_range=time_range, filter=pivot, limit=200
+    )
+    if alerts_res is None:
+        warnings.append(f"behavior[{entity_ref}]: behavioural alert lookup unavailable: {err}")
+        return FeatureGap(reason=f"behavioural alert lookup unavailable: {err}")
+    behavioral = [a for a in alerts_res.get("data") or [] if _is_behavioral_alert(a)]
+    return behavioral
+
+
+async def _hunt_behavior(
+    adom: str | None,
+    entity: str,
+    time_range: str,
+    anomaly_percentile: float,
+    warnings: list[str],
+) -> tuple[EntityBehavior, int]:
+    """The behaviour half for one entity. Returns (behaviour, ranked_total).
+
+    Endpoint: resolve the whole UEBA endpoint estate (one plain GET), rank
+    the entity's ``risk_score`` as a percentile within that distribution,
+    read its per-severity ``vuln-stats``, and pull its behavioural / IOC
+    alerts. The anomaly verdict is percentile-based — the RFC-confirmed
+    calibration, since risk_score runs low in absolute terms.
+
+    End-user: no ``risk_score`` — lean on ``importance`` + behavioural
+    alerts.
+
+    ``ranked_total`` is the number of endpoints carrying a numeric
+    risk_score (the real denominator behind the percentile); 0 for an
+    end-user subject.
+    """
+    from fortianalyzer_mcp.tools.ueba_tools import get_endpoints, get_endusers
+    from fortianalyzer_mcp.utils.validation import sanitize_filter_value
+
+    kind, _, raw = entity.partition(":")
+    kind = kind.strip().lower()
+    ref = raw.strip()
+    if kind not in ("epid", "euid") or not ref.isdigit():
+        raise SkillExecutionError(f"unrecognized entity {entity!r}; use 'epid:N' or 'euid:N'")
+    entity_id = int(ref)
+
+    if kind == "epid":
+        # No time_range: get_endpoints' window filters by *first-seen*, which
+        # would shrink the estate to hosts first-seen in the window and can
+        # drop the target itself. The percentile denominator must be the full
+        # current inventory (live-verified: a 7-day first-seen filter excluded
+        # long-standing hosts on 8.0.0), so the estate read is unwindowed.
+        eps_res, err = await _call(get_endpoints, adom=adom, detail_level="standard")
+        if eps_res is None:
+            raise SkillExecutionError(f"could not retrieve UEBA endpoints ({err})")
+        estate = _records(eps_res.get("data"))
+        record = next((ep for ep in estate if str(ep.get("epid")) == str(entity_id)), None)
+        if record is None:
+            raise SkillExecutionError(f"endpoint {entity_id} not found in the UEBA inventory")
+
+        # Percentile: rank this endpoint's risk_score against every other
+        # endpoint's — the anomaly signal is relative, not a fixed cut. Live
+        # FAZ returns risk_score as a float-valued string, so coerce.
+        population = [
+            score for ep in estate if (score := _as_float(ep.get("risk_score"))) is not None
+        ]
+        ranked_total = len(population)
+        risk_score = _as_float(record.get("risk_score"))
+        percentile = _risk_percentile(risk_score, population) if risk_score is not None else None
+        vuln_stats = _vuln_stats_counts(record)
+        importance = record.get("importance")
+
+        pivot = None
+        epip = record.get("epip")
+        if epip:
+            pivot = f"srcip=={sanitize_filter_value(str(epip), 'epip')}"
+        else:
+            warnings.append(
+                f"behavior[{entity_id}]: endpoint carries no 'epip'; behavioural "
+                "detections cannot be tied to it"
+            )
+        detections = await _entity_behavioral_alerts(
+            adom, pivot, time_range, warnings, str(entity_id)
+        )
+
+        anomalous, basis = _score_endpoint_anomaly(
+            percentile, ranked_total, vuln_stats, detections, anomaly_percentile
+        )
+        detection_count = len(detections) if isinstance(detections, list) else 0
+        return (
+            EntityBehavior(
+                entity_type="endpoint",
+                entity_ref=str(entity_id),
+                record=record,
+                risk_score=risk_score,
+                risk_percentile=percentile,
+                importance=importance,
+                vuln_stats=vuln_stats,
+                behavioral_detections=detections,
+                detection_count=detection_count,
+                anomalous=anomalous,
+                anomaly_basis=basis,
+            ),
+            ranked_total,
+        )
+
+    # End-user: no risk_score — importance + behavioural alerts only.
+    users_res, err = await _call(get_endusers, adom=adom, euids=[entity_id])
+    if users_res is None:
+        raise SkillExecutionError(f"could not retrieve UEBA end-users ({err})")
+    record = next(
+        (u for u in _records(users_res.get("data")) if str(u.get("euid")) == str(entity_id)),
+        None,
+    )
+    if record is None:
+        raise SkillExecutionError(f"end-user {entity_id} not found in the UEBA directory")
+
+    importance = record.get("importance")
+    pivot = None
+    euname = record.get("euname")
+    if euname:
+        pivot = f"user=={sanitize_filter_value(str(euname), 'euname')}"
+    else:
+        warnings.append(
+            f"behavior[{entity_id}]: end-user carries no 'euname'; behavioural "
+            "detections cannot be tied to it"
+        )
+    detections = await _entity_behavioral_alerts(adom, pivot, time_range, warnings, str(entity_id))
+
+    anomalous, basis = _score_enduser_anomaly(importance, detections)
+    detection_count = len(detections) if isinstance(detections, list) else 0
+    return (
+        EntityBehavior(
+            entity_type="enduser",
+            entity_ref=str(entity_id),
+            record=record,
+            risk_score=None,
+            risk_percentile=None,
+            importance=importance,
+            vuln_stats={},
+            behavioral_detections=detections,
+            detection_count=detection_count,
+            anomalous=anomalous,
+            anomaly_basis=basis,
+        ),
+        0,
+    )
+
+
+def _score_endpoint_anomaly(
+    percentile: float | None,
+    ranked_total: int,
+    vuln_stats: dict[str, int],
+    detections: list[dict[str, Any]] | FeatureGap,
+    anomaly_percentile: float,
+) -> tuple[bool, list[str]]:
+    """Derive an endpoint's anomaly verdict + auditable basis.
+
+    Percentile-first (never a fixed risk cut): an endpoint at or above the
+    ``anomaly_percentile`` of the estate risk distribution is anomalous.
+    Serious vuln-stats (critical/high) and any behavioural detection are
+    independent flags — either alone also fires the verdict, since a host
+    with a live IOC detection or a critical CVE is worth surfacing even if
+    its raw risk_score sits mid-pack.
+    """
+    basis: list[str] = []
+    flags: list[bool] = []
+
+    if percentile is None:
+        basis.append(
+            "risk_score percentile unavailable "
+            f"(estate too small to rank, {ranked_total} scored endpoint(s)); "
+            "percentile flag not applied"
+        )
+    else:
+        hit = percentile >= anomaly_percentile
+        flags.append(hit)
+        basis.append(
+            f"risk_score at {percentile}th percentile of {ranked_total} scored "
+            f"endpoints (threshold {anomaly_percentile}) -> "
+            f"{'ANOMALOUS' if hit else 'normal'}"
+        )
+
+    serious = {s: vuln_stats[s] for s in _SERIOUS_VULN_LABELS if vuln_stats.get(s)}
+    if serious:
+        flags.append(True)
+        detail = ", ".join(f"{count} {sev}" for sev, count in serious.items())
+        basis.append(f"carries serious vulnerabilities ({detail}) -> ANOMALOUS")
+    else:
+        basis.append("no critical/high vuln-stats")
+
+    if isinstance(detections, list) and detections:
+        flags.append(True)
+        basis.append(f"{len(detections)} behavioural/IOC detection(s) in the window -> ANOMALOUS")
+    elif isinstance(detections, list):
+        basis.append("no behavioural/IOC detections in the window")
+    else:
+        basis.append("behavioural detections unavailable; that flag not applied")
+
+    return (any(flags), basis)
+
+
+def _score_enduser_anomaly(
+    importance: Any, detections: list[dict[str, Any]] | FeatureGap
+) -> tuple[bool, list[str]]:
+    """Derive an end-user's anomaly verdict + basis (no risk_score exists).
+
+    End-users carry no ``risk_score``, so the signal is ``importance`` +
+    behavioural detections: a high-importance user or any behavioural
+    detection fires the verdict.
+    """
+    basis: list[str] = []
+    flags: list[bool] = []
+
+    importance_str = str(importance).lower() if importance is not None else ""
+    if importance_str in ("high", "critical"):
+        flags.append(True)
+        basis.append(f"importance is {importance!r} -> ANOMALOUS")
+    elif importance is not None:
+        basis.append(f"importance is {importance!r}")
+    else:
+        basis.append("end-user carries no 'importance'")
+
+    if isinstance(detections, list) and detections:
+        flags.append(True)
+        basis.append(f"{len(detections)} behavioural/IOC detection(s) in the window -> ANOMALOUS")
+    elif isinstance(detections, list):
+        basis.append("no behavioural/IOC detections in the window")
+    else:
+        basis.append("behavioural detections unavailable; that flag not applied")
+
+    return (any(flags), basis)
+
+
+def _sweep_pivot(params: HuntParams) -> str | None:
+    """The filter clause the sweep searches run on — auditable, never a guess.
+
+    - indicator: an equality on the field the indicator's type maps to
+      (IP -> srcip, Domain -> hostname, URL -> url, Hash -> a 'checksum'
+      substring). Sanitised.
+    - filter: passed through verbatim (the caller owns its correctness).
+    - ttp only: folded into an 'attack' substring match.
+
+    Returns ``None`` when no usable pivot can be derived (the sweep then
+    degrades to a gap rather than sweeping on nothing).
+    """
+    from fortianalyzer_mcp.utils.validation import sanitize_filter_value
+
+    if params.filter is not None:
+        # The caller's raw filter is authoritative; a ttp hint is recorded
+        # but not merged (merging free-form clauses risks a malformed filter).
+        return params.filter
+
+    if params.indicator is not None:
+        value = sanitize_filter_value(params.indicator.value, "indicator")
+        field = {
+            "IP": "srcip",
+            "Domain": "hostname",
+            "URL": "url",
+            "Hash": "checksum",
+        }[params.indicator.type]
+        # Hash is matched as a substring (the checksum field name varies by
+        # logtype); IP/Domain/URL as equality.
+        if params.indicator.type == "Hash":
+            return f"{field}=~{value}"
+        return f"{field}=={value}"
+
+    if params.ttp is not None:
+        return f"attack=~{sanitize_filter_value(params.ttp, 'ttp')}"
+
+    return None
+
+
+async def _hunt_sweep(
+    params: HuntParams, time_range: str, warnings: list[str]
+) -> HuntSweep | FeatureGap:
+    """The hunt half: sweep the estate for the indicator/TTP/filter.
+
+    One logview search slot per swept log type (capped by
+    ``max_sweep_searches``; excess dropped and named in ``warnings``), plus
+    ``threat_intel`` for an IP/URL/Domain indicator (plain GETs, no slot).
+    Degrades to a ``FeatureGap`` when no sweep pivot can be derived.
+    """
+    from fortianalyzer_mcp.tools.log_tools import query_logs
+
+    pivot = _sweep_pivot(params)
+    if pivot is None:
+        return FeatureGap(
+            reason="no sweep pivot could be derived from the subject; nothing to hunt on"
+        )
+
+    matches: list[SweepMatch] = []
+    consumed = 0
+    dropped = 0
+    budget = params.max_sweep_searches
+    for logtype in params.sweep_logtypes:
+        if consumed >= budget:
+            dropped += 1
+            matches.append(
+                SweepMatch(
+                    logtype=logtype,
+                    rows=FeatureGap(
+                        reason=f"dropped by max_sweep_searches cap (budget {budget} exhausted)"
+                    ),
+                )
+            )
+            warnings.append(
+                f"sweep: '{logtype}' search dropped by the fan-out cap (budget {budget})"
+            )
+            continue
+        consumed += 1
+        logs_res, err = await _call(
+            query_logs,
+            adom=params.adom,
+            logtype=logtype,
+            time_range=time_range,
+            filter=pivot,
+            limit=params.sweep_limit,
+        )
+        if logs_res is None:
+            matches.append(
+                SweepMatch(
+                    logtype=logtype,
+                    rows=FeatureGap(reason=f"sweep '{logtype}' search unavailable: {err}"),
+                )
+            )
+            warnings.append(f"sweep[{logtype}]: search unavailable: {err}")
+        else:
+            rows = logs_res.get("logs") or []
+            matches.append(SweepMatch(logtype=logtype, rows=rows, row_count=len(rows)))
+            warnings.extend(f"sweep[{logtype}]: {w}" for w in logs_res.get("warnings") or [])
+
+    # Threat-intel: reputation for an IP/URL/Domain indicator (a hash is not
+    # a SOAR reputation type; a bare filter/ttp has no single indicator).
+    threat_intel: ThreatIntelResult | FeatureGap
+    ti_type = (
+        _INDICATOR_TYPE_CANONICAL.get(params.indicator.type.lower())
+        if params.indicator is not None
+        else None
+    )
+    if ti_type is not None and params.indicator is not None:
+        try:
+            # ti_type is a value of _INDICATOR_TYPE_CANONICAL, i.e. exactly one
+            # of "IP"/"URL"/"Domain" — the IndicatorSpec.type Literal.
+            spec = IndicatorSpec.model_validate({"value": params.indicator.value, "type": ti_type})
+            threat_intel = await run_threat_intel(
+                ThreatIntelParams(
+                    adom=params.adom,
+                    indicators=[spec],
+                    detail_level=params.detail_level,
+                    time_range=time_range,
+                    include_threat_landscape=params.include_threat_landscape,
+                )
+            )
+            warnings.extend(f"threat_intel: {w}" for w in threat_intel.warnings)
+        except SkillExecutionError as exc:
+            warnings.append(f"indicator enrichment unavailable: {exc}")
+            threat_intel = FeatureGap(reason=f"indicator enrichment unavailable: {exc}")
+    elif params.indicator is not None:
+        threat_intel = FeatureGap(
+            reason=f"{params.indicator.type} indicators carry no SOAR reputation type"
+        )
+    else:
+        threat_intel = FeatureGap(reason="no single indicator to enrich (filter/ttp hunt)")
+
+    total = sum(m.row_count for m in matches)
+    return HuntSweep(
+        pivot_filter=pivot,
+        ttp=params.ttp,
+        matches=matches,
+        threat_intel=threat_intel,
+        total_matches=total,
+        sweep_searches_run=consumed,
+        sweep_searches_dropped=dropped,
+    )
+
+
+async def _hunt_estate(
+    adom: str | None,
+    time_range: str,
+    want_endpoints: bool,
+    want_endusers: bool,
+    ranked_endpoint_total: int,
+    warnings: list[str],
+) -> EstateContext | FeatureGap:
+    """Estate-scale denominators for the window — context, never a baseline.
+
+    Composes the Layer-1 ``get_endpoint_stats`` / ``get_enduser_stats``
+    readers (ADOM-wide count snapshots) when they are available. Those
+    readers ship on a separate additive branch; when they are not present
+    (``ImportError``/``AttributeError``) the section degrades to a
+    ``FeatureGap`` rather than failing — the estate context is optional and
+    the percentile denominator (``ranked_endpoint_total``) comes from the
+    behaviour half's own ``get_endpoints`` read regardless.
+    """
+    try:
+        from fortianalyzer_mcp.tools.ueba_tools import (  # type: ignore[attr-defined]
+            get_endpoint_stats,
+            get_enduser_stats,
+        )
+    except ImportError:
+        return FeatureGap(
+            reason="estate-stats readers not available in this build; "
+            "denominators skipped (optional context)"
+        )
+
+    endpoints: dict[str, Any] | FeatureGap = FeatureGap(reason="not requested for this subject")
+    if want_endpoints:
+        eps_res, err = await _call(get_endpoint_stats, adom=adom, time_range=time_range)
+        if eps_res is None:
+            warnings.append(f"estate: endpoint stats unavailable: {err}")
+            endpoints = FeatureGap(reason=f"endpoint stats unavailable: {err}")
+        else:
+            data = eps_res.get("data")
+            first = _first_record(data)
+            endpoints = first if first is not None else {"data": data}
+
+    endusers: dict[str, Any] | FeatureGap = FeatureGap(reason="not requested for this subject")
+    if want_endusers:
+        eu_res, err = await _call(get_enduser_stats, adom=adom, time_range=time_range)
+        if eu_res is None:
+            warnings.append(f"estate: end-user stats unavailable: {err}")
+            endusers = FeatureGap(reason=f"end-user stats unavailable: {err}")
+        else:
+            data = eu_res.get("data")
+            endusers = data if isinstance(data, dict) else {"data": data}
+
+    return EstateContext(
+        endpoints=endpoints,
+        endusers=endusers,
+        ranked_endpoint_total=ranked_endpoint_total,
+    )
+
+
+def _hunt_headline(
+    subject_type: str,
+    subject_id: str,
+    sweep: HuntSweep | FeatureGap,
+    behavior: EntityBehavior | FeatureGap,
+) -> str:
+    """Deterministic one-line rollup for the hunt — built only from present values."""
+    parts = [f"{subject_type} {subject_id}"]
+    if isinstance(sweep, HuntSweep):
+        parts.append(
+            f"sweep: {sweep.total_matches} matches across {sweep.sweep_searches_run} searches"
+        )
+    if isinstance(behavior, EntityBehavior):
+        verdict = "ANOMALOUS" if behavior.anomalous else "normal"
+        pct = (
+            f"{behavior.risk_percentile}th pct"
+            if behavior.risk_percentile is not None
+            else "no percentile"
+        )
+        parts.append(f"behavior: {verdict} ({pct}, {behavior.detection_count} detections)")
+    return "; ".join(parts)
+
+
+async def run_hunt(params: HuntParams) -> HuntResult:
+    """Proactive hunt: sweep the estate for an IOC/TTP and/or score one
+    entity's behaviour for anomaly.
+
+    Two halves, driven by the subject:
+
+    - **Sweep (indicator / filter / ttp):** ``log_search`` fan-out across
+      ``sweep_logtypes`` for where the subject appears (verbatim rows,
+      capped), plus ``threat_intel`` reputation for an IP/URL/Domain
+      indicator. One logview search slot per swept log type, hard-capped by
+      ``max_sweep_searches``; excess dropped and named in ``warnings``.
+    - **Behaviour (entity = epid:N / euid:N):** the entity's FAZ-provided
+      behavioural signals, anomaly-scored **by percentile, not a fixed
+      threshold** — for an endpoint, its ``risk_score`` ranked within the
+      estate's current risk distribution (``get_endpoints``), its
+      per-severity ``vuln-stats``, and its behavioural alert-handler / IOC
+      detections in the window; for an end-user (no ``risk_score``), its
+      ``importance`` + those detections. The verdict fires on percentile OR
+      a serious vuln OR any detection, and every input is in
+      ``anomaly_basis``.
+
+    An entity subject also runs a light entity-scoped sweep (on its
+    srcip/user) so "look at this host" still surfaces where it appears.
+    Windows are capped to 7-day for the slot-consuming sweep. The UEBA /
+    alert / stats reads are plain GETs (no search slots).
+    """
+    warnings: list[str] = []
+    time_range, capped = _cap_hunt_window(params.time_range)
+    if capped:
+        warnings.append(
+            f"time_range {params.time_range!r} capped to {time_range!r} for the "
+            "slot-consuming sweep searches"
+        )
+
+    if params.indicator is not None:
+        subject_type = "indicator"
+        subject_id = f"{params.indicator.type} {params.indicator.value}"
+    elif params.entity is not None:
+        subject_type = "entity"
+        subject_id = params.entity
+    else:
+        subject_type = "hypothesis"
+        subject_id = params.filter or f"ttp:{params.ttp}"
+
+    # --- Behaviour half (entity subjects) ------------------------------- #
+    behavior: EntityBehavior | FeatureGap
+    ranked_total = 0
+    entity_pivot: str | None = None
+    if params.entity is not None:
+        behavior, ranked_total = await _hunt_behavior(
+            params.adom, params.entity, time_range, params.anomaly_percentile, warnings
+        )
+        # Reuse the resolved record's pivot for the entity-scoped sweep.
+        from fortianalyzer_mcp.utils.validation import sanitize_filter_value
+
+        record = behavior.record
+        if behavior.entity_type == "endpoint" and record.get("epip"):
+            entity_pivot = f"srcip=={sanitize_filter_value(str(record['epip']), 'epip')}"
+        elif behavior.entity_type == "enduser" and record.get("euname"):
+            entity_pivot = f"user=={sanitize_filter_value(str(record['euname']), 'euname')}"
+    else:
+        behavior = FeatureGap(
+            reason="no entity subject; behaviour half runs only for an epid:/euid: subject"
+        )
+
+    # --- Sweep half ----------------------------------------------------- #
+    sweep: HuntSweep | FeatureGap
+    if params.entity is not None:
+        # Entity subject: sweep on the entity's own pivot so "look at this
+        # host" surfaces where it appears. No indicator to enrich.
+        if entity_pivot is None:
+            sweep = FeatureGap(
+                reason="entity yields no srcip/user pivot; entity-scoped sweep skipped"
+            )
+        else:
+            sweep = await _hunt_sweep(
+                HuntParams(
+                    adom=params.adom,
+                    filter=entity_pivot,
+                    time_range=params.time_range,
+                    sweep_logtypes=params.sweep_logtypes,
+                    max_sweep_searches=params.max_sweep_searches,
+                    sweep_limit=params.sweep_limit,
+                    include_threat_landscape=params.include_threat_landscape,
+                ),
+                time_range,
+                warnings,
+            )
+    else:
+        sweep = await _hunt_sweep(params, time_range, warnings)
+
+    # --- Estate context (denominators, optional) ------------------------ #
+    estate: EstateContext | FeatureGap
+    if not params.include_estate_stats:
+        estate = FeatureGap(reason="disabled by include_estate_stats=false")
+    else:
+        want_endpoints = params.entity is None or (
+            isinstance(behavior, EntityBehavior) and behavior.entity_type == "endpoint"
+        )
+        want_endusers = isinstance(behavior, EntityBehavior) and behavior.entity_type == "enduser"
+        estate = await _hunt_estate(
+            params.adom,
+            time_range,
+            want_endpoints,
+            want_endusers,
+            ranked_total,
+            warnings,
+        )
+
+    return HuntResult(
+        subject_type=subject_type,  # type: ignore[arg-type]
+        headline=_hunt_headline(subject_type, subject_id, sweep, behavior),
+        sweep=sweep,
+        behavior=behavior,
+        estate=estate,
+        time_range=time_range,
         warnings=warnings,
     )
