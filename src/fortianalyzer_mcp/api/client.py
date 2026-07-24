@@ -1907,6 +1907,63 @@ class FortiAnalyzerClient:
             params["euids"] = euids
         return await self._request_dict("get", f"/ueba/adom/{adom}/endusers", **params)
 
+    async def get_endpoint_stats(
+        self,
+        adom: str,
+        time_range: dict[str, str],
+        filter: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Get UEBA endpoint stat counts for a time window.
+
+        FNDN: GET /ueba/adom/{adom}/endpoints/stats
+
+        Returns an ADOM-wide aggregate count snapshot for the window (a
+        single-element list holding total/new/identified/unidentified
+        endpoint counts). Not per-entity and not a time series. The FAZ
+        rejects the request unless a ``time-range`` is supplied.
+
+        Args:
+            adom: ADOM name
+            time_range: {"start": ..., "end": ...} window (required by FAZ)
+            filter: Optional query filter, e.g. "category=IOT"
+        """
+        params: dict[str, Any] = {"apiver": API_VERSION, "time-range": time_range}
+        if filter:
+            params["filter"] = filter
+        result = await self.get(f"/ueba/adom/{adom}/endpoints/stats", **params)
+        if isinstance(result, list):
+            return cast(list[dict[str, Any]], result)
+        return [result] if result else []
+
+    async def get_enduser_stats(
+        self,
+        adom: str,
+        time_range: dict[str, str],
+        stats_item: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Get UEBA end-user stat counts for a time window.
+
+        FNDN: GET /ueba/adom/{adom}/endusers/stats
+
+        Returns an ADOM-wide aggregate count object (total/new end-user
+        counts) for the window. Not per-entity and not a time series. The
+        FAZ rejects the request unless BOTH ``stats-item`` and a
+        ``time-range`` are supplied.
+
+        Args:
+            adom: ADOM name
+            time_range: {"start": ..., "end": ...} window (required by FAZ)
+            stats_item: Requested stat types (default: ["total-count",
+                "new-count"]); the FAZ requires this alongside time-range
+        """
+        items = stats_item if stats_item else ["total-count", "new-count"]
+        params: dict[str, Any] = {
+            "apiver": API_VERSION,
+            "time-range": time_range,
+            "stats-item": items,
+        }
+        return await self._request_dict("get", f"/ueba/adom/{adom}/endusers/stats", **params)
+
     async def get_alert_handlers(
         self,
         adom: str,
