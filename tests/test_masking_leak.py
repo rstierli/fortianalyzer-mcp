@@ -1298,3 +1298,80 @@ class TestNestedDeviceName:
         masked = masker.mask_result({"device_info": {"dev_name": DEV_NAME}})
 
         assert masked["device_info"]["dev_name"] == DEV_NAME
+
+
+class TestWave3SkillAssemblyKeys:
+    """Keys the Wave-3 skills build themselves around an identifier.
+
+    ``investigate_deep`` writes ``srcip==<value>`` clauses under ``pivot``
+    and the caller's entity under ``entity_ref``; ``hunt`` writes the same
+    clause shape under ``sweep.pivot_filter``; both interpolate the subject
+    into ``headline``. The same response masks the value under its own key,
+    so an untyped assembly key handed over the token-to-raw pairing, the
+    srcip_hostname class. Typed TEXT they get exactly the ``filter``
+    treatment: a value this response mapped is substituted (closing the
+    pairing) and a bare IPv4 is caught by the IOC scan with the same token
+    the structured pass mints. The residual they share with ``filter`` (a
+    cold value that is neither mapped nor IPv4/MAC/email-shaped) is not
+    pinned here because it is unchanged shipped behaviour, tracked for the
+    whole filter family in #80.
+    """
+
+    def test_pivot_filter_tracks_the_row_token(self, masker: OutputMasker):
+        # The pairing case: rows mask srcip, the sweep echoes the raw value.
+        masked = masker.mask_result(
+            {
+                "rows": [{"srcip": PEER_IP}],
+                "sweep": {"pivot_filter": f'srcip=="{PEER_IP}"'},
+            }
+        )
+
+        assert PEER_IP not in str(masked)
+        token = masked["rows"][0]["srcip"]
+        assert masked["sweep"]["pivot_filter"] == f'srcip=="{token}"'
+
+    def test_pivot_tracks_the_enduser_token(self, masker: OutputMasker):
+        # investigate_deep: pivot built from the UEBA record's euname.
+        masked = masker.mask_result(
+            {
+                "record": {"euname": ANALYST},
+                "impact": {"entities": [{"pivot": f"user=={ANALYST}"}]},
+            }
+        )
+
+        assert ANALYST not in str(masked)
+        token = masked["record"]["euname"]
+        assert masked["impact"]["entities"][0]["pivot"] == f"user=={token}"
+
+    def test_entity_ref_ip_masks_and_numeric_ref_survives(self, masker: OutputMasker):
+        # A cold entity_ref must carry the SAME token the typed path would
+        # mint, or the model cannot pivot on it; a burn or a blank would
+        # also satisfy a mere != assertion.
+        expected = masker.mask_result({"srcip": PEER_IP})["srcip"]
+        masked = masker.mask_result(
+            {"impact": {"entities": [{"entity_ref": PEER_IP}, {"entity_ref": "12"}]}}
+        )
+
+        entities = masked["impact"]["entities"]
+        assert entities[0]["entity_ref"] == expected
+        # investigate_deep emits bare numeric refs for epid/euid subjects;
+        # they are selectors, not identifiers, and TEXT never burns.
+        assert entities[1]["entity_ref"] == "12"
+
+    def test_headline_carries_the_exact_ip_token(self, masker: OutputMasker):
+        expected = masker.mask_result({"srcip": PEER_IP})["srcip"]
+        masked = masker.mask_result({"headline": f"indicator IP {PEER_IP}; sweep: 0 hits"})
+
+        assert masked["headline"] == f"indicator IP {expected}; sweep: 0 hits"
+
+    def test_pivot_pairing_holds_with_device_masking_on(self, full_masker: OutputMasker):
+        masked = full_masker.mask_result(
+            {
+                "rows": [{"srcip": PEER_IP}],
+                "sweep": {"pivot_filter": f'srcip=="{PEER_IP}"'},
+            }
+        )
+
+        assert PEER_IP not in str(masked)
+        token = masked["rows"][0]["srcip"]
+        assert masked["sweep"]["pivot_filter"] == f'srcip=="{token}"'
