@@ -867,6 +867,10 @@ def _flatten_vuln_records(
     ``vuln`` list, or bare CVE rows. Rows whose record carries no ``epid``
     land in the orphan list instead of being guessed onto an endpoint.
     """
+    # Convention (PR #90 masking review): this dict is keyed by endpoint id,
+    # so it is INTERNAL-only. OutputMasker rewrites dict values but never keys,
+    # so a reader-supplied value must never become a key in anything that
+    # reaches the response — group by id here, but surface id as a field value.
     by_endpoint: dict[str, list[dict[str, Any]]] = {}
     orphans: list[dict[str, Any]] = []
     for record in _records(payload):
@@ -2299,7 +2303,7 @@ async def _hunt_behavior(
     kind = kind.strip().lower()
     ref = raw.strip()
     if kind not in ("epid", "euid") or not ref.isdigit():
-        raise SkillExecutionError(f"unrecognized entity {entity!r}; use 'epid:N' or 'euid:N'")
+        raise SkillExecutionError("entity must be 'epid:N' or 'euid:N'")
     entity_id = int(ref)
 
     if kind == "epid":

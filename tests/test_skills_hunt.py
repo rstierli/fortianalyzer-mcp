@@ -77,7 +77,7 @@ ESTATE = CROWD + [HOT_ENDPOINT]
 # The ADOM-wide count snapshot the Layer-1 estate reader returns.
 ENDPOINT_STATS = {"total-count": "40", "new-count": "2", "identified-count": "37"}
 
-ENDUSER = {"euid": 42, "euname": "chutter", "importance": "high"}
+ENDUSER = {"euid": 42, "euname": "jdoe", "importance": "high"}
 BOTNET_ALERT = {
     "alertid": "a-1",
     "alerttype": "Default-Botnet-Communication-Detection-By-Endpoint",
@@ -280,6 +280,37 @@ class TestHuntBehaviorPercentile:
         assert result.behavior.anomalous is True
         assert any("too small to rank" in r for r in result.behavior.anomaly_basis)
 
+    async def test_no_reader_value_becomes_an_output_dict_key(self):
+        # PR #90 masking review: OutputMasker rewrites dict values but never
+        # keys, so no reader-supplied identifier may surface as a key in hunt's
+        # output. The vuln grouping keys an internal dict by epid; this pins
+        # that it stays internal — a refactor leaking it would leak the id past
+        # the masker.
+        vulns = ok(data=[{"epid": 6676, "vuln": [{"cve": "CVE-2025-0001"}]}])
+        with (
+            t(GET_ENDPOINTS, return_value=ok(data=[HOT_ENDPOINT] + CROWD)),
+            t(GET_VULNS, return_value=vulns),
+            t(GET_ALERTS, return_value=ok(data=[])),
+            t(QUERY_LOGS, return_value=logs_ok([])),
+        ):
+            result = await handlers.run_hunt(HuntParams(entity="epid:6676"))
+
+        def all_keys(obj: Any) -> set[str]:
+            keys: set[str] = set()
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    keys.add(str(k))
+                    keys |= all_keys(v)
+            elif isinstance(obj, list):
+                for item in obj:
+                    keys |= all_keys(item)
+            return keys
+
+        keys = all_keys(result.model_dump())
+        # epid and epname are reader-supplied; neither may appear as a dict key.
+        assert "6676" not in keys
+        assert "EU-83LP4Y2" not in keys
+
     async def test_enduser_has_no_risk_score(self):
         with (
             t(GET_ENDUSERS, return_value=ok(data=[ENDUSER])),
@@ -347,7 +378,7 @@ class TestHuntBehaviorPercentile:
                 await handlers.run_hunt(HuntParams(entity="epid:6676"))
 
     async def test_unrecognized_entity_raises(self):
-        with pytest.raises(handlers.SkillExecutionError, match="unrecognized entity"):
+        with pytest.raises(handlers.SkillExecutionError, match="entity must be"):
             await handlers.run_hunt(HuntParams(entity="host:foo"))
 
 
