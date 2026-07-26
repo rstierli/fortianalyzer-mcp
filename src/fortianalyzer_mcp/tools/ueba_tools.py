@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 _VALID_ENDPOINT_DETAIL = {"simple", "basic", "standard"}
 _VALID_ENDUSER_DETAIL = {"basic", "standard", "extended"}
 _VALID_DETECTBY = {"FortiClient", "FortiGate"}
+_VALID_ENDUSER_STATS_ITEM = {"total-count", "new-count"}
 
 
 def _get_client() -> FortiAnalyzerClient:
@@ -180,4 +181,96 @@ async def get_endusers(
         return {"status": "success", "data": result}
     except Exception as e:
         logger.error(f"Failed to get UEBA end-users: {e}")
+        return {"status": "error", "message": redact(str(e))}
+
+
+@mcp.tool()
+async def get_endpoint_stats(
+    adom: str | None = None,
+    time_range: str = "7-day",
+    filter: str | None = None,
+) -> dict[str, Any]:
+    """Get ADOM-wide UEBA endpoint (asset) count stats for a window.
+
+    Returns an aggregate count snapshot for the ADOM over the window:
+    total, new, identified and unidentified endpoint counts. This is an
+    estate-scale denominator, NOT a per-endpoint or time-series record.
+    The FortiAnalyzer requires a time window, so one is always sent.
+    Requires UEBA to be enabled/licensed on the FortiAnalyzer.
+
+    Args:
+        adom: ADOM name (default: from config DEFAULT_ADOM)
+        time_range: Window, e.g. "7-day" (default) or a custom "start|end"
+            range. A window is mandatory for this endpoint.
+        filter: Optional query filter, e.g. "category=IOT"
+
+    Returns:
+        dict with the aggregate stat record(s) under "data"
+
+    Example:
+        >>> result = await get_endpoint_stats(time_range="7-day")
+        >>> print(result["data"][0]["total-count"])
+    """
+    try:
+        adom = validate_adom(adom or get_default_adom())
+        tr = await _parse_time_range(time_range)
+        client = _get_client()
+
+        logger.info(f"Getting UEBA endpoint stats from ADOM {adom}")
+
+        result = await client.get_endpoint_stats(adom=adom, time_range=tr, filter=filter)
+        return {"status": "success", "data": result}
+    except Exception as e:
+        logger.error(f"Failed to get UEBA endpoint stats: {e}")
+        return {"status": "error", "message": redact(str(e))}
+
+
+@mcp.tool()
+async def get_enduser_stats(
+    adom: str | None = None,
+    time_range: str = "7-day",
+    stats_item: list[str] | None = None,
+) -> dict[str, Any]:
+    """Get ADOM-wide UEBA end-user (identity) count stats for a window.
+
+    Returns an aggregate count object for the ADOM over the window:
+    total and new end-user counts. This is an estate-scale denominator,
+    NOT a per-user or time-series record. The FortiAnalyzer requires both
+    a window and the requested stat items, so both are always sent.
+    Requires UEBA to be enabled/licensed on the FortiAnalyzer.
+
+    Args:
+        adom: ADOM name (default: from config DEFAULT_ADOM)
+        time_range: Window, e.g. "7-day" (default) or a custom "start|end"
+            range. A window is mandatory for this endpoint.
+        stats_item: Requested stat types (default: ["total-count",
+            "new-count"]); each must be one of "total-count", "new-count".
+
+    Returns:
+        dict with the aggregate stat counts under "data"
+
+    Example:
+        >>> result = await get_enduser_stats(time_range="7-day")
+        >>> print(result["data"]["total-count"])
+    """
+    try:
+        adom = validate_adom(adom or get_default_adom())
+        if stats_item is not None:
+            invalid = [s for s in stats_item if s not in _VALID_ENDUSER_STATS_ITEM]
+            if invalid:
+                valid = ", ".join(sorted(_VALID_ENDUSER_STATS_ITEM))
+                return {
+                    "status": "error",
+                    "message": f"Validation error: Invalid stats_item {invalid}. "
+                    f"Must be one of: {valid}",
+                }
+        tr = await _parse_time_range(time_range)
+        client = _get_client()
+
+        logger.info(f"Getting UEBA end-user stats from ADOM {adom}")
+
+        result = await client.get_enduser_stats(adom=adom, time_range=tr, stats_item=stats_item)
+        return {"status": "success", "data": result}
+    except Exception as e:
+        logger.error(f"Failed to get UEBA end-user stats: {e}")
         return {"status": "error", "message": redact(str(e))}

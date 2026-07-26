@@ -19,6 +19,8 @@ from fortianalyzer_mcp.skills.models import (
     AppUsageResult,
     AssetLookupParams,
     AssetLookupResult,
+    DeepInvestigateParams,
+    DeepInvestigation,
     HuntParams,
     HuntResult,
     IdentityLookupParams,
@@ -216,6 +218,19 @@ SKILLS: dict[str, SkillSpec] = {
             params_model=HuntParams,
             output_model=HuntResult,
             handler=handlers.run_hunt,
+        ),
+        SkillSpec(
+            id="investigate_deep",
+            tier="analysis",
+            description="Deep reactive investigation of one alert/incident (or a "
+            "forward-only entity): the investigate bundle, plus a backward "
+            "root-cause chain time-ordered to the earliest signal (deterministic, "
+            "no attribution) and a forward blast-radius of lateral log activity + "
+            "affected assets per traced entity. The forward pass consumes one "
+            "logview search slot per entity×logtype, hard-capped and windowed.",
+            params_model=DeepInvestigateParams,
+            output_model=DeepInvestigation,
+            handler=handlers.run_investigate_deep,
         ),
     )
 }

@@ -56,6 +56,14 @@ Out of scope here, by design:
   wrong trade. Closing it properly needs the ``devvds`` treatment, a
   composite handler that lifts the maskable part out first, and that is
   a GA decision rather than a beta patch.
+- Report artifacts (``get_report_data`` / ``fetch_report`` output) are
+  out of masking scope: the flag masks live query surfaces, not rendered
+  documents. Those tools return the report base64-encoded (PDF, HTML,
+  CSV, XML), the masker walks the JSON envelope and cannot see inside an
+  encoded blob, so identifiers inside report tables reach the caller
+  raw, and PDF is inherently out of scope. Decoding and masking the
+  text formats is a GA backlog item (#80); a partial cover would read
+  as coverage while PDF still leaks.
 - ``incident_reporter`` is polymorphic: a username on a manually created
   incident, an alert id on an auto-raised one, so it carries no type
   here. The username case is decided per record instead: when the value
@@ -264,6 +272,27 @@ FIELD_TYPES: dict[str, str] = {
     "warnings": TEXT,
     "message": TEXT,
     "reason": TEXT,
+    # --- Wave-3 skill assembly keys (#89 investigate_deep, #90 hunt). Each
+    # is a string the skill builds itself around an identifier the same
+    # response masks under the value's own key, so leaving them untyped
+    # handed over the token-to-raw pairing (the srcip_hostname class again):
+    # rows[].srcip a token, pivot "srcip==<raw>" beside it. TEXT gives them
+    # exactly the treatment filter/filter_applied already get: pass 2
+    # substitutes any value this response mapped (closing the pairing) and
+    # the IOC scan masks bare IPv4/MAC/email. They inherit filter's known
+    # residuals too, unchanged and not widened here: a value that appears
+    # nowhere else in the response and is not IPv4/MAC/email-shaped (a bare
+    # hostname, a cold username, a bare IPv6, a quoted clause value) rides
+    # through as written. Two of these keys are filter clauses, so the
+    # proper close for the whole family (filter, filter_applied, pivot,
+    # pivot_filter) is a clause composite that masks the RHS by the inner
+    # field's type, mirroring unmask_filter; that is a GA-grade change to a
+    # shipped surface and is tracked in #80, not bundled into this parity
+    # fix.
+    "pivot": TEXT,  # investigate_deep impact entities: 'srcip==<value>'
+    "pivot_filter": TEXT,  # hunt sweep: same clause shape
+    "entity_ref": TEXT,  # investigate_deep: caller's entity, may be a bare IP
+    "headline": TEXT,  # skill summaries; first interpolated an identifier in #89
 }
 
 #: Composite keys whose value is a single string holding one or more

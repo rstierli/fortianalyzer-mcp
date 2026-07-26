@@ -285,6 +285,8 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
             "get_endpoints": ueba_tools.get_endpoints,
             "get_endpoint_vulnerabilities": ueba_tools.get_endpoint_vulnerabilities,
             "get_endusers": ueba_tools.get_endusers,
+            "get_endpoint_stats": ueba_tools.get_endpoint_stats,
+            "get_enduser_stats": ueba_tools.get_enduser_stats,
             # SOAR tools (Wave-2 threat-intel readers)
             "get_linked_indicators": soar_tools.get_linked_indicators,
             "get_indicator_enrichment": soar_tools.get_indicator_enrichment,
