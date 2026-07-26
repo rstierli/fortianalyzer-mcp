@@ -7,7 +7,9 @@ modules with ``autospec=True``; the dispatcher path is exercised through
 and a percentile-calibrated UEBA behaviour profile — so the mocks are
 ``query_logs`` (sweep), the SOAR readers (threat_intel), and the UEBA
 endpoint/end-user + alert readers (behaviour). The estate-stats readers are
-optional and absent on this branch, so that section degrades to a gap.
+optional, so both estate paths are driven explicitly: their absence and
+their presence are simulated on the module rather than inferred from
+whether this branch happens to carry them.
 """
 
 from typing import Any
@@ -22,11 +24,13 @@ from fortianalyzer_mcp.skills.dispatcher import faz_skill
 from fortianalyzer_mcp.skills.models import (
     SCHEMA_VERSION,
     EntityBehavior,
+    EstateContext,
     FeatureGap,
     HuntParams,
     HuntSweep,
     IndicatorSubject,
 )
+from fortianalyzer_mcp.tools import ueba_tools
 
 GET_ALERTS = "fortianalyzer_mcp.tools.event_tools.get_alerts"
 GET_TOP_THREATS = "fortianalyzer_mcp.tools.fortiview_tools.get_top_threats"
@@ -69,6 +73,9 @@ CROWD = [
     for i in range(1, 40)
 ]
 ESTATE = CROWD + [HOT_ENDPOINT]
+
+# The ADOM-wide count snapshot the Layer-1 estate reader returns.
+ENDPOINT_STATS = {"total-count": "40", "new-count": "2", "identified-count": "37"}
 
 ENDUSER = {"euid": 42, "euname": "chutter", "importance": "high"}
 BOTNET_ALERT = {
@@ -345,9 +352,16 @@ class TestHuntBehaviorPercentile:
 
 
 class TestHuntEstateContext:
-    async def test_estate_stats_absent_reader_degrades_to_gap(self):
-        # The estate-stats readers ship on a separate branch; absent here, the
-        # estate section is a gap (never a hard fail).
+    async def test_estate_stats_absent_reader_degrades_to_gap(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The estate-stats readers are optional: _hunt_estate imports them
+        # inside a try/except ImportError and the whole section degrades to a
+        # gap when they are missing (never a hard fail). Their absence is
+        # simulated here rather than inferred from the branch not carrying
+        # them, so this path keeps its coverage once the Layer-1 readers land.
+        monkeypatch.delattr(ueba_tools, "get_endpoint_stats", raising=False)
+        monkeypatch.delattr(ueba_tools, "get_enduser_stats", raising=False)
         with (
             t(GET_ENDPOINTS, return_value=ok(data=ESTATE)),
             t(GET_ALERTS, return_value=ok(data=[])),
@@ -355,6 +369,31 @@ class TestHuntEstateContext:
         ):
             result = await handlers.run_hunt(HuntParams(entity="epid:6676"))
         assert isinstance(result.estate, FeatureGap)
+        assert "not available in this build" in result.estate.reason
+
+    async def test_estate_stats_present_composes_context(self, monkeypatch: pytest.MonkeyPatch):
+        # With the readers importable the section is an EstateContext whose
+        # halves degrade one at a time, not a single gap. Injected for the
+        # same reason the absence is: the assertion then holds whether or not
+        # this branch carries Layer 1.
+        async def endpoint_stats(**_: Any) -> dict[str, Any]:
+            return ok(data=[ENDPOINT_STATS])
+
+        monkeypatch.setattr(ueba_tools, "get_endpoint_stats", endpoint_stats, raising=False)
+        monkeypatch.setattr(ueba_tools, "get_enduser_stats", endpoint_stats, raising=False)
+        with (
+            t(GET_ENDPOINTS, return_value=ok(data=ESTATE)),
+            t(GET_ALERTS, return_value=ok(data=[])),
+            t(QUERY_LOGS, return_value=logs_ok([])),
+        ):
+            result = await handlers.run_hunt(HuntParams(entity="epid:6676"))
+        assert isinstance(result.estate, EstateContext)
+        assert result.estate.endpoints == ENDPOINT_STATS
+        # An endpoint subject asks for no end-user denominator, so that half
+        # is a gap for want, not for failure.
+        assert isinstance(result.estate.endusers, FeatureGap)
+        assert "not requested" in result.estate.endusers.reason
+        assert result.estate.ranked_endpoint_total == len(ESTATE)
 
     async def test_estate_disabled(self):
         with (
