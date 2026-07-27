@@ -8,11 +8,15 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from pydantic import ValidationError as PydanticValidationError
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.instructions import build_instructions
+from fortianalyzer_mcp.query.filters import FilterCondition
 from fortianalyzer_mcp.tool_annotations import READ_ONLY_LOCAL, UNCONSTRAINED
 from fortianalyzer_mcp.utils.config import get_settings
+from fortianalyzer_mcp.utils.responses import error_response
+from fortianalyzer_mcp.utils.validation import ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +89,43 @@ def health_check() -> str:
     else:
         tool_info = "Discovery tools + dynamic execution"
     return f"FortiAnalyzer MCP Server is healthy (mode: {mode}, {tool_info})"
+
+
+def _coerce_structured_filters(raw: object) -> list[FilterCondition]:
+    """Validate a caller's ``filters`` into models, as FastMCP would have.
+
+    ``execute_advanced_tool`` invokes tool functions directly, so the protocol
+    layer that turns JSON arguments into typed parameters never runs and
+    ``filters`` arrives as raw dicts. The compilers are models-only by contract
+    (attribute access; see ``TestCompilerRequiresModelsNotDicts``), so without
+    this the dicts surfaced as an ``AttributeError`` that the tools' broad
+    handlers buried in a generic ``faz_operation_failed``. This mirrors full
+    mode's boundary: coerce before the tool runs, and reject a malformed
+    condition with a message about the condition.
+
+    Raises:
+        ValidationError: If ``raw`` is not a list, or an entry fails model
+            validation (unknown op, unknown key, non-dict entry).
+    """
+    if not isinstance(raw, list):
+        raise ValidationError(
+            "'filters' must be a list of conditions, each {field, op, value} -- got "
+            f"{type(raw).__name__}. Wrap the condition in a list: filters=[{{...}}]."
+        )
+    coerced: list[FilterCondition] = []
+    for index, item in enumerate(raw):
+        if isinstance(item, FilterCondition):
+            coerced.append(item)
+            continue
+        try:
+            coerced.append(FilterCondition.model_validate(item))
+        except PydanticValidationError as exc:
+            details = "; ".join(
+                f"{'.'.join(str(loc) for loc in err['loc']) or 'condition'}: {err['msg']}"
+                for err in exc.errors()
+            )
+            raise ValidationError(f"filters[{index}] is invalid: {details}") from exc
+    return coerced
 
 
 # Dynamic mode: lightweight discovery tools
@@ -231,7 +272,8 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
         Returns:
             Tool execution result
         """
-        params = parameters or {}
+        # Copied so the coercion below never mutates the caller's dict.
+        params = dict(parameters) if parameters else {}
 
         # Import tools dynamically and execute
         from fortianalyzer_mcp.tools import (
@@ -352,6 +394,17 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
                 "message": f"Unknown tool: {tool_name}",
                 "available_tools": list(tool_map.keys()),
             }
+
+        if params.get("filters") is not None:
+            try:
+                params["filters"] = _coerce_structured_filters(params["filters"])
+            except ValidationError as e:
+                return error_response(
+                    error="validation_error",
+                    message=e,
+                    operation="execute_advanced_tool",
+                    tool_name=tool_name,
+                )
 
         tool_func = tool_map[tool_name]
         return await tool_func(**params)
