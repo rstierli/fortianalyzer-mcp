@@ -38,7 +38,7 @@ This MCP server provides a comprehensive interface to FortiAnalyzer's capabiliti
 | **IOC Analysis** | Run IOC rescans, check license status, view rescan history |
 | **Device Management** | List/add/delete devices, manage device groups and VDOMs |
 | **System** | System status, HA status, ADOM management, task monitoring |
-| **Skills Layer** *(beta)* | `faz_skill` dispatcher: 14 opinionated multi-tool orchestrations across data-access, enrichment, and analysis tiers (incident correlation, triage, threat-intel, asset/identity lookups, risk scoring, full investigation) with validated, versioned output schemas — off by default |
+| **Skills Layer** *(beta)* | `faz_skill` dispatcher: 16 opinionated multi-tool orchestrations across data-access, enrichment, and analysis tiers (incident correlation, triage, threat-intel, asset/identity lookups, risk scoring, full investigation, deep root-cause investigation, proactive hunting) with validated, versioned output schemas — off by default |
 | **Data Masking** *(beta)* | Reversible FPE masking of IOC/PII fields (IPs, MACs, hostnames, usernames, domains, emails) in tool outputs, with automatic unmasking of tokens in tool arguments — off by default |
 
 ## Requirements
