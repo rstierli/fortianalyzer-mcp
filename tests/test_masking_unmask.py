@@ -123,6 +123,16 @@ class TestFilterExpressions:
 
         assert unmasker.unmask_filter(f'srcip !contain "{token}"') == 'srcip !contain "192.0.2.102"'
 
+    def test_like_operator_resolves_token_inside_wildcards(
+        self, unmasker: ArgUnmasker, engine: FPEEngine
+    ):
+        # `like` is the substring operator the server now emits; the masked
+        # token sits between % wildcards and must round-trip with them kept.
+        token = engine.mask_ip("192.0.2.102")
+
+        assert unmasker.unmask_filter(f'srcip like "%{token}%"') == 'srcip like "%192.0.2.102%"'
+        assert unmasker.unmask_filter(f'srcip like "{token}%"') == 'srcip like "192.0.2.102%"'
+
     @pytest.mark.parametrize(
         "expression",
         [

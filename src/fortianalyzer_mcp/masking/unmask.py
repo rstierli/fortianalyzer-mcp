@@ -67,7 +67,7 @@ logger = logging.getLogger(__name__)
 # field==value / field=value / field contain value, single or double quoted
 _FILTER_CLAUSE_RE = re.compile(
     r"(?P<field>[A-Za-z_][A-Za-z0-9_]*)"
-    r"\s*(?P<op>==|!=|<=|>=|=~|!~|<|>|=(?![=~])|~|!contain\b|\bcontain\b)\s*"
+    r"\s*(?P<op>==|!=|<=|>=|=~|!~|<|>|=(?![=~])|~|!contain\b|\bcontain\b|\blike\b)\s*"
     r"(?P<quote>[\"']?)(?P<value>[^\"'\s()]+)(?P=quote)"
 )
 _FILTER_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -235,15 +235,23 @@ class ArgUnmasker:
         def clause_sub(match: re.Match[str]) -> str:
             field = match.group("field")
             raw = match.group("value")
+            # ``like`` wraps the token in ``%`` wildcards (``field like "%tok%"``);
+            # resolve the token inside them and re-apply so the pattern holds.
+            lead, core, trail = "", raw, ""
+            if match.group("op").strip().lower() == "like":
+                wc = re.match(r"^(%*)(.*?)(%*)$", raw)
+                if wc:
+                    lead, core, trail = wc.group(1), wc.group(2), wc.group(3)
             if field.lower() in COMPOSITE_URL_FULL:
-                resolved = self.resolve_url(raw)
+                resolved = self.resolve_url(core)
             elif field.lower() in COMPOSITE_PREFIXED:
-                resolved = self.resolve_prefixed(raw)
+                resolved = self.resolve_prefixed(core)
             else:
                 vtype = FIELD_TYPES.get(field.lower())
-                resolved = self.resolve_scalar(raw, vtype)
-            if resolved == raw:
+                resolved = self.resolve_scalar(core, vtype)
+            if resolved == core:
                 return match.group(0)
+            resolved = f"{lead}{resolved}{trail}"
             if _FILTER_CONTROL_RE.search(resolved):
                 logger.warning(
                     "resolved filter value has control characters; token left unresolved"
