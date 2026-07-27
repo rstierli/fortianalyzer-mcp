@@ -628,7 +628,7 @@ the summed per-slice total.
 
 With `FAZ_SKILLS_ENABLED=true`, one additional tool is registered: `faz_skill(skill, params)` — a dispatcher for opinionated multi-tool orchestrations that return validated, versioned structured results (`schema_version` in every response). Off by default; no behavior change unless enabled.
 
-This is **Waves 1–2** of the skills roadmap — **14 of 18 planned skills**. Wave 3 (behavioral analysis: hunt, root-cause, impact) is designed but not yet implemented; see [RFC #44](https://github.com/rstierli/fortianalyzer-mcp/issues/44). The 14 shipped, grouped by tier:
+This is **Waves 1–3** of the skills roadmap — **16 skills**. Wave 3 adds behavioral analysis (`investigate_deep`, `hunt`) on top of two new UEBA `/stats` readers (`get_endpoint_stats`, `get_enduser_stats`) that supply estate-scale denominators; see [RFC #44](https://github.com/rstierli/fortianalyzer-mcp/issues/44). The 16, grouped by tier:
 
 | Skill | Tier | What it does |
 |---|---|---|
@@ -646,6 +646,8 @@ This is **Waves 1–2** of the skills roadmap — **14 of 18 planned skills**. W
 | `triage` | analysis | Evidence bundle + deterministic severity-derived assessment for one alert or incident |
 | `incident_summary` | analysis | Structured incident summary: related alerts with evidence logs, threat landscape, timeline |
 | `investigate` | analysis | One consolidated investigation of an alert/incident — triage + summary + indicator enrichment + asset/identity context, composed from the skills above; each section degrades independently |
+| `investigate_deep` | analysis | Deep reactive investigation: the `investigate` bundle plus a time-ordered backward root-cause chain (deterministic, no attribution) and a forward blast-radius — lateral log activity + affected assets per traced entity (slot-capped, windowed) |
+| `hunt` | analysis | Proactive hunt: sweep the estate for an indicator (IP/URL/domain/hash), TTP or raw filter (verbatim matches + SOAR reputation) and/or profile one entity (`epid:`/`euid:`) for percentile-calibrated abnormal behaviour (risk rank + vuln-stats + behavioural detections) |
 
 Every skill returns a versioned pydantic result (`schema_version` in every response), takes `extra="forbid"` params, and is read-only. Enrichment/context sections degrade independently to a documented `FeatureGap` marker when a data source is unlicensed or unavailable — only a failed *subject* fails the skill.
 
@@ -710,6 +712,19 @@ faz_skill(skill="risk_assessment", params={"euid": 3})                   // tran
 ```jsonc
 faz_skill(skill="investigate", params={"incident_id": "IN00000019"})
 faz_skill(skill="investigate", params={"alert_id": "202606121000000041", "detail_level": "extended"})
+```
+
+**`investigate_deep`** — deep reactive investigation with a backward root-cause chain + forward blast-radius (`incident_id` **or** `alert_id`, or a forward-only `entity`):
+```jsonc
+faz_skill(skill="investigate_deep", params={"incident_id": "IN00000019"})
+faz_skill(skill="investigate_deep", params={"entity": "epid:1001", "impact_logtypes": ["traffic", "dns"]})  // forward-only
+```
+
+**`hunt`** — proactive hunt (sweep) and/or an entity behaviour profile (exactly one subject: `indicator`, `entity`, or `filter`/`ttp`):
+```jsonc
+faz_skill(skill="hunt", params={"indicator": {"value": "203.0.113.7", "type": "IP"}})   // sweep the estate for an IOC
+faz_skill(skill="hunt", params={"entity": "epid:1001"})                                  // percentile-calibrated behaviour profile
+faz_skill(skill="hunt", params={"filter": "srcip==10.0.0.5 and dstport==4444", "ttp": "C2 beacon"})  // hypothesis hunt
 ```
 
 ### How an analyst uses skills
