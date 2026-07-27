@@ -1375,3 +1375,67 @@ class TestWave3SkillAssemblyKeys:
         assert PEER_IP not in str(masked)
         token = masked["rows"][0]["srcip"]
         assert masked["sweep"]["pivot_filter"] == f'srcip=="{token}"'
+
+
+class TestCompiledFilterEntries:
+    """``filter_applied`` echoed as compiled ``[field, op, value]`` entries.
+
+    Argument unmasking runs at the wrapper boundary, so a tool that compiles a
+    caller's structured filter holds the RESOLVED identifier by the time it
+    builds its entries. Echoing them untyped hands the raw value back to the
+    model, unlocked by the model's own token, and TEXT alone cannot stop it:
+    pass 2 can only substitute values this response mapped or match an
+    IPv4/MAC/email shape, so an entry survives in clear exactly when the query
+    matched nothing.
+    """
+
+    def test_a_hostname_entry_carries_the_typed_token(self, masker: OutputMasker):
+        expected = masker.mask_result({"hostname": SRC_NAME})["hostname"]
+        masked = masker.mask_result(
+            {"count": 0, "devices": [], "filter_applied": [["hostname", "==", SRC_NAME]]}
+        )
+
+        assert SRC_NAME not in str(masked)
+        assert masked["filter_applied"] == [["hostname", "==", expected]]
+
+    def test_a_username_entry_carries_the_typed_token(self, masker: OutputMasker):
+        expected = masker.mask_result({"user": ANALYST})["user"]
+        masked = masker.mask_result({"count": 0, "filter_applied": [["user", "==", ANALYST]]})
+
+        assert masked["filter_applied"] == [["user", "==", expected]]
+
+    def test_an_ipv6_entry_masks_where_the_text_scan_cannot(self, masker: OutputMasker):
+        # The pass-2 IOC scan is IPv4 only, so this one is invisible to it.
+        ipv6 = "2001:db8::7"
+        expected = masker.mask_result({"srcip": ipv6})["srcip"]
+        masked = masker.mask_result({"count": 0, "filter_applied": [["srcip", "==", ipv6]]})
+
+        assert ipv6 not in str(masked)
+        assert masked["filter_applied"] == [["srcip", "==", expected]]
+
+    def test_an_ipv4_entry_is_masked_exactly_once(self, masker: OutputMasker):
+        # A masked IPv4 is still a valid IPv4, so an entry masked in pass 1 and
+        # then walked again by the free-text scan would come back double
+        # masked. Equality with the typed token is what pins single masking.
+        expected = masker.mask_result({"srcip": PEER_IP})["srcip"]
+        masked = masker.mask_result({"count": 0, "filter_applied": [["srcip", "==", PEER_IP]]})
+
+        assert masked["filter_applied"] == [["srcip", "==", expected]]
+
+    def test_the_string_form_keeps_its_text_treatment(self, masker: OutputMasker):
+        expected = masker.mask_result({"srcip": PEER_IP})["srcip"]
+        masked = masker.mask_result({"filter_applied": f"srcip=={PEER_IP}"})
+
+        assert masked["filter_applied"] == f"srcip=={expected}"
+
+    def test_an_untypeable_field_falls_back_to_the_text_scan(self, masker: OutputMasker):
+        # No type to mask by, so the entry is not guessed at; the IOC scan
+        # still catches an address shape rather than passing it through.
+        masked = masker.mask_result({"filter_applied": [["mystery", "==", PEER_IP]]})
+
+        assert PEER_IP not in str(masked)
+
+    def test_shapes_that_are_not_entries_are_left_alone(self, masker: OutputMasker):
+        masked = masker.mask_result({"filter_applied": ["a note", ["only", "two"]]})
+
+        assert masked["filter_applied"] == ["a note", ["only", "two"]]

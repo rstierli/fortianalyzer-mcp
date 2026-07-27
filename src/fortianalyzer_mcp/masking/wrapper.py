@@ -58,6 +58,7 @@ from typing import Any
 
 from fortianalyzer_mcp.masking.fields import (
     COMPOSITE_DEVICE_VDOM,
+    COMPOSITE_FILTER_ENTRIES,
     COMPOSITE_JSON,
     COMPOSITE_PREFIXED,
     COMPOSITE_TARGET,
@@ -773,7 +774,9 @@ class OutputMasker:
         if isinstance(obj, dict):
             out: dict[str, Any] = {}
             for key, value in obj.items():
-                if self._field_types.get(key.lower()) == TEXT:
+                if key.lower() in COMPOSITE_FILTER_ENTRIES and isinstance(value, list):
+                    out[key] = self._mask_filter_entries(value, mapping)
+                elif self._field_types.get(key.lower()) == TEXT:
                     out[key] = self._mask_text_tree(value, mapping)
                 else:
                     out[key] = self._mask_free_text(value, mapping)
@@ -781,6 +784,47 @@ class OutputMasker:
         if isinstance(obj, list):
             return [self._mask_free_text(item, mapping) for item in obj]
         return obj
+
+    def _mask_filter_entries(self, value: Any, mapping: dict[str, str]) -> Any:
+        """``filter_applied`` as compiled ``[field, op, value]`` entries.
+
+        A tool that compiles a structured filter echoes what it actually sent,
+        which is the resolved value: argument unmasking runs at the wrapper
+        boundary, so by the time the tool body builds its entries the token the
+        caller passed is already the real identifier. Echoed untyped, that
+        hands the raw value straight back to the model, and it is the caller's
+        own token that unlocked it.
+
+        TEXT alone cannot close it. Pass 2 substitutes values this response
+        mapped and scans for IPv4/MAC/email shapes, so an entry survives in
+        clear whenever the query matched nothing, which is exactly when the
+        mapping is empty. A hostname, a username or an IPv6 address then rides
+        back out untouched.
+
+        The entry states its own type, so use it: mask the value by the type of
+        the field named beside it, the inverse of the way arguments are
+        resolved on the way in. This runs in pass 2 rather than pass 1
+        deliberately: pass 2 is the only pass that touches a TEXT key, and a
+        masked IPv4 is itself a valid IPv4, so masking in pass 1 and then
+        letting the free-text scan walk the same entries would mask it twice.
+
+        Anything that is not a three-part entry, or whose field carries no
+        type, falls back to the ordinary free-text treatment rather than being
+        guessed at.
+        """
+        out: list[Any] = []
+        for entry in value:
+            if not isinstance(entry, list | tuple) or len(entry) != 3:
+                out.append(self._mask_text_tree(entry, mapping))
+                continue
+            field, op, raw = entry
+            vtype = self._field_types.get(field.lower()) if isinstance(field, str) else None
+            if vtype is None or vtype == TEXT or not isinstance(raw, str):
+                out.append(self._mask_text_tree(list(entry), mapping))
+                continue
+            masked = self._mask_scalar(vtype, raw, mapping)
+            out.append([field, op, masked] if isinstance(entry, list) else (field, op, masked))
+        return out
 
     def _mask_text_tree(self, value: Any, mapping: dict[str, str]) -> Any:
         if isinstance(value, str):

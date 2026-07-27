@@ -305,6 +305,23 @@ COMPOSITE_PREFIXED = ("groupby1", "groupby2")
 COMPOSITE_JSON = ("grpby",)
 COMPOSITE_TARGET = ("target",)
 
+#: ``filter_applied`` when a tool echoes a *compiled* filter as
+#: ``[[field, op, value], ...]`` rather than as one string. Argument
+#: unmasking runs at the wrapper boundary, so a tool that compiles a
+#: caller's structured filter is holding the RESOLVED identifier by the time
+#: it builds these entries; echoing them untyped hands the raw value back to
+#: the model, unlocked by the model's own token.
+#:
+#: TEXT is not enough on its own. Pass 2 substitutes values this response
+#: mapped and scans for IPv4/MAC/email shapes, so an entry survives in clear
+#: exactly when the query matched nothing and the mapping is therefore empty:
+#: a hostname, a username or an IPv6 address rides straight back out. Each
+#: entry names its own field, so ``wrapper._mask_filter_entries`` masks the
+#: value by that field's type instead, the inverse of the way a structured
+#: condition is resolved on the way in. The string form of the key keeps its
+#: ordinary TEXT treatment.
+COMPOSITE_FILTER_ENTRIES = ("filter_applied",)
+
 #: fortiview ``top-threats`` pair, masked together by
 #: ``wrapper._mask_threat_pair``: a non-empty ``obf_url`` marks the row as
 #: a browsed-domain threat; ``obf_url`` itself is the ``[dot]``-escaped
