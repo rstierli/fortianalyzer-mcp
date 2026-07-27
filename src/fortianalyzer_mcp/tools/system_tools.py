@@ -7,9 +7,13 @@ import logging
 from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
+from fortianalyzer_mcp.query.fields import TASK_STATE_CODES
+from fortianalyzer_mcp.query.filters import FilterCondition, compile_to_array
 from fortianalyzer_mcp.server import get_faz_client, mcp
-from fortianalyzer_mcp.utils.responses import redact
+from fortianalyzer_mcp.tool_annotations import DESTRUCTIVE, READ_ONLY
+from fortianalyzer_mcp.utils.responses import error_response, redact
 from fortianalyzer_mcp.utils.validation import (
+    ValidationError,
     get_default_adom,
     sanitize_for_logging,
     validate_adom,
@@ -20,21 +24,10 @@ logger = logging.getLogger(__name__)
 
 # FAZ /task/task returns ``state`` as a numeric code on the wire (FNDN task
 # schema); some builds/endpoints use the string names instead. Keep both forms
-# working by normalizing to the lowercase name.
-_TASK_STATE_NAMES = {
-    0: "pending",
-    1: "running",
-    2: "cancelling",
-    3: "cancelled",
-    4: "done",
-    5: "error",
-    6: "aborting",
-    7: "aborted",
-    8: "warning",
-    9: "to_continue",
-    10: "unknown",
-}
-_TASK_STATE_CODES = {name: code for code, name in _TASK_STATE_NAMES.items()}
+# working by normalizing to the lowercase name. The name<->code table itself is
+# single-sourced from query.fields, so the legacy filter_state parameter and
+# the structured ``filters`` path translate identically by construction.
+_TASK_STATE_NAMES = {code: name for name, code in TASK_STATE_CODES.items()}
 _TASK_TERMINAL_STATES = {"done", "error", "cancelled", "aborted", "warning"}
 
 
@@ -62,7 +55,7 @@ def _get_client() -> FortiAnalyzerClient:
 # =============================================================================
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_system_status() -> dict[str, Any]:
     """Get FortiAnalyzer system status and version information.
 
@@ -97,7 +90,7 @@ async def get_system_status() -> dict[str, Any]:
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_ha_status() -> dict[str, Any]:
     """Get FortiAnalyzer High Availability (HA) status.
 
@@ -134,7 +127,7 @@ async def get_ha_status() -> dict[str, Any]:
 # =============================================================================
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def list_adoms(
     fields: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -143,14 +136,27 @@ async def list_adoms(
     ADOMs are used to partition FortiAnalyzer into separate management
     domains, each with its own devices, logs, and configurations.
 
+    Pass `fields` unless you genuinely need the full object. The default is
+    every field the appliance defines -- around 35 per ADOM, most of them
+    empty placeholders (unused IPv6 DNS slots, blank descriptions,
+    tab_status, logview_customize). fields=["name", "state"] answers "which
+    ADOMs exist and are they enabled" for a fraction of the response.
+
     Args:
-        fields: Specific fields to return (optional, returns all if not specified)
+        fields: Specific fields to return. Recommended: ["name", "state"].
+            Omitting this returns every field, which is rarely what you want.
 
     Returns:
         dict: ADOM list with keys:
             - status: "success" or "error"
             - count: Number of ADOMs
-            - adoms: List of ADOM objects with name, desc, state, etc.
+            - adoms: List of ADOM objects with name, desc, state, etc. The
+              appliance always includes ``oid`` in each object, even under a
+              ``fields`` projection that does not request it. ``state`` is the
+              appliance's numeric enable flag -- live 7.6.x returns 1 for an
+              enabled ADOM; Fortinet publishes no legend for other values, so
+              treat anything else as not-enabled rather than guessing a
+              meaning.
             - message: Error message if failed
 
     Example:
@@ -171,7 +177,7 @@ async def list_adoms(
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_adom(
     name: str,
     include_details: bool = False,
@@ -212,7 +218,7 @@ async def get_adom(
 # =============================================================================
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def list_devices(
     adom: str | None = None,
     fields: list[str] | None = None,
@@ -222,9 +228,18 @@ async def list_devices(
     FortiAnalyzer collects logs from FortiGate and other Fortinet devices.
     This lists all devices configured to send logs to this ADOM.
 
+    Pass `fields` unless you genuinely need the full object. The default is
+    roughly 60 fields per device, including credential keys returned as
+    "***REDACTED***" placeholders and unused mgmt.__data zero-arrays.
+    fields=["name", "ip", "os_ver", "platform_str"] covers most inventory
+    questions; add "sn" for serial numbers, which is also what `device`
+    filters on elsewhere in this server.
+
     Args:
         adom: ADOM name (default: from config DEFAULT_ADOM)
-        fields: Specific fields to return (optional)
+        fields: Specific fields to return. Recommended:
+            ["name", "ip", "os_ver", "platform_str"]. Omitting this returns
+            every field, which is rarely what you want.
 
     Returns:
         dict: Device list with keys:
@@ -254,7 +269,7 @@ async def list_devices(
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_device(
     name: str,
     adom: str | None = None,
@@ -300,9 +315,10 @@ async def get_device(
 # =============================================================================
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def list_tasks(
     filter_state: str | None = None,
+    filters: list[FilterCondition] | None = None,
 ) -> dict[str, Any]:
     """List all tasks in FortiAnalyzer.
 
@@ -310,19 +326,26 @@ async def list_tasks(
     log queries, device synchronization, and other long-running processes.
 
     Args:
-        filter_state: Filter by task state (optional):
-            - "pending": Not started
-            - "running": Currently executing
-            - "done": Completed
-            - "error": Failed
-            - "cancelling": Being cancelled
-            - "cancelled": Cancelled
+        filter_state: Filter by task state (optional). Valid names, mapped to
+            the numeric codes the appliance stores: pending, running,
+            cancelling, cancelled, done, error, aborting, aborted, warning,
+            to_continue, unknown.
+        filters: Structured conditions, each {field, op, value}, ANDed with
+            filter_state. Fields: id, title, src, user, adom, state, percent,
+            num_done, num_err, num_lines, num_warn, start_tm, end_tm.
+            Ops: eq, ne, gt, gte, lt, lte, contains, not_in. Not supported
+            here (hard error): "in" (issue one call per value) and
+            "not_contains" (no spelling works against this endpoint; use "ne"
+            with exact values or exclude matches yourself).
+            Example: [{"field": "state", "op": "eq", "value": "running"}]
 
     Returns:
         dict: Task list with keys:
             - status: "success" or "error"
             - count: Number of tasks
             - tasks: List of task objects with id, state, progress, etc.
+            - filter_applied: The compiled filter entries sent to the
+              appliance, or None when nothing narrowed the listing
             - message: Error message if failed
 
     Example:
@@ -340,29 +363,39 @@ async def list_tasks(
         # Build filter if state specified. FAZ stores state as a numeric code,
         # so translate the documented state names before filtering; a name the
         # enum doesn't know is rejected instead of silently matching nothing.
-        filter_list = None
+        entries: list[list[Any]] = []
         if filter_state:
-            state_code = _TASK_STATE_CODES.get(filter_state.strip().lower())
+            state_code = TASK_STATE_CODES.get(filter_state.strip().lower())
             if state_code is None:
-                valid = ", ".join(sorted(_TASK_STATE_CODES))
-                return {
-                    "status": "error",
-                    "message": f"Invalid filter_state '{filter_state}'. Must be one of: {valid}",
-                }
-            filter_list = [["state", "==", state_code]]
+                valid = ", ".join(sorted(TASK_STATE_CODES))
+                return error_response(
+                    error="validation_error",
+                    message=f"Invalid filter_state '{filter_state}'. Must be one of: {valid}",
+                    operation="list_tasks",
+                )
+            entries.append(["state", "==", state_code])
+        if filters:
+            structured, _ = compile_to_array(filters, "task")
+            entries.extend(structured)
+        filter_list = entries or None
 
         tasks = await client.list_tasks(filter=filter_list)
         return {
             "status": "success",
             "count": len(tasks),
             "tasks": tasks,
+            # Echo what was actually sent so a caller can verify the compiled
+            # filter instead of inferring it from which rows came back.
+            "filter_applied": filter_list,
         }
+    except ValidationError as e:
+        return error_response(error="validation_error", message=e, operation="list_tasks")
     except Exception as e:
         logger.error(f"Failed to list tasks: {e}")
-        return {"status": "error", "message": redact(str(e))}
+        return error_response(error="faz_operation_failed", message=e, operation="list_tasks")
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_task(
     task_id: int,
     include_details: bool = False,
@@ -404,7 +437,7 @@ async def get_task(
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def wait_for_task(
     task_id: int,
     timeout: int = 300,
@@ -477,7 +510,7 @@ async def wait_for_task(
 # =============================================================================
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_api_ratelimit() -> dict[str, Any]:
     """Get the current API rate limiting configuration.
 
@@ -512,7 +545,7 @@ async def get_api_ratelimit() -> dict[str, Any]:
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def update_api_ratelimit(
     read_limit: int | None = None,
     write_limit: int | None = None,

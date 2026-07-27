@@ -11,7 +11,6 @@ aggregate results for policy hardening workflows.
 
 import asyncio
 import logging
-import re
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -19,6 +18,7 @@ from datetime import datetime, timedelta
 from typing import Any, cast
 
 from fortianalyzer_mcp.server import get_faz_client, mcp
+from fortianalyzer_mcp.tool_annotations import READ_ONLY
 from fortianalyzer_mcp.tools.log_tools import (
     _clamp_limit,
     _run_logsearch_page,
@@ -33,6 +33,7 @@ from fortianalyzer_mcp.utils.validation import (
     ValidationError,
     build_device_filter,
     get_default_adom,
+    sanitize_filter_value,
     validate_adom,
 )
 
@@ -51,9 +52,6 @@ DEFAULT_TOP_N = 10
 
 # Valid action values for FortiGate traffic logs
 VALID_ACTIONS = frozenset({"accept", "deny", "close", "drop", "ip-conn", "timeout"})
-
-# Regex for safe unquoted filter values: alphanumeric, dots, hyphens
-_SAFE_UNQUOTED_RE = re.compile(r"^[a-zA-Z0-9.\-]+$")
 
 
 # =============================================================================
@@ -105,33 +103,6 @@ def validate_policy_ids(policy_ids: list[int]) -> list[int]:
         if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
             raise ValidationError(f"Invalid policy ID: {pid}. Must be a positive integer.")
     return policy_ids
-
-
-def sanitize_filter_value(value: str) -> str:
-    """Sanitize a value for use in FAZ log filter expressions.
-
-    Safe alphanumeric values (including dots and hyphens) are returned as-is.
-    All other values are quoted with internal backslashes and double quotes escaped.
-
-    Args:
-        value: Raw filter value.
-
-    Returns:
-        Sanitized value safe for use in filter expressions.
-
-    Raises:
-        ValidationError: If value is empty.
-    """
-    if not value:
-        raise ValidationError("Filter value cannot be empty")
-    value = value.strip()
-    if not value:
-        raise ValidationError("Filter value cannot be empty after stripping")
-    if _SAFE_UNQUOTED_RE.match(value):
-        return value
-    # Escape backslashes first, then double quotes, then wrap in quotes
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
 
 
 # =============================================================================
@@ -734,7 +705,7 @@ async def _run_bounded_policy_analysis(
 # =============================================================================
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_policy_traffic_profile(
     adom: str | None = None,
     device: str | None = None,
@@ -748,6 +719,16 @@ async def get_policy_traffic_profile(
     Queries traffic logs filtered by policy ID and aggregates top destination
     ports, services, and applications. Useful for understanding what traffic
     a policy is actually handling.
+
+    Prefer this over query_logs/search_traffic_logs for any per-policy volume
+    question: aggregation happens during the scan, so the answer costs a
+    summary rather than thousands of rows. Siblings: get_policy_port_analysis
+    (port detail only) and get_policy_protocol_summary (protocol mix). Drop to
+    search_traffic_logs only when you need the individual rows.
+
+    Check `is_exact` before quoting numbers. When it is False the scan hit a
+    row cap, `analysis_mode` is "bounded_sample", and `total_hits` is a floor
+    rather than a count -- see `total_hits_is_known`/`total_hit_source`.
 
     Args:
         adom: ADOM name (default: from config DEFAULT_ADOM)
@@ -801,7 +782,7 @@ async def get_policy_traffic_profile(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_policy_port_analysis(
     adom: str | None = None,
     device: str | None = None,
@@ -871,7 +852,7 @@ async def get_policy_port_analysis(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_policy_protocol_summary(
     adom: str | None = None,
     device: str | None = None,

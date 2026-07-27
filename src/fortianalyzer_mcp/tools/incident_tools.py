@@ -9,6 +9,7 @@ from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.server import get_faz_client, mcp
+from fortianalyzer_mcp.tool_annotations import CREATES, DESTRUCTIVE, READ_ONLY
 from fortianalyzer_mcp.utils.responses import redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import (
@@ -54,7 +55,7 @@ async def _parse_time_range(time_range: str) -> dict[str, str]:
     return parse_time_range(time_range, faz_tz=faz_tz)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_incidents(
     adom: str | None = None,
     time_range: str = "7-day",
@@ -118,7 +119,7 @@ async def get_incidents(
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_incident(
     incident_id: str,
     adom: str | None = None,
@@ -161,7 +162,7 @@ async def get_incident(
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_incident_count(
     adom: str | None = None,
     time_range: str = "7-day",
@@ -205,7 +206,7 @@ async def get_incident_count(
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=CREATES)
 async def create_incident(
     endpoint: str,
     category: str,
@@ -305,7 +306,7 @@ async def create_incident(
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def update_incident(
     incident_id: str,
     adom: str | None = None,
@@ -375,7 +376,7 @@ async def update_incident(
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_incident_stats(
     adom: str | None = None,
     time_range: str = "30-day",

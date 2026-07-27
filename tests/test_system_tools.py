@@ -1,8 +1,12 @@
 """Tests for FortiAnalyzer system tools."""
 
+from typing import Any
+
 import pytest
 
+import fortianalyzer_mcp.tools.system_tools as system_tools
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
+from fortianalyzer_mcp.query.filters import FilterCondition
 
 
 class TestSystemTools:
@@ -84,3 +88,68 @@ class TestSystemTools:
         result = await mock_client_configured.get_task(1)
         assert result["title"] == "Log search"
         assert result["percent"] == 100
+
+
+class TestListTasksStructuredFilters:
+    """The task vocabulary coerces state names exactly as filter_state did."""
+
+    class FakeClient:
+        """Captures the filter list_tasks hands to the client."""
+
+        def __init__(self) -> None:
+            self.captured: list[list[Any]] | None = None
+
+        async def list_tasks(self, filter: list[list[Any]] | None = None) -> list[dict[str, Any]]:
+            self.captured = filter
+            return []
+
+    def _install(self, monkeypatch: pytest.MonkeyPatch) -> FakeClient:
+        fake = self.FakeClient()
+        monkeypatch.setattr(system_tools, "_get_client", lambda: fake)
+        return fake
+
+    async def test_state_name_is_coerced_to_its_code(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = self._install(monkeypatch)
+
+        await system_tools.list_tasks(
+            filters=[FilterCondition(field="state", op="eq", value="running")]
+        )
+
+        assert fake.captured == [["state", "==", 1]]
+
+    async def test_legacy_filter_state_still_works(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = self._install(monkeypatch)
+
+        await system_tools.list_tasks(filter_state="done")
+
+        assert fake.captured == [["state", "==", 4]]
+
+    async def test_response_echoes_the_compiled_filter(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An LLM caller can verify what was sent without live-data inference."""
+        self._install(monkeypatch)
+
+        result = await system_tools.list_tasks(filter_state="running")
+
+        assert result["filter_applied"] == [["state", "==", 1]]
+
+    async def test_no_filter_echoes_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._install(monkeypatch)
+
+        result = await system_tools.list_tasks()
+
+        assert result["filter_applied"] is None
+
+    async def test_invalid_state_returns_the_standard_envelope(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Error handlers normalised on the query_logs contract must not crash here."""
+        self._install(monkeypatch)
+
+        result = await system_tools.list_tasks(filter_state="sideways")
+
+        assert result["status"] == "error"
+        assert result["error"] == "validation_error"
+        assert result["operation"] == "list_tasks"
+        assert result["retry_count"] == 0

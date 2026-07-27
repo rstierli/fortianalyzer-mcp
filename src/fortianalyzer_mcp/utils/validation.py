@@ -656,6 +656,13 @@ def sanitize_filter_value(value: str, field: str = "filter value") -> str:
     wrapped in double quotes so that quote/operator/boolean characters in
     attacker-controlled input cannot rewrite the surrounding filter.
 
+    Control characters are refused outright rather than quoted, matching
+    ``validate_pcapurl`` below. Quoting them is not an injection risk -- a
+    quoted newline cannot terminate its clause, and FortiAnalyzer rejects the
+    whole expression with ``Invalid filter`` when one arrives (checked live on
+    7.6.6) -- but it fails at the appliance after a round trip instead of at the
+    protocol boundary, which is the pattern this layer exists to remove.
+
     Args:
         value: Raw filter value.
         field: Field name used in the error message.
@@ -664,13 +671,18 @@ def sanitize_filter_value(value: str, field: str = "filter value") -> str:
         Sanitized value safe for interpolation into a filter expression.
 
     Raises:
-        ValidationError: If the value is empty.
+        ValidationError: If the value is empty or holds a control character.
     """
     if not value:
         raise ValidationError(f"{field} cannot be empty")
     value = value.strip()
     if not value:
         raise ValidationError(f"{field} cannot be empty after stripping")
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
+        raise ValidationError(
+            f"{field} contains a control character. FortiAnalyzer rejects the whole "
+            "filter expression when one reaches it, so it is refused here instead."
+        )
     if _SAFE_UNQUOTED_FILTER_RE.match(value):
         return value
     # Escape backslashes first, then double quotes, then wrap in quotes.

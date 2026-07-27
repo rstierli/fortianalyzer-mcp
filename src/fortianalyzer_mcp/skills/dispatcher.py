@@ -18,6 +18,7 @@ from fortianalyzer_mcp.server import mcp
 from fortianalyzer_mcp.skills.catalog import SKILLS, catalogue
 from fortianalyzer_mcp.skills.handlers import SkillExecutionError
 from fortianalyzer_mcp.skills.models import SCHEMA_VERSION
+from fortianalyzer_mcp.tool_annotations import READ_ONLY
 from fortianalyzer_mcp.utils.responses import error_response, redact
 
 logger = logging.getLogger(__name__)
@@ -52,7 +53,7 @@ def _redact_warnings(node: Any) -> Any:
     return node
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def faz_skill(skill: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
     """Run a FortiAnalyzer skill: an opinionated multi-tool orchestration
     returning a validated, structured result.

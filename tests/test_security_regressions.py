@@ -70,7 +70,10 @@ class TestDeviceCredentialSanitization:
     ) -> None:
         class FakeClient:
             async def list_devices(
-                self, adom: str, filter: list[Any] | None = None
+                self,
+                adom: str,
+                filter: list[Any] | None = None,
+                fields: list[str] | None = None,
             ) -> list[dict[str, Any]]:
                 return [dict(DEVICE_WITH_CREDS)]
 

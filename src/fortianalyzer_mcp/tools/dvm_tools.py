@@ -9,8 +9,11 @@ import logging
 from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
+from fortianalyzer_mcp.query.fields import coerce_value, get_vocabulary
+from fortianalyzer_mcp.query.filters import FilterCondition, compile_to_array
 from fortianalyzer_mcp.server import get_faz_client, mcp
-from fortianalyzer_mcp.utils.responses import redact
+from fortianalyzer_mcp.tool_annotations import CREATES, DESTRUCTIVE, READ_ONLY
+from fortianalyzer_mcp.utils.responses import error_response, redact
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
     get_default_adom,
@@ -35,7 +38,7 @@ def _get_client() -> FortiAnalyzerClient:
 # =============================================================================
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def list_device_groups(
     adom: str | None = None,
 ) -> dict[str, Any]:
@@ -73,7 +76,7 @@ async def list_device_groups(
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def list_device_vdoms(
     device: str,
     adom: str | None = None,
@@ -120,7 +123,7 @@ async def list_device_vdoms(
 # =============================================================================
 
 
-@mcp.tool()
+@mcp.tool(annotations=CREATES)
 async def add_device(
     adom: str,
     name: str,
@@ -232,7 +235,7 @@ async def add_device(
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def delete_device(
     adom: str,
     device: str,
@@ -284,7 +287,7 @@ async def delete_device(
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=CREATES)
 async def add_devices_bulk(
     adom: str,
     devices: list[dict[str, Any]],
@@ -360,7 +363,7 @@ async def add_devices_bulk(
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def delete_devices_bulk(
     adom: str,
     devices: list[str],
@@ -424,7 +427,7 @@ async def delete_devices_bulk(
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_device_info(
     device: str,
     adom: str | None = None,
@@ -474,13 +477,15 @@ async def get_device_info(
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def search_devices(
     adom: str | None = None,
     name_filter: str | None = None,
     platform_filter: str | None = None,
     os_version_filter: str | None = None,
     connection_status: str | None = None,
+    filters: list[FilterCondition] | None = None,
+    fields: list[str] | None = None,
 ) -> dict[str, Any]:
     """Search for devices with filters.
 
@@ -489,13 +494,39 @@ async def search_devices(
         name_filter: Filter by device name (partial match)
         platform_filter: Filter by platform type
         os_version_filter: Filter by OS version
-        connection_status: Filter by connection status ("up", "down")
+        connection_status: Filter by connection status ("up", "down").
+            Caution: FortiAnalyzer commonly stores conn_status 0 ("unknown")
+            for log-only devices, so filtering "up"/"down" can match nothing
+            even when every device is healthy and logging. Check the raw
+            conn_status values in an unfiltered call before relying on this.
+        filters: Structured conditions, each {field, op, value}, ANDed with the
+            narrow parameters above. Fields: name, ip, sn, hostname, desc,
+            os_ver, mr, patch, platform_str, conn_status, dev_status,
+            mgmt_mode, adm_usr, vdom, hdisk_size, build.
+            Ops: eq, ne, gt, gte, lt, lte, contains, not_in. Not supported
+            here (hard error): "in" (issue one call per value) and
+            "not_contains" (no spelling works against this endpoint; use "ne"
+            with exact values or exclude matches yourself).
+            Aliases accepted for field names: device_name (name),
+            serial/serial_number (sn), os_version (os_ver),
+            platform (platform_str), connection_status (conn_status),
+            description (desc).
+            Example: [{"field": "os_ver", "op": "contains", "value": "7.6"}]
+        fields: Specific fields to return per device, e.g.
+            ["name", "ip", "os_ver", "platform_str"]. Omitting this returns
+            every field the appliance defines -- roughly 60 per device, most
+            empty placeholders -- so pass a projection unless you genuinely
+            need the full object.
 
     Returns:
         dict: Search results with keys:
             - status: "success" or "error"
             - count: Number of matching devices
-            - devices: List of matching device objects
+            - devices: List of matching device objects. The appliance always
+              includes ``oid`` in each object, even under a ``fields``
+              projection that does not request it.
+            - filter_applied: The compiled filter entries sent to the
+              appliance, or None when nothing narrowed the search
             - message: Error message if failed
 
     Example:
@@ -509,32 +540,44 @@ async def search_devices(
         adom = validate_adom(adom or get_default_adom())
         client = _get_client()
 
-        # Build filter list
-        filters: list[list[Any]] = []
+        # Build filter list. Substring matching is ``like`` with % wildcards:
+        # the documented ``contain`` spelling is accepted by live dvmdb and
+        # silently matches zero rows, which made every one of these narrow
+        # parameters return an empty result against a populated fleet.
+        entries: list[list[Any]] = []
         if name_filter:
-            filters.append(["name", "contain", name_filter])
+            entries.append(["name", "like", f"%{name_filter}%"])
         if platform_filter:
-            filters.append(["platform_str", "contain", platform_filter])
+            entries.append(["platform_str", "like", f"%{platform_filter}%"])
         if os_version_filter:
-            filters.append(["os_ver", "contain", os_version_filter])
+            entries.append(["os_ver", "like", f"%{os_version_filter}%"])
         if connection_status:
-            # DVMDB conn_status enum: 0=unknown, 1=up, 2=down. Reject anything
-            # else instead of silently coercing typos to a wrong filter.
-            conn_status_map = {"unknown": 0, "up": 1, "down": 2}
-            status_val = conn_status_map.get(connection_status.strip().lower())
-            if status_val is None:
-                valid = ", ".join(sorted(conn_status_map))
-                return {
-                    "status": "error",
-                    "message": (
+            # Coercion lives in the query vocabulary now, so "down" means 2
+            # here and everywhere else that filters on conn_status. The
+            # rejection is re-phrased in terms of this parameter's own name:
+            # a caller who passed connection_status= should not be told about
+            # a field called conn_status they never mentioned.
+            try:
+                status_val = coerce_value("device", "conn_status", connection_status)
+            except ValidationError:
+                valid = ", ".join(sorted(get_vocabulary("device").coercions["conn_status"]))
+                return error_response(
+                    error="validation_error",
+                    message=(
                         f"Invalid connection_status '{connection_status}'. Must be one of: {valid}"
                     ),
-                }
-            filters.append(["conn_status", "==", status_val])
+                    operation="search_devices",
+                    adom=adom,
+                )
+            entries.append(["conn_status", "==", status_val])
+        if filters:
+            structured, _ = compile_to_array(filters, "device")
+            entries.extend(structured)
 
         devices = await client.list_devices(
             adom=adom,
-            filter=filters if filters else None,
+            filter=entries if entries else None,
+            fields=fields,
         )
 
         return {
@@ -543,7 +586,16 @@ async def search_devices(
             # DVMDB device objects carry credential material (adm_pass, etc.);
             # mask it before returning over MCP.
             "devices": sanitize_for_logging(devices),
+            # Echo what was actually sent so a caller can verify the compiled
+            # filter instead of inferring it from which rows came back.
+            "filter_applied": entries if entries else None,
         }
+    except ValidationError as e:
+        return error_response(
+            error="validation_error", message=e, operation="search_devices", adom=adom
+        )
     except Exception as e:
         logger.error(f"Failed to search devices: {e}")
-        return {"status": "error", "message": redact(str(e))}
+        return error_response(
+            error="faz_operation_failed", message=e, operation="search_devices", adom=adom
+        )

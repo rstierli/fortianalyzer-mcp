@@ -50,6 +50,8 @@ import logging
 import re
 from typing import Any
 
+from pydantic import BaseModel
+
 from fortianalyzer_mcp.masking.fields import (
     COMPOSITE_PREFIXED,
     COMPOSITE_URL_FULL,
@@ -60,6 +62,7 @@ from fortianalyzer_mcp.masking.fields import (
     SKIP_VALUES,
 )
 from fortianalyzer_mcp.masking.fpe_engine import FPEEngine, MaskingError
+from fortianalyzer_mcp.query.fields import canonical_log_field
 from fortianalyzer_mcp.utils.validation import sanitize_filter_value
 
 logger = logging.getLogger(__name__)
@@ -269,6 +272,52 @@ class ArgUnmasker:
 
         return _FILTER_CLAUSE_RE.sub(clause_sub, expression)
 
+    # -- structured filter conditions --------------------------------------- #
+
+    #: Keys that make a mapping a filter condition: the value's type is named
+    #: by a *sibling* key, not by its own key.
+    _CONDITION_KEYS = frozenset({"field", "value"})
+
+    def _is_filter_condition(self, value: Any) -> bool:
+        """True for a ``{field, op, value}`` mapping or an equivalent model."""
+        if isinstance(value, BaseModel):
+            return self._CONDITION_KEYS <= set(type(value).model_fields)
+        if isinstance(value, dict):
+            return self._CONDITION_KEYS <= set(value)
+        return False
+
+    def unmask_filter_conditions(self, condition: Any) -> Any:
+        """Resolve tokens in one structured filter condition.
+
+        ``unmask_args`` types a value by its own key, and ``unmask_filter`` types
+        it by the field name preceding it in the expression. A condition object
+        does neither: the value sits under the literal key ``value`` while its
+        field name is a sibling. A masked IP is format-preserving and unmarked,
+        so without consulting that sibling the token is indistinguishable from a
+        real address and would be sent to the appliance as-is -- returning real
+        logs for a different host.
+
+        Models are returned as models (re-validated from the resolved dump) so
+        the tool still receives the type its signature declares.
+
+        The sibling field is canonicalised through the query alias table first:
+        the compilers accept ``source_ip`` for ``srcip`` and the server guide
+        advertises that, but the masking allowlist is keyed on canonical names
+        only -- typed by the raw alias spelling, an unmarked IP token would slip
+        through untouched. Only the *type lookup* uses the canonical name; the
+        condition keeps the caller's spelling for the compiler to resolve.
+        """
+        is_model = isinstance(condition, BaseModel)
+        data = dict(condition.model_dump()) if is_model else dict(condition)
+
+        field = data.get("field")
+        if isinstance(field, str):
+            data["value"] = self._unmask_entry(canonical_log_field(field), data.get("value"))
+
+        if is_model:
+            return type(condition).model_validate(data)
+        return data
+
     # -- recursive argument walk ------------------------------------------- #
 
     def unmask_args(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -296,12 +345,16 @@ class ArgUnmasker:
                 self._unmask_entry(key, item) if isinstance(item, str) else self._unmask_any(item)
                 for item in value
             ]
+        if self._is_filter_condition(value):
+            return self.unmask_filter_conditions(value)
         if isinstance(value, dict):
             # e.g. the #44 dispatcher's nested "params" object
             return self.unmask_args(value)
         return value
 
     def _unmask_any(self, value: Any) -> Any:
+        if self._is_filter_condition(value):
+            return self.unmask_filter_conditions(value)
         if isinstance(value, dict):
             return self.unmask_args(value)
         if isinstance(value, list):

@@ -23,6 +23,7 @@ from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.server import get_faz_client, mcp
+from fortianalyzer_mcp.tool_annotations import READ_ONLY
 from fortianalyzer_mcp.utils.responses import redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import get_default_adom, validate_adom
@@ -55,7 +56,7 @@ async def _parse_time_range(time_range: str | None) -> dict[str, str] | None:
     return parse_time_range(time_range, faz_tz=faz_tz)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_linked_indicators(
     adom: str | None = None,
     alert_id: str | None = None,
@@ -110,7 +111,7 @@ async def get_linked_indicators(
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_indicator_enrichment(
     indicator_value: str,
     indicator_type: str,

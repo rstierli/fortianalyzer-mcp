@@ -17,6 +17,7 @@ from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.server import get_faz_client, mcp
+from fortianalyzer_mcp.tool_annotations import READ_ONLY
 from fortianalyzer_mcp.tools.log_tools import _clamp_timeout, _run_logsearch_page
 from fortianalyzer_mcp.utils.responses import redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
@@ -174,7 +175,7 @@ def _build_ips_filter(
     return " and ".join(filters)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def search_ips_logs(
     adom: str | None = None,
     severity: list[str] | None = None,
@@ -198,6 +199,11 @@ async def search_ips_logs(
     Search FortiAnalyzer for IPS (Intrusion Prevention System) events
     with flexible filtering options. Returns log entries that can be
     used to download associated PCAP files.
+
+    This is the right entry point for IPS work -- it filters on CVE and PCAP
+    availability, which search_security_logs cannot. Note the returned `tid`
+    is NOT a pagination handle (see Returns); raise `limit` instead of trying
+    to page, and pass has_pcap=True when the goal is a PCAP download.
 
     Args:
         adom: ADOM name (default: from config DEFAULT_ADOM)
@@ -357,7 +363,7 @@ async def search_ips_logs(
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_pcap_by_session(
     session_id: int,
     adom: str | None = None,
@@ -579,7 +585,7 @@ async def get_pcap_by_session(
         return {"status": "error", "session_id": session_id, "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def download_pcap_by_url(
     pcapurl: str,
     output_dir: str = "~/Downloads",
@@ -705,7 +711,7 @@ async def download_pcap_by_url(
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def search_and_download_pcaps(
     adom: str | None = None,
     severity: list[str] | None = None,
@@ -932,7 +938,7 @@ async def search_and_download_pcaps(
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def list_available_pcaps(
     adom: str | None = None,
     severity: list[str] | None = None,

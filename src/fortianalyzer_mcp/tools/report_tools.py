@@ -15,6 +15,7 @@ from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.server import get_faz_client, mcp
+from fortianalyzer_mcp.tool_annotations import READ_ONLY
 from fortianalyzer_mcp.utils.responses import coerce_num, redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import (
@@ -201,7 +202,7 @@ async def _ensure_schedule_exists(client: Any, adom: str, layout_id: int) -> dic
         return {"exists": False, "created": False, "error": str(e)}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def list_report_layouts(adom: str | None = None) -> dict[str, Any]:
     """List available report layouts in FortiAnalyzer.
 
@@ -264,7 +265,7 @@ async def list_report_layouts(adom: str | None = None) -> dict[str, Any]:
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def list_report_templates(adom: str | None = None) -> dict[str, Any]:
     """List available read-only report templates in FortiAnalyzer.
 
@@ -328,7 +329,7 @@ async def list_report_templates(adom: str | None = None) -> dict[str, Any]:
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def run_report(
     layout: str,
     adom: str | None = None,
@@ -449,7 +450,7 @@ async def run_report(
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def fetch_report(
     tid: str,
     adom: str | None = None,
@@ -488,7 +489,7 @@ async def fetch_report(
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_report_data(
     tid: str,
     adom: str | None = None,
@@ -538,7 +539,7 @@ async def get_report_data(
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_running_reports(
     adom: str | None = None,
 ) -> dict[str, Any]:
@@ -581,7 +582,7 @@ async def get_running_reports(
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_report_history(
     adom: str | None = None,
     time_range: str = "30-day",
@@ -633,7 +634,7 @@ async def get_report_history(
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def run_and_wait_report(
     layout: str,
     adom: str | None = None,
@@ -835,7 +836,7 @@ async def run_and_wait_report(
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def save_report(
     tid: str,
     output_dir: str = "~/Downloads",

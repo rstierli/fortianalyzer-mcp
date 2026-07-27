@@ -9,7 +9,9 @@ import logging
 from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
+from fortianalyzer_mcp.query.filters import FilterCondition, compile_to_string
 from fortianalyzer_mcp.server import get_faz_client, mcp
+from fortianalyzer_mcp.tool_annotations import DESTRUCTIVE, READ_ONLY
 from fortianalyzer_mcp.utils.log_clock import resolve_time_window
 from fortianalyzer_mcp.utils.responses import build_warnings, coerce_num, error_response, redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
@@ -399,13 +401,14 @@ async def _parse_time_range(time_range: str) -> dict[str, str]:
 _build_device_filter = build_device_filter
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def query_logs(
     adom: str | None = None,
     logtype: str = "traffic",
     device: str | None = None,
     time_range: str = "1-hour",
     filter: str | None = None,
+    filters: list[FilterCondition] | None = None,
     limit: int = 100,
     offset: int = 0,
     timeout: int = DEFAULT_SEARCH_TIMEOUT,
@@ -415,6 +418,16 @@ async def query_logs(
     This implements the two-step TID-based log search workflow:
     1. Start search task (returns TID)
     2. Poll for results until complete
+
+    Prefer a narrower tool where one fits:
+        - Filtering only on srcip/dstip/srcport/dstport/action/policy_id ->
+          search_traffic_logs builds the filter string for you.
+        - "How much traffic did policy N carry" -> get_policy_traffic_profile,
+          get_policy_port_analysis or get_policy_protocol_summary. They
+          aggregate on the appliance and report their own exactness; paging
+          raw rows to answer a volume question wastes the context it costs.
+        - IPS/attack events, especially with PCAP -> search_ips_logs.
+        - Unsure what is filterable -> get_log_fields(name_filter="...").
 
     Args:
         adom: ADOM name (default: from config DEFAULT_ADOM)
@@ -432,17 +445,28 @@ async def query_logs(
             - Device name: "myfw01" or "myfw01[root]" (with VDOM)
             - All devices: "All_FortiGate", "All_FortiMail", etc.
             - Default (None): Searches all FortiGate devices
-        time_range: Time range for logs. Options:
-            - "1-hour": Last 1 hour
-            - "6-hour": Last 6 hours
-            - "12-hour": Last 12 hours
-            - "24-hour": Last 24 hours
-            - "7-day": Last 7 days
-            - "30-day": Last 30 days
-            - Custom: "start_time|end_time" (e.g., "2024-01-01 00:00:00|2024-01-02 00:00:00")
+        time_range: Time range for logs. Presets: "5-min", "15-min",
+            "30-min", "1-hour", "2-hour", "6-hour", "12-hour", "24-hour",
+            "1-day", "2-day", "7-day", "30-day", "90-day" (plus "now", a
+            5-min alias). Custom: "start_time|end_time"
+            (e.g., "2024-01-01 00:00:00|2024-01-02 00:00:00")
         filter: Log filter expression (optional).
             Example: "srcip==10.0.0.1 and dstport==443"
-            Operators: ==, !=, <, >, <=, >=, contain, !contain
+            Operators: ==, !=, <, >, <=, >= and `like` with % wildcards
+            (e.g. 'service like "%DNS%"'); negate by wrapping the whole
+            clause, '!(service like "%DNS%")'. Do NOT write `contain` or
+            `!contain`: the parser accepts both and then matches nothing,
+            so they fail silently rather than erroring. Prefer `filters`,
+            which emits the working spelling for you.
+        filters: Structured filter conditions, each {field, op, value} —
+            preferred over `filter` because the field names are validated here
+            and the operator spelling is handled for you. Mutually exclusive
+            with `filter`.
+            Ops: eq, ne, gt, gte, lt, lte, contains, not_contains, in, not_in.
+            Example: [{"field": "srcip", "op": "eq", "value": "10.0.0.1"},
+                      {"field": "dstport", "op": "in", "value": [80, 443]}]
+            English field names are accepted where unambiguous (source_ip,
+            destination_port, application); get_log_fields lists the rest.
         limit: Maximum logs to return (default: 100, max: 1000)
         offset: Offset for pagination (default: 0)
         timeout: Search timeout in seconds (default: 60)
@@ -471,6 +495,8 @@ async def query_logs(
             - next_offset: Offset to pass to fetch_more_logs, or None when has_more is False
             - logs: List of log entries (bounded by `limit`)
             - adom, logtype, filter, device: Echoed query context (auditability)
+            - filter: The filter string actually sent to FortiAnalyzer (the
+              compiled form when `filters` was used)
             - time_range: Resolved {start, end} bounds actually sent to FAZ
             - timezone: FAZ system timezone the timestamps are interpreted in
             - time_basis: Human note clarifying timestamps are FAZ local time
@@ -501,6 +527,24 @@ async def query_logs(
         # Validate inputs
         adom = validate_adom(adom or get_default_adom())
         logtype = validate_log_type(logtype)
+
+        filter_warnings: list[str] = []
+        if filters and filter:
+            return error_response(
+                error="conflicting_filter_input",
+                message=(
+                    "Pass either 'filters' (structured conditions) or 'filter' (a raw "
+                    "FortiAnalyzer filter string), not both."
+                ),
+                operation="query_logs",
+                adom=adom,
+                logtype=logtype,
+                recommendation=(
+                    "Use 'filters' unless you need syntax it cannot express, such as a regex match."
+                ),
+            )
+        if filters:
+            filter, filter_warnings = compile_to_string(filters, logtype)
 
         client = _get_client()
         await client.ensure_connected()
@@ -584,6 +628,7 @@ async def query_logs(
             timezone=tz_name,
             has_more=has_more,
         )
+        warnings.extend(filter_warnings)
         if count == 0 and total_is_known and total is not None and total > offset:
             warnings.append(
                 "FortiAnalyzer reports more matching rows beyond this offset but returned "
@@ -660,7 +705,7 @@ async def query_logs(
         )
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_log_search_progress(
     adom: str | None = None,
     tid: int = 0,
@@ -707,7 +752,7 @@ async def get_log_search_progress(
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def fetch_more_logs(
     adom: str | None = None,
     tid: int = 0,
@@ -964,7 +1009,7 @@ async def fetch_more_logs(
         )
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def cancel_log_search(
     adom: str | None = None,
     tid: int = 0,
@@ -1026,7 +1071,7 @@ async def cancel_log_search(
         )
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_log_stats(
     adom: str | None = None,
     device: str | None = None,
@@ -1063,46 +1108,131 @@ async def get_log_stats(
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+def _is_field_list(payload: list[Any]) -> bool:
+    """A field list is a list holding dicts that carry ``name``."""
+    return any(isinstance(entry, dict) and "name" in entry for entry in payload)
+
+
+def _count_field_entries(payload: Any) -> int:
+    """Count field definitions across every field list in a logfields payload.
+
+    The appliance returns more than one list (a public ``field`` list and a
+    ``private-field`` list), and on live 7.6.x both sit *inside* a wrapper
+    object under ``data`` (``data[0].field``) whose own keys carry no ``name``
+    -- so the walk must recurse into list elements, not just count a list's
+    direct entries, or the whole catalogue counts as zero.
+    """
+    if isinstance(payload, dict):
+        return sum(_count_field_entries(value) for value in payload.values())
+    if isinstance(payload, list):
+        if _is_field_list(payload):
+            return sum(1 for entry in payload if isinstance(entry, dict) and "name" in entry)
+        return sum(_count_field_entries(entry) for entry in payload)
+    return 0
+
+
+def _filter_field_entries(payload: Any, needle: str) -> Any:
+    """Return a copy of ``payload`` keeping only fields whose name matches.
+
+    Copies rather than editing in place: the payload belongs to the client
+    call, and a future caching layer would inherit any mutation. A list that
+    is not itself a field list is recursed element-wise -- the live 7.6.x
+    payload nests the field lists inside ``data[0]`` -- while scalar entries
+    pass through untouched, so a shape change on the appliance degrades to a
+    no-op, never a crash.
+    """
+    if isinstance(payload, dict):
+        return {key: _filter_field_entries(value, needle) for key, value in payload.items()}
+    if isinstance(payload, list):
+        if _is_field_list(payload):
+            return [
+                entry
+                for entry in payload
+                if isinstance(entry, dict) and needle in str(entry.get("name", "")).lower()
+            ]
+        return [
+            _filter_field_entries(entry, needle) if isinstance(entry, dict | list) else entry
+            for entry in payload
+        ]
+    return payload
+
+
+@mcp.tool(annotations=READ_ONLY)
 async def get_log_fields(
     adom: str | None = None,
     logtype: str = "traffic",
     devtype: str = "FortiGate",
+    name_filter: str | None = None,
 ) -> dict[str, Any]:
-    """Get available log fields for a log type.
+    """Get available log fields for a log type -- what you can filter on.
 
-    Useful for understanding what fields can be used in filters.
+    A live traffic response runs to roughly 200 definitions across two lists,
+    which is more context than it is worth reading in full. Pass
+    ``name_filter`` to narrow it to the fields you are actually after
+    ("src", "port", "app"); the counts in the response say how much was
+    dropped so a narrow answer is never mistaken for the whole catalogue.
 
     Args:
         adom: ADOM name (default: from config DEFAULT_ADOM)
         logtype: Log type (traffic, event, attack, etc.)
         devtype: Device type (default: "FortiGate")
+        name_filter: Case-insensitive substring; keep only fields whose name
+            contains it. Omit (or pass "") for the full catalogue.
 
     Returns:
         dict: Log fields with keys:
             - status: "success" or "error"
-            - fields: List of available field definitions
+            - fields: The appliance's field payload, filtered when
+              ``name_filter`` was given. On live 7.6.x the
+              ``{"name": ..., "type": ...}`` entries sit nested one level
+              down: ``fields["data"][0]["field"]`` (public) and
+              ``fields["data"][0]["private-field"]``. Some endpoints answer
+              flatter shapes; filtering and counts reach the lists wherever
+              they nest.
+            - name_filter: The filter applied, or None
+            - field_count: Field definitions returned after filtering
+            - total_field_count: Field definitions before filtering
             - message: Error message if failed
 
+    Note:
+        ``type`` is FortiAnalyzer's own discriminator and on 7.6.x it is an
+        undocumented small integer (values such as 0, 4, 6 and 10 are
+        observed). Fortinet publishes no legend for it, so treat it as
+        opaque: to learn a field's real shape, read the field in a sample row
+        from ``query_logs`` rather than trying to decode the code. The value
+        is passed through unchanged in case a future firmware documents it.
+        ``desc`` mirrors ``name`` on live 7.6.x -- the catalogue names fields
+        but does not describe them, so this tool answers "does this field
+        exist", not "what does it mean".
+
     Example:
-        >>> result = await get_log_fields(logtype="traffic")
-        >>> for field in result['fields']:
-        ...     print(f"{field['name']}: {field['description']}")
+        >>> result = await get_log_fields(logtype="traffic", name_filter="src")
+        >>> print(f"{result['field_count']} of {result['total_field_count']}")
+        >>> for field in result["fields"]["data"][0]["field"]:
+        ...     print(field["name"])
     """
     try:
         adom = validate_adom(adom or get_default_adom())
         client = _get_client()
         result = await client.get_logfields(adom, logtype, devtype)
+        total = _count_field_entries(result)
+        if name_filter:
+            fields = _filter_field_entries(result, name_filter.lower())
+        else:
+            fields = result
         return {
             "status": "success",
-            "fields": result,
+            "fields": fields,
+            "name_filter": name_filter or None,
+            "field_count": _count_field_entries(fields) if name_filter else total,
+            "total_field_count": total,
         }
     except Exception as e:
         logger.error(f"Failed to get log fields: {e}")
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def search_traffic_logs(
     adom: str | None = None,
     srcip: str | None = None,
@@ -1119,7 +1249,12 @@ async def search_traffic_logs(
     """Search traffic logs with common filter criteria.
 
     Convenience function for searching traffic logs with typical
-    network-based filters.
+    network-based filters. Wraps query_logs, so the returned `tid` is the same
+    reusable pagination handle and works with fetch_more_logs.
+
+    Prefer get_policy_traffic_profile over this when the question is how much
+    a policy carried rather than which rows matched -- it aggregates on the
+    appliance instead of returning rows to be counted here.
 
     Args:
         adom: ADOM name (default: from config DEFAULT_ADOM)
@@ -1140,7 +1275,9 @@ async def search_traffic_logs(
             - count: Number of logs found
             - logs: List of traffic log entries
             - filter_applied: Filter string used
-            - tid: Task ID for pagination
+            - tid: Reusable pagination handle -- this tool wraps query_logs,
+              so the tid pages onward with fetch_more_logs like any
+              query_logs tid (it is NOT an appliance task id)
             - message: Error message if failed
 
     Example:
@@ -1209,7 +1346,7 @@ async def search_traffic_logs(
         )
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def search_security_logs(
     adom: str | None = None,
     attack_name: str | None = None,
@@ -1225,6 +1362,11 @@ async def search_security_logs(
 
     Search for security events including intrusion attempts,
     malware detections, and other security-related logs.
+
+    For IPS specifically, search_ips_logs filters on more dimensions (CVE,
+    PCAP availability, multiple severities at once) and its results feed the
+    PCAP downloaders. Use this one when you want a single logtype's events
+    across the broader security vocabularies.
 
     Args:
         adom: ADOM name (default: from config DEFAULT_ADOM)
@@ -1243,7 +1385,9 @@ async def search_security_logs(
             - count: Number of security events found
             - logs: List of security log entries
             - filter_applied: Filter string used
-            - tid: Task ID for pagination
+            - tid: Reusable pagination handle -- this tool wraps query_logs,
+              so the tid pages onward with fetch_more_logs like any
+              query_logs tid (it is NOT an appliance task id)
             - message: Error message if failed
 
     Example:
@@ -1259,7 +1403,16 @@ async def search_security_logs(
         # sanitized before interpolation to prevent filter injection.
         filters = []
         if attack_name:
-            filters.append(f"attack contain {sanitize_filter_value(attack_name, 'attack_name')}")
+            # ``contain`` is inert: the logview parser accepts it and then
+            # matches nothing, so this answered "no such attack" with total
+            # confidence. Same remedy and same emitted form as
+            # query.filters.compile_to_string -- ``like`` with ``%`` wildcards,
+            # the wildcards sanitised together with the value so the pattern is
+            # one escaped literal that cannot terminate its own clause.
+            # Measured on 7.6.6 over one fixed hour (289391 rows):
+            # ``service contain DNS`` -> 0, ``service like "%DNS%"`` -> 120671.
+            pattern = sanitize_filter_value(f"%{attack_name}%", "attack_name")
+            filters.append(f"attack like {pattern}")
         if severity:
             filters.append(f"severity=={validate_severity(severity)}")
         if srcip:
@@ -1302,7 +1455,7 @@ async def search_security_logs(
         )
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def search_event_logs(
     adom: str | None = None,
     subtype: str | None = None,
@@ -1338,7 +1491,9 @@ async def search_event_logs(
             - count: Number of events found
             - logs: List of event log entries
             - filter_applied: Filter string used
-            - tid: Task ID for pagination
+            - tid: Reusable pagination handle -- this tool wraps query_logs,
+              so the tid pages onward with fetch_more_logs like any
+              query_logs tid (it is NOT an appliance task id)
             - message: Error message if failed
 
     Example:
@@ -1393,7 +1548,7 @@ async def search_event_logs(
         )
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_logfiles_state(
     adom: str | None = None,
     device: str | None = None,
@@ -1443,7 +1598,7 @@ async def get_logfiles_state(
         return {"status": "error", "message": redact(str(e))}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def get_pcap_file(
     log_data: str,
     key_type: str = "log-data",

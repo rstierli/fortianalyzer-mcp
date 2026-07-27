@@ -166,3 +166,11 @@ site/
 # API docs (local reference only)
 docs/fndn/
 docs/guides/
+
+# =============================================================================
+# Local MCP client config
+# =============================================================================
+# .mcp.json wires a local client at this working copy and carries live
+# appliance credentials (FORTIANALYZER_API_TOKEN and any other server's
+# connection string) in plaintext. Never commit it.
+.mcp.json

@@ -2,7 +2,7 @@
 
 Masks every tool result before it leaves the MCP toward the LLM. There is
 no central tool-registration function to hook (tool modules self-register
-with module-level ``@mcp.tool()`` at import time), so ``install_masking``
+with module-level ``@mcp.tool(...)`` at import time), so ``install_masking``
 patches ``mcp.tool`` on the shared FastMCP instance BEFORE the tool
 modules are imported; every subsequently registered tool is wrapped.
 

@@ -239,6 +239,36 @@ class TestSanitizeFilterValue:
         assert result.startswith('"')
         assert result.endswith('"')
 
+    @pytest.mark.parametrize(
+        ("label", "value"),
+        [
+            ("newline", "DN\nS"),
+            ("carriage return", "DN\rS"),
+            ("tab", "DN\tS"),
+            ("NUL", "DN\x00S"),
+            ("escape", "DN\x1bS"),
+            ("delete", "DN\x7fS"),
+        ],
+    )
+    def test_embedded_control_character_is_refused(self, label: str, value: str) -> None:
+        """Refused at the boundary rather than quoted and shipped.
+
+        Quoting one is not an injection risk -- it cannot terminate its clause --
+        but FortiAnalyzer rejects the entire expression with ``Invalid filter``
+        when one arrives. Verified live on 7.6.6: ``service=="DN\\nS"`` errors
+        while the same filter without the newline returns rows. Failing here
+        costs no round trip and names the offending field.
+        """
+        with pytest.raises(ValidationError, match="control character"):
+            sanitize_filter_value(value, "service")
+
+    def test_surrounding_whitespace_is_still_stripped_not_refused(self) -> None:
+        """The strip runs first, so a value that is merely padded keeps working.
+
+        Only *embedded* control characters are a filter-level problem.
+        """
+        assert sanitize_filter_value("\taccept\n") == "accept"
+
 
 # =============================================================================
 # Filter building
@@ -1328,3 +1358,19 @@ class TestPolicyPathEnsuresConnection:
         assert "ensure_connected" in events  # session was revived
         assert events.index("ensure_connected") < events.index("start")  # before any query
         assert result["results"][0]["observed_hits"] == 1
+
+
+class TestSanitiserIsShared:
+    """traffic_tools carried its own copy whose safe class omitted ':'."""
+
+    def test_traffic_sanitiser_is_the_shared_implementation(self) -> None:
+        from fortianalyzer_mcp.tools import traffic_tools
+        from fortianalyzer_mcp.utils import validation
+
+        assert traffic_tools.sanitize_filter_value is validation.sanitize_filter_value
+
+    def test_ipv6_literal_is_not_quoted(self) -> None:
+        """The old copy quoted every IPv6 address because ':' was unsafe to it."""
+        from fortianalyzer_mcp.tools import traffic_tools
+
+        assert traffic_tools.sanitize_filter_value("2001:db8::1") == "2001:db8::1"
