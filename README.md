@@ -753,6 +753,127 @@ Three plain-English questions replace ~15 raw tool calls (`get_incident`, `get_a
 - Requires FortiAnalyzer **7.6.7+**. Not available in `FAZ_TOOL_MODE=dynamic` (beta limitation).
 - Skill ids and output schemas are a stable contract; breaking changes bump `schema_version`.
 
+### Wave-3 skills in action
+
+Wave 3 adds two analysis skills that go past a single-subject bundle: `hunt` (proactive) and `investigate_deep` (deep reactive). Both return the same validated, versioned shape as the rest of the layer — a deterministic `headline` rollup plus structured sections that each degrade independently to a `FeatureGap`. The renderings below are trimmed to the load-bearing fields; every value is a placeholder.
+
+**Profile one host for abnormal behaviour** — is `epid:1001` acting up?
+```jsonc
+faz_skill(skill="hunt", params={"entity": "epid:1001"})
+```
+```jsonc
+{
+  "schema_version": 1,
+  "subject_type": "entity",
+  "headline": "entity epid:1001; sweep: 3 matches across 4 searches; behavior: ANOMALOUS (92.0th pct, 2 detections)",
+  "behavior": {
+    "entity_type": "endpoint",
+    "entity_ref": "epid:1001",
+    "risk_score": 0.18,               // FAZ risk_score runs low in practice
+    "risk_percentile": 92.0,          // rank within the estate distribution, not a fixed cut
+    "vuln_stats": {"critical": 2, "high": 5, "medium": 11, "low": 3},
+    "detection_count": 2,
+    "anomalous": true,
+    "anomaly_basis": [
+      "risk_score at 92.0th percentile of 214 scored endpoints (threshold 90.0) -> ANOMALOUS",
+      "carries serious vulnerabilities (2 critical, 5 high) -> ANOMALOUS",
+      "2 behavioural/IOC detection(s) in the window -> ANOMALOUS"
+    ]
+  },
+  "sweep": {
+    "pivot_filter": "srcip==192.0.2.15",   // entity-scoped: where this host appears
+    "total_matches": 3,
+    "sweep_searches_run": 4
+  },
+  "estate": {"ranked_endpoint_total": 214},
+  "time_range": "7-day"
+}
+```
+
+The verdict is percentile-calibrated: `epid:1001` is not flagged because its raw `risk_score` crossed a magic number — it is flagged because it ranks in the top decile of the estate *and* carries critical CVEs *and* has live detections. Every flag that fired is spelled out in `anomaly_basis`, so the call is fully auditable.
+
+**Sweep the estate for an IOC** — has anything talked to this IP?
+```jsonc
+faz_skill(skill="hunt", params={"indicator": {"value": "203.0.113.7", "type": "IP"}})
+```
+```jsonc
+{
+  "schema_version": 1,
+  "subject_type": "indicator",
+  "headline": "indicator IP 203.0.113.7; sweep: 12 matches across 4 searches",
+  "sweep": {
+    "pivot_filter": "srcip==203.0.113.7",
+    "matches": [
+      {"logtype": "traffic",  "row_count": 9},
+      {"logtype": "dns",      "row_count": 3},
+      {"logtype": "attack",   "row_count": 0},
+      {"logtype": "app-ctrl", "row_count": 0}
+    ],
+    "threat_intel": {
+      "indicators": [
+        {"value": "203.0.113.7", "type": "IP", "reputation": "Malicious", "confidence": 90}
+      ]
+    },
+    "total_matches": 12,
+    "sweep_searches_run": 4,
+    "sweep_searches_dropped": 0
+  },
+  "behavior": {"available": false, "reason": "no entity subject; behaviour half runs only for an epid:/euid: subject"},
+  "time_range": "7-day"
+}
+```
+
+One call fans the pivot `srcip==203.0.113.7` across four log types (verbatim matched rows, capped) and attaches the stored SOAR reputation — here `Malicious` — so the analyst sees both *where* the IOC landed and *what it is*, in a single structured result.
+
+**Trace an incident backward and forward** — the full picture of `IN00000001`.
+```jsonc
+faz_skill(skill="investigate_deep", params={"incident_id": "IN00000001"})
+```
+```jsonc
+{
+  "schema_version": 1,
+  "subject_type": "incident",
+  "headline": "incident IN00000001; priority high; root cause: 3 events (earliest log 0100000123); impact: 2 entities, 37 lateral rows (6 searches)",
+  "root_cause": {
+    "event_count": 3,
+    "earliest_signal": {
+      "timestamp": 1785305100,
+      "source": "log",
+      "reference": "0100000123",
+      "description": "log 0100000123: attack: suspicious outbound connection"
+    },
+    "chain": [
+      {"timestamp": 1785305100, "source": "log",      "reference": "0100000123",          "description": "log 0100000123: attack: suspicious outbound connection"},
+      {"timestamp": 1785305460, "source": "alert",    "reference": "202607200000000001",  "description": "alert 202607200000000001: Botnet C&C Communication"},
+      {"timestamp": 1785306000, "source": "incident", "reference": "IN00000001",          "description": "incident IN00000001: Compromised Host"}
+    ]
+    // chain is oldest-first: a deterministic time ordering, no attribution
+  },
+  "impact": {
+    "entity_count": 2,
+    "lateral_searches_run": 6,
+    "lateral_searches_dropped": 0,
+    "entities": [
+      {
+        "entity_type": "endpoint",
+        "entity_ref": "epid:1001",
+        "pivot": "srcip==192.0.2.15",
+        "counts": {"traffic": 21, "dns": 8, "app-ctrl": 4}
+      },
+      {
+        "entity_type": "ip",
+        "entity_ref": "203.0.113.45",
+        "pivot": "srcip==203.0.113.45",
+        "counts": {"traffic": 4}
+      }
+    ]
+  },
+  "time_range": "7-day"
+}
+```
+
+`root_cause` orders every timestamped record the incident carries back to the earliest observed signal — a deterministic time ordering, never an inferred cause. `impact` then fans forward from each entity the incident touches (`epid:1001` on `192.0.2.15`, plus a peer IP), showing the blast radius as verbatim lateral rows per log type, slot-capped and auditable. Two plain intents replace a dozen raw reads, and the analyst still knows exactly where every number came from.
+
 ## Data Masking (beta)
 
 With `MASKING_ENABLED=true` (requires `FAZ_MASKING_KEY`), sensitive identifiers are pseudonymized before they leave the server toward the LLM, and masked tokens the model sends back as tool arguments are resolved to real values before input validation and the FortiAnalyzer API. Off by default; no behavior change unless enabled.
