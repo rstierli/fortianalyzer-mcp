@@ -288,6 +288,15 @@ FIELD_TYPES: dict[str, str] = {
     # outside the log rows unless these are scanned too.
     "filter": TEXT,
     "filter_applied": TEXT,
+    # The projection echo. Same class of bug as filter_applied (#95): argument
+    # unmasking runs at the wrapper boundary, so a tool building
+    # ``fields_returned`` is holding whatever the caller's ``fields`` list
+    # resolved to. ``fields`` names response KEYS rather than values, so the
+    # real close is FIELD_NAME_ARGS below -- the token never becomes plaintext
+    # in the first place. TEXT is the belt to that braces: it gives the echo
+    # the same pass-2 substitution and IOC scan every other caller-facing
+    # string gets, for any other route by which a value reaches this key.
+    "fields_returned": TEXT,
     "device": HOSTNAME,
     # --- caller-facing prose: the skills layer and every tool error build
     # these strings themselves, and they name the record they are about
@@ -320,6 +329,24 @@ FIELD_TYPES: dict[str, str] = {
     "entity_ref": TEXT,  # investigate_deep: caller's entity, may be a bare IP
     "headline": TEXT,  # skill summaries; first interpolated an identifier in #89
 }
+
+#: Tool-argument keys whose value names *fields*, not values, and which the
+#: argument unmasker must therefore leave alone.
+#:
+#: ``resolve_scalar`` resolves any self-identifying token wherever it appears,
+#: and ``query.fields.resolve_field`` passes an unknown-but-well-shaped name
+#: through -- and a mask token (``host-6b7e-zwyu4i8an``) is well shaped. So a
+#: token placed in ``fields`` was unmasked to plaintext, used as a projection
+#: key, and echoed back under ``fields_returned``: a complete token ->
+#: plaintext oracle driven entirely by the model's own token. A field name is
+#: never customer data, so there is nothing here for unmasking to be right
+#: about; skipping the key closes the round trip at the source rather than
+#: trying to re-mask the echo afterwards.
+#:
+#: Structured-filter conditions are already handled this way for the same
+#: reason: ``unmask_filter_conditions`` resolves only ``value`` and leaves the
+#: sibling ``field`` untouched.
+FIELD_NAME_ARGS = ("fields",)
 
 #: Composite keys whose value is a single string holding one or more
 #: identifiers inside a larger structure. Name matching cannot reach them,

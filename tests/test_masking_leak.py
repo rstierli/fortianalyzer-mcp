@@ -24,6 +24,7 @@ from typing import Any
 import pytest
 
 from fortianalyzer_mcp.masking.fpe_engine import FPEEngine
+from fortianalyzer_mcp.masking.unmask import ArgUnmasker
 from fortianalyzer_mcp.masking.wrapper import OutputMasker
 
 KEY = "2DE79D232DF5585D68CE47882AE256D6"
@@ -1439,3 +1440,91 @@ class TestCompiledFilterEntries:
         masked = masker.mask_result({"filter_applied": ["a note", ["only", "two"]]})
 
         assert masked["filter_applied"] == ["a note", ["only", "two"]]
+
+
+class TestProjectionEchoIsNotAnOracle:
+    """``fields_returned`` echoes what ``fields`` resolved to.
+
+    The round trip the projection feature opened, verified end to end rather
+    than argued about:
+
+    1. the model holds ``host-<...>``, a token this server issued;
+    2. it passes that token in ``fields``;
+    3. ``ArgUnmasker.resolve_scalar`` resolves any *self-identifying* token
+       wherever it appears, so the token became the plaintext;
+    4. ``query.fields.resolve_field`` passes an unknown-but-well-shaped name
+       through, and a token is well shaped, so it survived as a projection
+       key;
+    5. the tool echoed it under ``fields_returned``, which no allowlist
+       mentioned -- handing back plaintext unlocked by the model's own token.
+
+    Structurally the ``filter_applied`` bug (#95) again, and the same lesson:
+    a response key that reflects a caller argument needs a decision, and the
+    absence of one defaults to leaking. Here the decision is that ``fields``
+    names response KEYS, so there is nothing for unmasking to be right about.
+    """
+
+    @pytest.fixture
+    def unmasker(self, monkeypatch: pytest.MonkeyPatch) -> ArgUnmasker:
+        monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
+        return ArgUnmasker(FPEEngine(KEY))
+
+    def test_a_token_in_fields_is_not_resolved_to_plaintext(
+        self, masker: OutputMasker, unmasker: ArgUnmasker
+    ) -> None:
+        """Step 3, closed: the projection key stays the token it arrived as."""
+        token = masker.mask_result({"hostname": SRC_NAME})["hostname"]
+        assert token != SRC_NAME, "fixture precondition: the value must mask"
+
+        resolved = unmasker.unmask_args({"fields": [token]})
+
+        assert resolved == {"fields": [token]}
+        assert SRC_NAME not in str(resolved)
+
+    def test_a_bare_token_argument_is_still_resolved(
+        self, masker: OutputMasker, unmasker: ArgUnmasker
+    ) -> None:
+        """The skip is scoped to ``fields``, not to tokens in general.
+
+        Without this, the test above would pass just as well if argument
+        unmasking had been switched off wholesale.
+        """
+        token = masker.mask_result({"hostname": SRC_NAME})["hostname"]
+
+        assert unmasker.unmask_args({"device": token}) == {"device": SRC_NAME}
+
+    def test_nested_params_fields_are_skipped_too(
+        self, masker: OutputMasker, unmasker: ArgUnmasker
+    ) -> None:
+        """faz_skill nests every tool argument under ``params``."""
+        token = masker.mask_result({"hostname": SRC_NAME})["hostname"]
+
+        resolved = unmasker.unmask_args({"skill": "log_search", "params": {"fields": [token]}})
+
+        assert SRC_NAME not in str(resolved)
+
+    def test_the_echo_is_masked_when_it_carries_a_mapped_value(self, masker: OutputMasker) -> None:
+        """Step 5, closed independently: the echo is allowlisted as TEXT.
+
+        Belt to the braces above -- any other route by which a real value
+        reaches this key gets the same pass-2 treatment ``filter_applied`` and
+        ``warnings`` already get, rather than no treatment at all.
+        """
+        masked = masker.mask_result(
+            {"logs": [{"srcname": SRC_NAME}], "fields_returned": [f"srcname of {SRC_NAME}"]}
+        )
+
+        assert SRC_NAME not in str(masked["fields_returned"])
+
+    def test_the_echo_scans_for_bare_indicators(self, masker: OutputMasker) -> None:
+        masked = masker.mask_result({"count": 0, "fields_returned": [f"srcip {PEER_IP}"]})
+
+        assert PEER_IP not in str(masked["fields_returned"])
+
+    def test_ordinary_field_names_pass_through_unharmed(self, masker: OutputMasker) -> None:
+        """The echo is the normal case; masking must not corrupt it."""
+        names = ["action", "dstport", "policyid", "srcip", "user"]
+
+        assert (
+            masker.mask_result({"count": 0, "fields_returned": names})["fields_returned"] == names
+        )
