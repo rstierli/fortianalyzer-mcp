@@ -697,3 +697,175 @@ class TestAssetValueDiffering:
         )
 
         assert masked["target"][0]["asset_value"] == devid
+
+
+class TestMutatingToolGate:
+    """#106: unmask_args must not restore tokens into mutating tools.
+
+    FF3 tokens carry no integrity tag, so a stale or forged token decrypts
+    to some plausible value; restored into a write surface that value is
+    silently written to the estate. Read-only tools keep restoration.
+    """
+
+    def _install(self, monkeypatch: pytest.MonkeyPatch):
+        from mcp.server.fastmcp import FastMCP
+
+        monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
+        mcp = FastMCP("test-gate")
+        install_masking(mcp)
+        return mcp
+
+    async def test_marked_token_to_mutating_tool_is_refused(self, monkeypatch: pytest.MonkeyPatch):
+        from fortianalyzer_mcp.tool_annotations import CREATES
+
+        mcp = self._install(monkeypatch)
+        engine = FPEEngine(KEY)
+        token = engine.mask_hostname("fw-branch.example.com")
+        calls: list[str] = []
+
+        @mcp.tool(annotations=CREATES)
+        async def fake_add_device(name: str) -> dict:
+            calls.append(name)
+            return {"status": "success"}
+
+        result = await fake_add_device(name=token)
+
+        assert calls == []  # the body never ran
+        assert result["status"] == "error"
+        assert result["error"] == "masked_token_in_mutating_args"
+        assert "name" in result["message"]
+        assert token not in str(result)  # the token itself is not echoed
+
+    async def test_forged_token_to_mutating_tool_is_refused(self, monkeypatch: pytest.MonkeyPatch):
+        # A marker that matches but does not decrypt is the forged/stale
+        # case, which is exactly the threat: it must refuse, not pass.
+        from fortianalyzer_mcp.tool_annotations import DESTRUCTIVE
+
+        mcp = self._install(monkeypatch)
+        calls: list[str] = []
+
+        @mcp.tool(annotations=DESTRUCTIVE)
+        async def fake_delete_device(name: str) -> dict:
+            calls.append(name)
+            return {"status": "success"}
+
+        result = await fake_delete_device(name="host-ffff-zzzzzzzzzzzz")
+
+        assert calls == []
+        assert result["error"] == "masked_token_in_mutating_args"
+
+    async def test_real_value_to_mutating_tool_runs_and_masks_output(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        from fortianalyzer_mcp.tool_annotations import CREATES
+
+        mcp = self._install(monkeypatch)
+        calls: list[str] = []
+
+        @mcp.tool(annotations=CREATES)
+        async def fake_add_device(name: str) -> dict:
+            calls.append(name)
+            return {"status": "success", "hostname": name}
+
+        result = await fake_add_device(name="fw-branch.example.com")
+
+        assert calls == ["fw-branch.example.com"]  # arg untouched on the way in
+        assert result["hostname"].startswith("host-")  # output still masks
+
+    async def test_unmarked_ip_token_passes_through_untouched(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # An IP token carries no marker, so it is indistinguishable from a
+        # real address and passes through as given: the gate closes the
+        # decrypt-and-write path, it cannot detect unmarked ciphertext.
+        # That detection is the #40 v2 envelope work.
+        from fortianalyzer_mcp.tool_annotations import CREATES
+
+        mcp = self._install(monkeypatch)
+        engine = FPEEngine(KEY)
+        ip_token = engine.mask_ip("192.0.2.55")
+        calls: list[str] = []
+
+        @mcp.tool(annotations=CREATES)
+        async def fake_add_device(ip: str) -> dict:
+            calls.append(ip)
+            return {"status": "success"}
+
+        await fake_add_device(ip=ip_token)
+
+        assert calls == [ip_token]  # NOT decrypted
+
+    async def test_read_only_tool_still_restores(self, monkeypatch: pytest.MonkeyPatch):
+        from fortianalyzer_mcp.tool_annotations import READ_ONLY
+
+        mcp = self._install(monkeypatch)
+        engine = FPEEngine(KEY)
+        token = engine.mask_ip("192.0.2.102")
+        calls: list[str] = []
+
+        @mcp.tool(annotations=READ_ONLY)
+        async def fake_query(srcip: str) -> dict:
+            calls.append(srcip)
+            return {"count": 0}
+
+        await fake_query(srcip=token)
+
+        assert calls == ["192.0.2.102"]  # restored before the body
+
+    async def test_unannotated_tool_fails_closed_as_mutating(self, monkeypatch: pytest.MonkeyPatch):
+        mcp = self._install(monkeypatch)
+        engine = FPEEngine(KEY)
+        token = engine.mask_hostname("fw-branch.example.com")
+        calls: list[str] = []
+
+        @mcp.tool()
+        async def unannotated(name: str) -> dict:
+            calls.append(name)
+            return {"status": "success"}
+
+        result = await unannotated(name=token)
+
+        assert calls == []
+        assert result["error"] == "masked_token_in_mutating_args"
+
+    async def test_token_embedded_in_prose_passes_as_token_text(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # A token inside a longer string cannot be decrypted-and-written
+        # (nothing restores it), so it passes through as token text: the
+        # estate-side record shows the token, which discloses nothing.
+        from fortianalyzer_mcp.tool_annotations import UPDATES
+
+        mcp = self._install(monkeypatch)
+        engine = FPEEngine(KEY)
+        token = engine.mask_hostname("fw-branch.example.com")
+        calls: list[str] = []
+
+        @mcp.tool(annotations=UPDATES)
+        async def fake_update_incident(description: str) -> dict:
+            calls.append(description)
+            return {"status": "success"}
+
+        await fake_update_incident(description=f"seen on {token} overnight")
+
+        assert calls == [f"seen on {token} overnight"]
+
+    async def test_marked_token_nested_in_container_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        from fortianalyzer_mcp.tool_annotations import CREATES
+
+        mcp = self._install(monkeypatch)
+        engine = FPEEngine(KEY)
+        token = engine.mask_hostname("fw-branch.example.com")
+        calls: list[object] = []
+
+        @mcp.tool(annotations=CREATES)
+        async def fake_bulk(devices: list[dict]) -> dict:
+            calls.append(devices)
+            return {"status": "success"}
+
+        result = await fake_bulk(devices=[{"name": token}])
+
+        assert calls == []
+        assert result["error"] == "masked_token_in_mutating_args"

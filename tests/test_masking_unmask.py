@@ -270,12 +270,16 @@ class TestRoundTrip:
     ):
         from mcp.server.fastmcp import FastMCP
 
+        from fortianalyzer_mcp.tool_annotations import READ_ONLY
+
         monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
         mcp = FastMCP("test")
         install_masking(mcp)
         seen: dict[str, str] = {}
 
-        @mcp.tool()
+        # Restoration is gated on the read-only annotation (#106), so the
+        # fixture models a reader the way every real reader is annotated.
+        @mcp.tool(annotations=READ_ONLY)
         async def fake_search(srcip: str) -> dict:
             seen["srcip"] = srcip  # what the tool body (and validators) observe
             return {"logs": [{"srcip": srcip}]}

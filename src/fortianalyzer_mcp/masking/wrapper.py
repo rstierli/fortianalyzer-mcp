@@ -929,7 +929,11 @@ def install_masking(mcp: Any) -> tuple[OutputMasker, ArgUnmasker]:
 
     Wrapped tools unmask their keyword arguments on the way in (Phase 2,
     before the tool body reaches any validator) and mask their result on
-    the way out (Phase 1). The boundary is the OUTERMOST wrapped call
+    the way out (Phase 1). Argument restoration is gated on the tool's
+    ``readOnlyHint`` annotation (#106): a mutating tool never restores,
+    and a whole-value marked token in its arguments is refused, because
+    an unauthenticated FF3 token would decrypt to a plausible wrong value
+    and be written to the estate. The boundary is the OUTERMOST wrapped call
     only: a wrapped tool invoked from inside another wrapped tool runs
     bare, because the outer boundary already unmasked the arguments and
     masks the combined result exactly once.
@@ -955,8 +959,61 @@ def install_masking(mcp: Any) -> tuple[OutputMasker, ArgUnmasker]:
     unmasker = ArgUnmasker(engine)
     original_tool = mcp.tool
 
+    def marked_arg_key(value: Any, key: str = "") -> str | None:
+        """Key under which a whole-value marked token sits, or None.
+
+        Only whole-value tokens count: a token embedded in a longer string
+        has nothing that would restore it, so it passes through as token
+        text and cannot become a decrypted write. A marker that matches
+        but does not decrypt is the forged/stale case, which is exactly
+        the threat, so it refuses rather than passing.
+        """
+        if isinstance(value, str):
+            try:
+                return key if engine.unmask_token(value) is not None else None
+            except MaskingError:
+                return key
+        if isinstance(value, dict):
+            for inner_key, inner in value.items():
+                found = marked_arg_key(inner, str(inner_key))
+                if found is not None:
+                    return found
+            return None
+        if isinstance(value, list | tuple):
+            for inner in value:
+                found = marked_arg_key(inner, key)
+                if found is not None:
+                    return found
+        return None
+
+    def refuse_restore(tool_name: str, arg_key: str) -> dict[str, Any]:
+        # #106: FF3 tokens carry no integrity tag, so a stale or forged
+        # token decrypts to some plausible value; restored into a write
+        # surface that value is silently written to the estate. The
+        # message names the argument, never the token.
+        return {
+            "status": "error",
+            "error": "masked_token_in_mutating_args",
+            "message": (
+                f"{tool_name}: argument '{arg_key}' carries a masking token. "
+                "This tool changes FortiAnalyzer state, so tokens are not "
+                "restored here: a stale or forged token would decrypt to a "
+                "plausible wrong value and be written. Re-run with the real "
+                "value, obtained from a read-only tool or an operator."
+            ),
+        }
+
     def patched_tool(*args: Any, **kwargs: Any) -> Any:
         decorator = original_tool(*args, **kwargs)
+        # #106: only tools that annotate themselves read-only get argument
+        # restoration. Everything else, including an unannotated tool and
+        # the dynamic dispatcher (whose annotation is deliberately the
+        # union of everything it can reach), fails closed: no restore, and
+        # a whole-value marked token is refused outright. Unmarked IP/MAC
+        # tokens are indistinguishable from real addresses and pass
+        # through; making them detectable is the #40 v2 envelope work.
+        annotations = kwargs.get("annotations")
+        read_only = bool(annotations is not None and getattr(annotations, "readOnlyHint", False))
 
         def register(fn: Any) -> Any:
             if inspect.iscoroutinefunction(fn):
@@ -967,6 +1024,11 @@ def install_masking(mcp: Any) -> tuple[OutputMasker, ArgUnmasker]:
                         return await fn(*fa, **fk)
                     token = _AT_BOUNDARY.set(True)
                     try:
+                        if not read_only:
+                            offending = marked_arg_key(fk)
+                            if offending is not None:
+                                return refuse_restore(fn.__name__, offending)
+                            return masker.mask_tool_result(await fn(*fa, **fk), fn.__name__)
                         return masker.mask_tool_result(
                             await fn(*fa, **unmasker.unmask_args(fk)), fn.__name__
                         )
@@ -981,6 +1043,11 @@ def install_masking(mcp: Any) -> tuple[OutputMasker, ArgUnmasker]:
                     return fn(*fa, **fk)
                 token = _AT_BOUNDARY.set(True)
                 try:
+                    if not read_only:
+                        offending = marked_arg_key(fk)
+                        if offending is not None:
+                            return refuse_restore(fn.__name__, offending)
+                        return masker.mask_tool_result(fn(*fa, **fk), fn.__name__)
                     return masker.mask_tool_result(fn(*fa, **unmasker.unmask_args(fk)), fn.__name__)
                 finally:
                     _AT_BOUNDARY.reset(token)
