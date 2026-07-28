@@ -253,3 +253,17 @@ class TestMaskingGuidance:
         assert "case-sensitive" in text
         # The failure mode is named, so the caller can recognise it when seen.
         assert "zero rows" in text
+
+
+def test_projection_surface_is_documented(instructions: str) -> None:
+    """A caller who does not know `fields` exists pays for every key."""
+    assert "fields" in instructions
+    assert '["*"]' in instructions or '"*"' in instructions
+
+
+def test_curated_default_is_described_as_a_default_not_a_limit(
+    instructions: str,
+) -> None:
+    """The opt-out must be discoverable in the same breath as the default."""
+    lowered = instructions.lower()
+    assert "curated" in lowered

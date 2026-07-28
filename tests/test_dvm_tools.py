@@ -207,3 +207,65 @@ class TestSearchDevicesStructuredFilters:
 
         assert result["status"] == "error"
         assert "conn_status" in result["message"]
+
+
+class TestSearchDevicesProjection:
+    """Device projection is native: the field list goes to dvmdb."""
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.captured_fields: list[str] | None = None
+
+        async def list_devices(
+            self,
+            adom: str,
+            filter: list[list[Any]] | None = None,
+            fields: list[str] | None = None,
+        ) -> list[dict[str, Any]]:
+            self.captured_fields = fields
+            return [{"name": "fgt-01", "ip": "10.0.0.1"}]
+
+    def _install(self, monkeypatch: pytest.MonkeyPatch) -> FakeClient:
+        fake = self.FakeClient()
+        monkeypatch.setattr(dvm_tools, "_get_client", lambda: fake)
+        return fake
+
+    async def test_default_sends_the_curated_field_list(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = self._install(monkeypatch)
+
+        await dvm_tools.search_devices()
+
+        assert fake.captured_fields is not None
+        assert "name" in fake.captured_fields
+        assert "sn" in fake.captured_fields, "join key must survive"
+        assert "adm_usr" not in fake.captured_fields
+
+    async def test_star_sends_no_field_list(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """["*"] means the appliance default, which is every field."""
+        fake = self._install(monkeypatch)
+
+        await dvm_tools.search_devices(fields=["*"])
+
+        assert fake.captured_fields is None
+
+    async def test_alias_is_resolved_before_sending(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = self._install(monkeypatch)
+
+        await dvm_tools.search_devices(fields=["serial_number", "os_version"])
+
+        assert fake.captured_fields is not None
+        assert sorted(fake.captured_fields) == ["os_ver", "sn"]
+
+    async def test_unknown_field_is_rejected_locally(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        class Unreachable:
+            async def list_devices(self, **kwargs: Any) -> list[dict[str, Any]]:
+                raise AssertionError("must not reach the API")
+
+        monkeypatch.setattr(dvm_tools, "_get_client", lambda: Unreachable())
+
+        result = await dvm_tools.search_devices(fields=["not_a_field"])
+
+        assert result["status"] == "error"
+        assert "conn_status" in result["message"]

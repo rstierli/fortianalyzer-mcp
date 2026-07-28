@@ -11,6 +11,7 @@ from typing import Any
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.query.fields import coerce_value, get_vocabulary
 from fortianalyzer_mcp.query.filters import FilterCondition, compile_to_array
+from fortianalyzer_mcp.query.shape import resolve_projection
 from fortianalyzer_mcp.server import get_faz_client, mcp
 from fortianalyzer_mcp.tool_annotations import CREATES, DESTRUCTIVE, READ_ONLY
 from fortianalyzer_mcp.utils.responses import error_response, redact
@@ -512,11 +513,14 @@ async def search_devices(
             platform (platform_str), connection_status (conn_status),
             description (desc).
             Example: [{"field": "os_ver", "op": "contains", "value": "7.6"}]
-        fields: Specific fields to return per device, e.g.
-            ["name", "ip", "os_ver", "platform_str"]. Omitting this returns
-            every field the appliance defines -- roughly 60 per device, most
-            empty placeholders -- so pass a projection unless you genuinely
-            need the full object.
+        fields: Which keys each device carries. Unlike the log tools this is
+            native -- the list is sent to dvmdb, so the untrimmed object never
+            crosses the wire. Omit for a curated default (name, ip, sn,
+            hostname, version, platform, status, vdom); pass ["*"] for every
+            field the appliance defines, roughly 60 per device and mostly empty
+            placeholders; or name the fields you want. English aliases work here
+            exactly as they do in `filters` -- serial_number resolves to sn.
+            The appliance always adds ``oid`` to each object regardless.
 
     Returns:
         dict: Search results with keys:
@@ -527,6 +531,11 @@ async def search_devices(
               projection that does not request it.
             - filter_applied: The compiled filter entries sent to the
               appliance, or None when nothing narrowed the search
+            - fields_returned: The resolved field names sent to dvmdb, or []
+              when ``fields=["*"]`` was passed -- the appliance chose the
+              shape then, so there is nothing this function can honestly
+              claim about it
+            - warnings: Field-resolution warnings, if any
             - message: Error message if failed
 
     Example:
@@ -574,10 +583,16 @@ async def search_devices(
             structured, _ = compile_to_array(filters, "device")
             entries.extend(structured)
 
+        projection, projection_warnings = resolve_projection("device", fields)
+        # dvmdb projects natively, so send the names rather than trimming the
+        # response: a subset chosen here would still have crossed the wire whole.
+        # sorted() so the wire payload is deterministic and diffable in a trace.
+        field_list = sorted(projection) if projection is not None else None
+
         devices = await client.list_devices(
             adom=adom,
             filter=entries if entries else None,
-            fields=fields,
+            fields=field_list,
         )
 
         return {
@@ -589,6 +604,8 @@ async def search_devices(
             # Echo what was actually sent so a caller can verify the compiled
             # filter instead of inferring it from which rows came back.
             "filter_applied": entries if entries else None,
+            "fields_returned": field_list if field_list is not None else [],
+            "warnings": projection_warnings,
         }
     except ValidationError as e:
         return error_response(

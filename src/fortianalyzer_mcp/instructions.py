@@ -103,6 +103,29 @@ On these two tools the narrow parameters (`name_filter`, `platform_filter`,
 overridden by it, so a condition on the same field in both places must agree
 or nothing matches.
 
+## Projection
+
+Every read tool takes `fields`, and the default is curated rather than
+complete:
+
+  fields omitted   -> the curated set for that vocabulary
+  fields=["*"]     -> the full object, exactly as before
+  fields=[...]     -> those fields (English aliases work, same as in filters)
+
+The curated set carries identity, the discriminator, the magnitude, the
+human-readable summary, and every key another tool takes as input -- so
+`sessionid` survives for get_pcap_by_session and `alertid` for get_alert_logs.
+It is a default, not a ceiling: ask for `["*"]` whenever you need the rest.
+
+`fields_returned` in every response lists the keys the rows carry, and is
+reported even when a page comes back empty -- that is the only signal of what
+is queryable next when there are no rows to inspect.
+
+Vocabularies without a curated set yet (uncommon logtypes, FortiView views)
+return full rows plus a warning naming `fields`, never a guessed subset.
+list_adoms, list_devices and search_devices project on the appliance, so their
+`fields` also shrinks what crosses the wire.
+
 ## Choosing among overlapping tools
 
 - Per-policy volume questions -> get_policy_traffic_profile,
