@@ -17,6 +17,7 @@ from fortianalyzer_mcp.query.fields import (
     canonical_log_field,
     coerce_value,
     get_vocabulary,
+    has_projection,
     resolve_field,
 )
 from fortianalyzer_mcp.query.filters import (
@@ -25,8 +26,15 @@ from fortianalyzer_mcp.query.filters import (
     compile_to_array,
     compile_to_string,
 )
+from fortianalyzer_mcp.query.shape import (
+    ALL_FIELDS,
+    fields_returned,
+    project_rows,
+    resolve_projection,
+)
 
 __all__ = [
+    "ALL_FIELDS",
     "TASK_STATE_CODES",
     "FilterCondition",
     "FilterOp",
@@ -35,6 +43,10 @@ __all__ = [
     "coerce_value",
     "compile_to_array",
     "compile_to_string",
+    "fields_returned",
     "get_vocabulary",
+    "has_projection",
+    "project_rows",
     "resolve_field",
+    "resolve_projection",
 ]
