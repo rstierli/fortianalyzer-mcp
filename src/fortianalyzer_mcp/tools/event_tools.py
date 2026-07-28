@@ -285,7 +285,19 @@ async def get_alert_logs(
             offset=offset,
         )
 
-        data, returned, projection_warnings = project_payload("event", result, fields)
+        # alertlogs answers with an envelope dict (data plus percentage,
+        # tid, etc. -- see api.client.get_alert_logs / _raw_request_once),
+        # not a bare row list. project_payload only projects a list, so
+        # unwrap the inner "data" list, project it, and put it back --
+        # every other envelope key is left untouched. The skills layer's
+        # _records() (skills/handlers.py) depends on this exact envelope
+        # shape surviving under "data".
+        data: Any
+        if isinstance(result, dict) and isinstance(result.get("data"), list):
+            inner, returned, projection_warnings = project_payload("event", result["data"], fields)
+            data = {**result, "data": inner}
+        else:
+            data, returned, projection_warnings = project_payload("event", result, fields)
 
         return {
             "status": "success",

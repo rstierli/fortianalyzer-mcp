@@ -379,3 +379,75 @@ class TestGetAlertsProjection:
         assert result["status"] == "success"
         assert "mystery_field" in result["fields_returned"]
         assert result["warnings"]
+
+
+class TestGetAlertLogsProjection:
+    """Alert logs project under the event vocabulary -- they're the logs that
+    triggered the alert, not the alerts themselves.
+
+    The endpoint (eventmgmt/.../alertlogs) answers with an envelope dict
+    (a "data" list plus "percentage" and friends), not a bare row list --
+    see api.client.get_alert_logs / _raw_request_once. Every test here uses
+    that envelope shape deliberately: a fake that returned a bare list would
+    hide a projection that never reaches the inner rows.
+    """
+
+    ROW = {
+        "date": "2026-07-28",
+        "time": "10:00:00",
+        "devname": "FAZ-TEST",
+        "level": "warning",
+        "subtype": "system",
+        "action": "login",
+        "user": "admin",
+        "msg": "User admin logged in",
+        "cfgattr": "verbose config diff blob",
+    }
+
+    def _install(self, monkeypatch: pytest.MonkeyPatch, payload: object) -> None:
+        class FakeClient:
+            async def get_alert_logs(self, **kwargs: object) -> object:
+                return payload
+
+        monkeypatch.setattr(event_tools, "_get_client", lambda: FakeClient())
+
+    async def test_default_projection_trims_and_keeps_event_fields(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._install(monkeypatch, {"data": [dict(self.ROW)], "percentage": 100})
+
+        result = await event_tools.get_alert_logs(alert_ids=["A-1"])
+
+        row = result["data"]["data"][0]
+        assert "cfgattr" not in row
+        assert row["action"] == "login"
+        # Every other envelope key survives untouched alongside the
+        # projected inner list.
+        assert result["data"]["percentage"] == 100
+
+    async def test_star_returns_the_full_row(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._install(monkeypatch, {"data": [dict(self.ROW)], "percentage": 100})
+
+        result = await event_tools.get_alert_logs(alert_ids=["A-1"], fields=["*"])
+
+        assert result["data"]["data"][0]["cfgattr"] == "verbose config diff blob"
+
+    async def test_explicit_fields_select_exactly_those_keys(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._install(monkeypatch, {"data": [dict(self.ROW)], "percentage": 100})
+
+        result = await event_tools.get_alert_logs(alert_ids=["A-1"], fields=["action", "user"])
+
+        assert result["data"]["data"][0] == {"action": "login", "user": "admin"}
+        assert result["fields_returned"] == ["action", "user"]
+
+    async def test_an_empty_fields_list_is_a_typed_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._install(monkeypatch, {"data": [dict(self.ROW)], "percentage": 100})
+
+        result = await event_tools.get_alert_logs(alert_ids=["A-1"], fields=[])
+
+        assert result["status"] == "error"
+        assert result["error"] == "validation_error"

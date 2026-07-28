@@ -1946,12 +1946,43 @@ and add `"fields_returned": returned` to the returned dict. If the function alre
 builds a `warnings` list, extend it with `projection_warnings`; if it does not,
 add `"warnings": projection_warnings` to the response.
 
-Apply the identical change to `get_alert_logs` — its rows are *logs*, not alerts,
-so it uses the `"event"` vocabulary, not `"alert"`:
+`get_alert_logs` uses the `"event"` vocabulary — its rows are *logs*, not alerts —
+but it is **not** the identical change, and an earlier draft of this plan got it
+wrong. **Unwrap before projecting.**
+
+The `/eventmgmt/.../alertlogs` endpoint answers with an envelope dict
+(`{"data": [...], "percentage": ..., ...}`), not a bare row list. This repo
+documents that itself: `skills/handlers.py:172-176`'s `_records()` docstring says
+"Tolerates a bare list of records or a dict wrapping a `data` list (alertlogs
+comes back as the latter)."
+
+Handing that envelope straight to `project_payload` hits its non-list branch,
+which passes the payload through untouched — so `fields` and `fields=["*"]` do
+**nothing** and `fields_returned` is always `[]`, silently. Measured during
+execution with a fake client returning `{"data": [...]}`: the requested
+projection was ignored and a field that should have been dropped came back.
+
+So project the **inner list** and put it back, leaving every other envelope key
+intact — the envelope is the response contract its callers (including the skills
+layer via `_records()`) expect, and unwrapping it here would be a second,
+unasked-for contract change:
 
 ```python
-        data, returned, projection_warnings = project_payload("event", data, fields)
+        # alertlogs answers with an envelope, not a row list. Project the rows
+        # inside it and leave the envelope's other keys alone; handing the
+        # envelope to project_payload would silently no-op.
+        if isinstance(data, dict) and isinstance(data.get("data"), list):
+            rows, returned, projection_warnings = project_payload(
+                "event", data["data"], fields
+            )
+            data = {**data, "data": rows}
+        else:
+            data, returned, projection_warnings = project_payload("event", data, fields)
 ```
+
+Read the actual response handling before editing, and if the real shape differs
+from this, follow the code and report the deviation. `project_payload` itself
+stays unchanged — its list-only rule is correct at the `query/shape.py` layer.
 
 In `src/fortianalyzer_mcp/tools/incident_tools.py`, the same with `"incident"`:
 
@@ -2228,7 +2259,7 @@ Expected: green. The skills layer composes several of these readers — run its 
 
 ```bash
 FORTIANALYZER_HOST=ci-dummy.local FAZ_SKILLS_ENABLED=true PYTHONPATH=src uv run pytest \
-  tests/test_skills_handlers.py -q --no-cov
+  tests/test_skills*.py -q --no-cov
 ```
 If a skill asserts on a field the curated set drops, the skill should pass an
 explicit `fields` list naming what it needs — that is the projection working,

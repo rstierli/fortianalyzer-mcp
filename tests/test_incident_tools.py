@@ -337,3 +337,19 @@ class TestGetIncidentsProjection:
         result = await incident_tools.get_incidents(fields=["*"])
 
         assert result["data"][0]["description"] == "long free text"
+
+    async def test_a_non_list_data_value_is_wrapped_into_a_single_row(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A "data" value that isn't a list is still coerced into a one-row list.
+
+        Some FAZ responses collapse a singleton result to a bare object rather
+        than a one-item list. The skills layer (handlers.py) relies on
+        get_incidents always handing back a list under "data" -- iterating a
+        bare dict would walk its keys, not rows.
+        """
+        self._install(monkeypatch, {"data": dict(self.ROW)})
+
+        result = await incident_tools.get_incidents(fields=["*"])
+
+        assert result["data"] == [self.ROW]
