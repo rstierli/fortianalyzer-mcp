@@ -6,6 +6,7 @@ Follows the same pattern as test_system_tools.py to avoid server initialization.
 
 import pytest
 
+import fortianalyzer_mcp.tools.fortiview_tools as fortiview_tools
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.utils.validation import (
     VALID_FORTIVIEW_VIEWS,
@@ -214,4 +215,51 @@ class TestCloudApplicationsSortDefault:
             await get_top_cloud_applications()
         assert gfd.call_args.kwargs["view_name"] == "top-cloud-applications"
         assert gfd.call_args.kwargs["sort_by"] == "sessions"
-        assert gfd.call_args.kwargs["sort_by"] != "bandwidth"
+
+
+class TestFortiViewProjection:
+    """FortiView rows are per-view, so there is no curated default."""
+
+    ROWS = [{"srcip": "10.0.0.1", "bandwidth": 100, "sessions": 4}]
+
+    class FakeClient:
+        """get_fortiview_data starts a task then polls fetch until 100%."""
+
+        def __init__(self, rows: list[dict[str, object]]) -> None:
+            self.rows = rows
+
+        async def ensure_connected(self) -> None:
+            return None
+
+        async def get_system_timezone(self) -> None:
+            return None
+
+        async def fortiview_run(self, **kwargs: object) -> dict[str, object]:
+            return {"tid": 4242}
+
+        async def fortiview_fetch(self, **kwargs: object) -> dict[str, object]:
+            return {"percentage": 100, "data": self.rows}
+
+    def _install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            fortiview_tools, "_get_client", lambda: self.FakeClient(list(self.ROWS))
+        )
+
+    async def test_default_returns_full_rows_with_a_warning(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._install(monkeypatch)
+
+        result = await fortiview_tools.get_fortiview_data(view_name="top-sources")
+
+        assert result["data"][0]["sessions"] == 4
+        assert any("fields" in w for w in result["warnings"])
+
+    async def test_explicit_fields_select(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._install(monkeypatch)
+
+        result = await fortiview_tools.get_fortiview_data(
+            view_name="top-sources", fields=["srcip", "bandwidth"]
+        )
+
+        assert result["data"] == [{"srcip": "10.0.0.1", "bandwidth": 100}]

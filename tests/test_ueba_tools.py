@@ -65,7 +65,9 @@ def _patch_client(monkeypatch: pytest.MonkeyPatch, payload: Any) -> _FakeClient:
 class TestGetEndpoints:
     async def test_success_and_param_forwarding(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake = _patch_client(monkeypatch, [{"epname": "host-1", "epip": "10.0.0.5"}])
-        result = await ueba_tools.get_endpoints(adom="root", epids=[7], detail_level="basic")
+        result = await ueba_tools.get_endpoints(
+            adom="root", epids=[7], detail_level="basic", fields=["*"]
+        )
         assert result["status"] == "success"
         assert result["data"][0]["epname"] == "host-1"
         sent = fake.calls["get_endpoints"]
@@ -128,7 +130,7 @@ class TestGetEndpointVulnerabilities:
 class TestGetEndusers:
     async def test_success_extended(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake = _patch_client(monkeypatch, [{"euname": "jdoe", "email": "jdoe@example.com"}])
-        result = await ueba_tools.get_endusers(detail_level="extended")
+        result = await ueba_tools.get_endusers(detail_level="extended", fields=["*"])
         assert result["status"] == "success"
         assert result["data"][0]["email"] == "jdoe@example.com"
         assert fake.calls["get_endusers"]["detail_level"] == "extended"
@@ -322,3 +324,48 @@ class TestUebaClientMethods:
                 adom="root", time_range=tr, stats_item=["total-count"]
             )
         assert req.await_args.kwargs["stats-item"] == ["total-count"]
+
+
+# --------------------------------------------------------------------- #
+# projection                                                            #
+# --------------------------------------------------------------------- #
+
+
+class TestUebaProjection:
+    """Endpoints and endusers project, keeping epid/euid."""
+
+    async def test_endpoints_default_keeps_the_join_keys(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        row = {"epid": 1, "euid": 2, "hostname": "h", "vulnstat": {"big": "payload"}}
+
+        class FakeClient:
+            async def ensure_connected(self) -> None:
+                return None
+
+            async def get_endpoints(self, **kwargs: object) -> list[dict[str, object]]:
+                return [row]
+
+        monkeypatch.setattr(ueba_tools, "_get_client", lambda: FakeClient())
+
+        result = await ueba_tools.get_endpoints()
+
+        assert result["data"][0]["epid"] == 1
+        assert result["data"][0]["euid"] == 2
+        assert "vulnstat" not in result["data"][0]
+
+    async def test_endusers_star_returns_everything(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        row = {"euid": 2, "username": "jdoe", "phone": "555"}
+
+        class FakeClient:
+            async def ensure_connected(self) -> None:
+                return None
+
+            async def get_endusers(self, **kwargs: object) -> list[dict[str, object]]:
+                return [row]
+
+        monkeypatch.setattr(ueba_tools, "_get_client", lambda: FakeClient())
+
+        result = await ueba_tools.get_endusers(fields=["*"])
+
+        assert result["data"][0]["phone"] == "555"

@@ -6,6 +6,7 @@ Follows the same pattern as test_system_tools.py to avoid server initialization.
 
 import pytest
 
+import fortianalyzer_mcp.tools.report_tools as report_tools
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 
 
@@ -276,3 +277,32 @@ class TestReportFormats:
         """Test default output format is PDF."""
         default_format = "PDF"
         assert default_format == "PDF"
+
+
+class TestReportHistoryProjection:
+    """Report rows project under the report vocabulary."""
+
+    async def test_default_trims_and_keeps_the_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        row = {"id": "r-1", "title": "Weekly", "state": "done", "owner": "admin"}
+
+        class FakeClient:
+            async def ensure_connected(self) -> None:
+                return None
+
+            async def get_system_timezone(self) -> None:
+                # get_report_history's default time_range ("30-day") is
+                # relative, so _parse_time_range looks up the FAZ TZ.
+                return None
+
+            async def report_get_state(self, **kwargs: object) -> list[dict[str, object]]:
+                # The real client call get_report_history's tool body makes
+                # (client.report_get_state, not a client.get_report_history
+                # method -- there is no such client method).
+                return [row]
+
+        monkeypatch.setattr(report_tools, "_get_client", lambda: FakeClient())
+
+        result = await report_tools.get_report_history()
+
+        assert result["data"][0]["id"] == "r-1"
+        assert "owner" not in result["data"][0]

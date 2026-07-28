@@ -14,9 +14,10 @@ from datetime import datetime
 from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
+from fortianalyzer_mcp.query.shape import project_payload
 from fortianalyzer_mcp.server import get_faz_client, mcp
 from fortianalyzer_mcp.tool_annotations import READ_ONLY
-from fortianalyzer_mcp.utils.responses import coerce_num, redact
+from fortianalyzer_mcp.utils.responses import coerce_num, error_response, redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
@@ -587,6 +588,7 @@ async def get_report_history(
     adom: str | None = None,
     time_range: str = "30-day",
     title: str | None = None,
+    fields: list[str] | None = None,
 ) -> dict[str, Any]:
     """Get report history - list of generated reports.
 
@@ -596,6 +598,9 @@ async def get_report_history(
         adom: ADOM name (default: from config DEFAULT_ADOM)
         time_range: Time range to search (default: "30-day")
         title: Filter by report title (optional)
+        fields: Which keys each report record carries. Omit for a curated
+            default (id, title, state, timing and format), ["*"] for the
+            full object, or name the fields you want.
 
     Returns:
         dict with report history
@@ -623,12 +628,23 @@ async def get_report_history(
         if not isinstance(data, list):
             data = [data] if data else []
 
+        data, returned, projection_warnings = project_payload("report", data, fields)
+
         return {
             "status": "success",
             "adom": adom,
             "count": len(data),
             "data": data,
+            "fields_returned": returned,
+            "warnings": projection_warnings,
         }
+    except ValidationError as e:
+        return error_response(
+            error="validation_error",
+            message=e,
+            operation="get_report_history",
+            adom=adom,
+        )
     except Exception as e:
         logger.error(f"Failed to get report history: {e}")
         return {"status": "error", "message": redact(str(e))}

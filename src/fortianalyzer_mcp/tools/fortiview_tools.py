@@ -9,9 +9,10 @@ import logging
 from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
+from fortianalyzer_mcp.query.shape import project_payload
 from fortianalyzer_mcp.server import get_faz_client, mcp
 from fortianalyzer_mcp.tool_annotations import READ_ONLY
-from fortianalyzer_mcp.utils.responses import coerce_num, redact
+from fortianalyzer_mcp.utils.responses import coerce_num, error_response, redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
@@ -238,6 +239,7 @@ async def get_fortiview_data(
     timeout: int = 30,
     sort_by: str | None = None,
     sort_order: str = "desc",
+    fields: list[str] | None = None,
 ) -> dict[str, Any]:
     """Get FortiView data with automatic TID handling.
 
@@ -259,6 +261,9 @@ async def get_fortiview_data(
             - "sessions": Sort by session count
             - "threatweight": Sort by threat score
         sort_order: Sort order "asc" or "desc" (default: "desc")
+        fields: Which keys each row carries. FortiView columns differ per view
+            and are not curated yet, so omitting this returns full rows with a
+            warning. Pass the columns you want, or ["*"] to silence the warning.
 
     Returns:
         dict with FortiView analytics data
@@ -348,18 +353,27 @@ async def get_fortiview_data(
                     if not isinstance(data, list):
                         data = [data] if data else []
 
+                    data, returned, projection_warnings = project_payload("fortiview", data, fields)
+
                     return {
                         "status": "success",
                         "tid": tid,
                         "view_name": view_name,
                         "count": len(data),
                         "data": data,
+                        "fields_returned": returned,
+                        "warnings": projection_warnings,
                     }
 
             await asyncio.sleep(poll_interval)
 
     except ValidationError as e:
-        return {"status": "error", "message": f"Validation error: {e}"}
+        return error_response(
+            error="validation_error",
+            message=e,
+            operation="get_fortiview_data",
+            adom=adom,
+        )
     except Exception as e:
         logger.error(f"Failed to get FortiView data: {e}")
         return {"status": "error", "message": redact(str(e))}
