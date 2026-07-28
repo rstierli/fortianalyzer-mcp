@@ -2,7 +2,7 @@
 
 A "vocabulary" is one namespace of field names: a logtype (``traffic``,
 ``event``, ``attack``), or an object type in the dvmdb/task family (``device``,
-``task``). Each records four things:
+``task``). Each records five things:
 
 * **canonical** -- field names FortiAnalyzer itself uses. For the dvmdb-family
   vocabularies this set is enumerable and treated as complete; for logtypes it
@@ -23,6 +23,11 @@ A "vocabulary" is one namespace of field names: a logtype (``traffic``,
   is gated on the name being *shaped* like a field name: the string dialect
   interpolates the resolved name raw, so a "field" carrying whitespace, quotes
   or operator characters is an injection attempt and is rejected outright.
+* **projection** -- the curated subset returned when a caller passes no
+  ``fields``. Empty means uncurated: the tool returns full rows plus a warning
+  naming ``fields``, which is today's behaviour, rather than a payload chosen
+  by guesswork. Curations are added as they are verified against live
+  ``logfields`` output, so an empty set is a "not yet", not a "never".
 
 Once the per-logtype catalogues are generated from a live appliance (a spec
 verification item) the log vocabularies can flip to ``complete=True`` and
@@ -114,6 +119,201 @@ _ATTACK_FIELDS: frozenset[str] = _LOG_COMMON | {
     "url",
     "profile",
 }
+
+# Curated projections. Each carries identity (who/where), the discriminator
+# (action/level/severity), the magnitude, the human-readable summary, and --
+# non-negotiably -- the join keys another tool takes as input. Dropping
+# sessionid from traffic breaks get_pcap_by_session with no error that traces
+# back here; tests/test_projection_join_keys.py is the guard.
+_TRAFFIC_PROJECTION: frozenset[str] = frozenset(
+    {
+        "date",
+        "time",
+        "devname",
+        "srcip",
+        "srcport",
+        "dstip",
+        "dstport",
+        "proto",
+        "action",
+        "service",
+        "app",
+        "policyid",
+        "sentbyte",
+        "rcvdbyte",
+        "duration",
+        "user",
+        "sessionid",
+        "srccountry",
+        "dstcountry",
+    }
+)
+
+_EVENT_PROJECTION: frozenset[str] = frozenset(
+    {
+        "date",
+        "time",
+        "devname",
+        "level",
+        "subtype",
+        "action",
+        "user",
+        "ui",
+        "msg",
+        "status",
+    }
+)
+
+_ATTACK_PROJECTION: frozenset[str] = frozenset(
+    {
+        "date",
+        "time",
+        "devname",
+        "severity",
+        "attack",
+        "attackid",
+        "srcip",
+        "srcport",
+        "dstip",
+        "dstport",
+        "proto",
+        "action",
+        "service",
+        "policyid",
+        "cve",
+        "sessionid",
+        "pcapurl",
+        "msg",
+    }
+)
+
+# The four remaining curated logtypes the spec names. Each set is the common
+# core plus the fields that make that logtype worth querying; every name is
+# also added to the vocabulary's canonical set so the subset test holds.
+_VIRUS_FIELDS: frozenset[str] = _LOG_COMMON | {
+    "virus",
+    "filename",
+    "url",
+    "service",
+    "srcport",
+    "dstport",
+    "proto",
+    "profile",
+    "eventtype",
+    "filehash",
+}
+_VIRUS_PROJECTION: frozenset[str] = frozenset(
+    {
+        "date",
+        "time",
+        "devname",
+        "action",
+        "virus",
+        "filename",
+        "filehash",
+        "url",
+        "srcip",
+        "dstip",
+        "user",
+        "service",
+        "msg",
+    }
+)
+
+_WEBFILTER_FIELDS: frozenset[str] = _LOG_COMMON | {
+    "hostname",
+    "url",
+    "catdesc",
+    "cat",
+    "service",
+    "srcport",
+    "dstport",
+    "proto",
+    "profile",
+    "eventtype",
+    "reqtype",
+    "sentbyte",
+    "rcvdbyte",
+}
+_WEBFILTER_PROJECTION: frozenset[str] = frozenset(
+    {
+        "date",
+        "time",
+        "devname",
+        "action",
+        "hostname",
+        "url",
+        "catdesc",
+        "srcip",
+        "dstip",
+        "user",
+        "sentbyte",
+        "rcvdbyte",
+        "msg",
+    }
+)
+
+_APPCTRL_FIELDS: frozenset[str] = _LOG_COMMON | {
+    "app",
+    "appcat",
+    "apprisk",
+    "hostname",
+    "url",
+    "service",
+    "srcport",
+    "dstport",
+    "proto",
+    "profile",
+    "eventtype",
+    "sentbyte",
+    "rcvdbyte",
+}
+_APPCTRL_PROJECTION: frozenset[str] = frozenset(
+    {
+        "date",
+        "time",
+        "devname",
+        "action",
+        "app",
+        "appcat",
+        "apprisk",
+        "hostname",
+        "srcip",
+        "dstip",
+        "user",
+        "sentbyte",
+        "rcvdbyte",
+        "msg",
+    }
+)
+
+_DNS_FIELDS: frozenset[str] = _LOG_COMMON | {
+    "qname",
+    "qtype",
+    "qclass",
+    "xid",
+    "srcport",
+    "dstport",
+    "proto",
+    "profile",
+    "eventtype",
+    "catdesc",
+}
+_DNS_PROJECTION: frozenset[str] = frozenset(
+    {
+        "date",
+        "time",
+        "devname",
+        "action",
+        "qname",
+        "qtype",
+        "catdesc",
+        "srcip",
+        "dstip",
+        "user",
+        "msg",
+    }
+)
 
 # Aliases shared by every log vocabulary. Kept in one dict so a name means the
 # same thing in every logtype. Deliberately omitted: bare "country" and "port",
@@ -230,6 +430,241 @@ TASK_STATE_CODES: Mapping[str, int] = {
 
 _NO_COERCIONS: Mapping[str, Mapping[str, int]] = {}
 
+# --- non-log vocabularies -------------------------------------------------- #
+# These carry no filter dialect of their own in this plan (eventmgmt and
+# incidentmgmt take the string dialect, which Plan 1 already emits), but they
+# need canonical sets so projection can validate names against something.
+
+_ALERT_FIELDS: frozenset[str] = frozenset(
+    {
+        "alertid",
+        "adom",
+        "severity",
+        "status",
+        "alerttime",
+        "firstlogtime",
+        "lastlogtime",
+        "count",
+        "eventtype",
+        "extrainfo",
+        "devname",
+        "devid",
+        "subject",
+        "subject_details",
+        "triggername",
+        "epid",
+        "euid",
+        "acknowledged",
+        "comments",
+        "target",
+    }
+)
+_ALERT_PROJECTION: frozenset[str] = frozenset(
+    {
+        "alertid",
+        "severity",
+        "status",
+        "alerttime",
+        "lastlogtime",
+        "count",
+        "eventtype",
+        "devname",
+        "subject",
+        "triggername",
+        "epid",
+        "euid",
+        "acknowledged",
+    }
+)
+_ALERT_ALIASES: Mapping[str, str] = {
+    "alert_id": "alertid",
+    "event_type": "eventtype",
+    "device_name": "devname",
+    "trigger": "triggername",
+}
+
+_INCIDENT_FIELDS: frozenset[str] = frozenset(
+    {
+        "incid",
+        "adom",
+        "severity",
+        "status",
+        "category",
+        "createtime",
+        "updatetime",
+        "banner",
+        "description",
+        "assignee",
+        "reporter",
+        "endpoint",
+        "epid",
+        "euid",
+        "alertid",
+        "attachment",
+        "connector",
+        "ticket",
+    }
+)
+_INCIDENT_PROJECTION: frozenset[str] = frozenset(
+    {
+        "incid",
+        "severity",
+        "status",
+        "category",
+        "createtime",
+        "updatetime",
+        "banner",
+        "assignee",
+        "reporter",
+        "epid",
+        "euid",
+        "alertid",
+    }
+)
+_INCIDENT_ALIASES: Mapping[str, str] = {
+    "incident_id": "incid",
+    "title": "banner",
+    "owner": "assignee",
+}
+
+_ENDPOINT_FIELDS: frozenset[str] = frozenset(
+    {
+        "epid",
+        "hostname",
+        "ip",
+        "mac",
+        "os",
+        "osversion",
+        "firstseen",
+        "lastseen",
+        "department",
+        "euid",
+        "username",
+        "vulnstat",
+        "devname",
+        "devid",
+        "onnet",
+        "status",
+        "detectkey",
+    }
+)
+_ENDPOINT_PROJECTION: frozenset[str] = frozenset(
+    {
+        "epid",
+        "hostname",
+        "ip",
+        "mac",
+        "os",
+        "lastseen",
+        "department",
+        "euid",
+        "username",
+        "status",
+    }
+)
+_ENDPOINT_ALIASES: Mapping[str, str] = {
+    "endpoint_id": "epid",
+    "host": "hostname",
+    "last_seen": "lastseen",
+}
+
+_ENDUSER_FIELDS: frozenset[str] = frozenset(
+    {
+        "euid",
+        "username",
+        "groups",
+        "email",
+        "department",
+        "title",
+        "phone",
+        "vpnip",
+        "firstseen",
+        "lastseen",
+        "epids",
+    }
+)
+_ENDUSER_PROJECTION: frozenset[str] = frozenset(
+    {
+        "euid",
+        "username",
+        "groups",
+        "department",
+        "lastseen",
+        "epids",
+    }
+)
+_ENDUSER_ALIASES: Mapping[str, str] = {
+    "enduser_id": "euid",
+    "user": "username",
+    "last_seen": "lastseen",
+}
+
+_REPORT_FIELDS: frozenset[str] = frozenset(
+    {
+        "id",
+        "title",
+        "adom",
+        "start-time",
+        "end-time",
+        "state",
+        "progress-percent",
+        "period-start",
+        "period-end",
+        "template",
+        "format",
+        "size",
+        "owner",
+    }
+)
+_REPORT_PROJECTION: frozenset[str] = frozenset(
+    {
+        "id",
+        "title",
+        "state",
+        "start-time",
+        "end-time",
+        "period-start",
+        "period-end",
+        "format",
+    }
+)
+_REPORT_ALIASES: Mapping[str, str] = {
+    "report_id": "id",
+    "name": "title",
+    "status": "state",
+}
+
+_DEVICE_PROJECTION: frozenset[str] = frozenset(
+    {
+        "name",
+        "ip",
+        "sn",
+        "hostname",
+        "os_ver",
+        "mr",
+        "patch",
+        "platform_str",
+        "conn_status",
+        "dev_status",
+        "vdom",
+    }
+)
+
+_TASK_PROJECTION: frozenset[str] = frozenset(
+    {
+        "id",
+        "title",
+        "state",
+        "percent",
+        "user",
+        "adom",
+        "start_tm",
+        "end_tm",
+        "num_err",
+        "num_warn",
+    }
+)
+
 
 @dataclass(frozen=True)
 class Vocabulary:
@@ -241,6 +676,7 @@ class Vocabulary:
     aliases: Mapping[str, str]
     coercions: Mapping[str, Mapping[str, int]]
     complete: bool
+    projection: frozenset[str] = frozenset()
 
 
 _GENERIC_LOG = Vocabulary(
@@ -260,6 +696,7 @@ _VOCABULARIES: Mapping[str, Vocabulary] = {
         aliases=_LOG_ALIASES,
         coercions=_NO_COERCIONS,
         complete=False,
+        projection=_TRAFFIC_PROJECTION,
     ),
     "event": Vocabulary(
         name="event",
@@ -268,6 +705,7 @@ _VOCABULARIES: Mapping[str, Vocabulary] = {
         aliases=_LOG_ALIASES,
         coercions=_NO_COERCIONS,
         complete=False,
+        projection=_EVENT_PROJECTION,
     ),
     "attack": Vocabulary(
         name="attack",
@@ -276,6 +714,43 @@ _VOCABULARIES: Mapping[str, Vocabulary] = {
         aliases=_LOG_ALIASES,
         coercions=_NO_COERCIONS,
         complete=False,
+        projection=_ATTACK_PROJECTION,
+    ),
+    "virus": Vocabulary(
+        name="virus",
+        dialect="string",
+        canonical=_VIRUS_FIELDS,
+        aliases=_LOG_ALIASES,
+        coercions=_NO_COERCIONS,
+        complete=False,
+        projection=_VIRUS_PROJECTION,
+    ),
+    "webfilter": Vocabulary(
+        name="webfilter",
+        dialect="string",
+        canonical=_WEBFILTER_FIELDS,
+        aliases=_LOG_ALIASES,
+        coercions=_NO_COERCIONS,
+        complete=False,
+        projection=_WEBFILTER_PROJECTION,
+    ),
+    "app-ctrl": Vocabulary(
+        name="app-ctrl",
+        dialect="string",
+        canonical=_APPCTRL_FIELDS,
+        aliases=_LOG_ALIASES,
+        coercions=_NO_COERCIONS,
+        complete=False,
+        projection=_APPCTRL_PROJECTION,
+    ),
+    "dns": Vocabulary(
+        name="dns",
+        dialect="string",
+        canonical=_DNS_FIELDS,
+        aliases=_LOG_ALIASES,
+        coercions=_NO_COERCIONS,
+        complete=False,
+        projection=_DNS_PROJECTION,
     ),
     "device": Vocabulary(
         name="device",
@@ -284,6 +759,7 @@ _VOCABULARIES: Mapping[str, Vocabulary] = {
         aliases=_DEVICE_ALIASES,
         coercions={"conn_status": _CONN_STATUS_CODES},
         complete=True,
+        projection=_DEVICE_PROJECTION,
     ),
     "task": Vocabulary(
         name="task",
@@ -292,6 +768,52 @@ _VOCABULARIES: Mapping[str, Vocabulary] = {
         aliases=_TASK_ALIASES,
         coercions={"state": TASK_STATE_CODES},
         complete=True,
+        projection=_TASK_PROJECTION,
+    ),
+    "alert": Vocabulary(
+        name="alert",
+        dialect="string",
+        canonical=_ALERT_FIELDS,
+        aliases=_ALERT_ALIASES,
+        coercions=_NO_COERCIONS,
+        complete=False,
+        projection=_ALERT_PROJECTION,
+    ),
+    "incident": Vocabulary(
+        name="incident",
+        dialect="string",
+        canonical=_INCIDENT_FIELDS,
+        aliases=_INCIDENT_ALIASES,
+        coercions=_NO_COERCIONS,
+        complete=False,
+        projection=_INCIDENT_PROJECTION,
+    ),
+    "endpoint": Vocabulary(
+        name="endpoint",
+        dialect="string",
+        canonical=_ENDPOINT_FIELDS,
+        aliases=_ENDPOINT_ALIASES,
+        coercions=_NO_COERCIONS,
+        complete=False,
+        projection=_ENDPOINT_PROJECTION,
+    ),
+    "enduser": Vocabulary(
+        name="enduser",
+        dialect="string",
+        canonical=_ENDUSER_FIELDS,
+        aliases=_ENDUSER_ALIASES,
+        coercions=_NO_COERCIONS,
+        complete=False,
+        projection=_ENDUSER_PROJECTION,
+    ),
+    "report": Vocabulary(
+        name="report",
+        dialect="string",
+        canonical=_REPORT_FIELDS,
+        aliases=_REPORT_ALIASES,
+        coercions=_NO_COERCIONS,
+        complete=False,
+        projection=_REPORT_PROJECTION,
     ),
 }
 
@@ -304,6 +826,15 @@ def get_vocabulary(name: str) -> Vocabulary:
     aliases and the common-field core rather than an error.
     """
     return _VOCABULARIES.get(name.strip().lower(), _GENERIC_LOG)
+
+
+def has_projection(vocabulary: str) -> bool:
+    """Whether this vocabulary has a curated default projection.
+
+    ``False`` means a caller who passes no ``fields`` gets full rows and a
+    warning, which is the pre-projection behaviour -- never a guessed subset.
+    """
+    return bool(get_vocabulary(vocabulary).projection)
 
 
 def resolve_field(vocabulary: str, name: str) -> tuple[str, str | None]:

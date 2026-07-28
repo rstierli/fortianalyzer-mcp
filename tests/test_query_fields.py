@@ -7,6 +7,7 @@ import pytest
 from fortianalyzer_mcp.query.fields import (
     coerce_value,
     get_vocabulary,
+    has_projection,
     resolve_field,
 )
 from fortianalyzer_mcp.utils.errors import ValidationError
@@ -103,3 +104,36 @@ class TestRegistryMatchesTheToolsItReplaces:
         from fortianalyzer_mcp.query.fields import _CONN_STATUS_CODES
 
         assert dict(_CONN_STATUS_CODES) == {"unknown": 0, "up": 1, "down": 2}
+
+
+class TestCuratedProjections:
+    """Every curated set is a subset of what the vocabulary says exists."""
+
+    CURATED = ("traffic", "event", "attack", "device", "task", "alert", "incident")
+
+    @pytest.mark.parametrize("name", CURATED)
+    def test_curated_vocabularies_have_a_projection(self, name: str) -> None:
+        assert get_vocabulary(name).projection, f"{name} has no curated projection"
+
+    @pytest.mark.parametrize("name", CURATED)
+    def test_projection_is_a_subset_of_canonical(self, name: str) -> None:
+        """A curated name the vocabulary does not know is a typo, not a field."""
+        vocab = get_vocabulary(name)
+        unknown = vocab.projection - vocab.canonical
+        assert not unknown, f"{name} projects unknown fields: {sorted(unknown)}"
+
+    def test_an_uncurated_logtype_has_an_empty_projection(self) -> None:
+        """voip has no curated set; that must read as absence, not as {}."""
+        assert get_vocabulary("voip").projection == frozenset()
+
+    def test_has_projection_reports_curation(self) -> None:
+        assert has_projection("traffic") is True
+        assert has_projection("voip") is False
+
+    def test_traffic_projection_carries_identity_magnitude_and_summary(self) -> None:
+        """The spec's shape requirement, asserted rather than assumed."""
+        traffic = get_vocabulary("traffic").projection
+        assert {"srcip", "dstip"} <= traffic, "identity missing"
+        assert "action" in traffic, "discriminator missing"
+        assert {"sentbyte", "rcvdbyte"} <= traffic, "magnitude missing"
+        assert {"service", "app"} <= traffic, "summary missing"
