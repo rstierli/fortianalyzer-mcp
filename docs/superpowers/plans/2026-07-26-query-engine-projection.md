@@ -1755,15 +1755,25 @@ class TestGetAlertsProjection:
 
         assert result["fields_returned"] == ["alertid", "severity"]
 
-    async def test_a_dict_payload_passes_through_unprojected(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Some responses answer with an object, not a row list."""
-        self._install(monkeypatch, {"total": 3})
-
-        result = await event_tools.get_alerts()
-
-        assert result["data"] == {"total": 3}
+    # REMOVED 2026-07-28 during execution — this test was a plan defect.
+    #
+    # It asserted that a bare-dict payload reaches the caller untouched. But
+    # get_alerts and get_incidents have ALWAYS normalised `data` to a list:
+    #
+    #     data = result.get("data", []) if isinstance(result, dict) else result
+    #     if not isinstance(data, list):
+    #         data = [data] if data else []
+    #
+    # and the skills layer depends on that guarantee -- handlers.py:286 types
+    # it `list[dict[str, Any]]` and enumerates it; :327, :527 and :542 iterate
+    # it. Removing the coercion to satisfy this test makes a dict payload
+    # iterate as dict KEYS in those loops: silently wrong data, and no test
+    # covers the path.
+    #
+    # Adjudicated by the human partner: the existing code contract governs.
+    # The coercion stays, this test is gone, and project_payload keeps its
+    # list-only rule at the query/shape.py layer where it is still correct and
+    # still tested. Do not reinstate this test against these two tools.
 
     async def test_an_empty_fields_list_is_a_typed_error(
         self, monkeypatch: pytest.MonkeyPatch
@@ -2615,6 +2625,19 @@ target is valid. And `log_tools`' internals that Task 4 edits by name —
 `_run_logsearch_page`, `_register_search`, `logs = page["logs"]` (`:609`, `:881`),
 `warnings.extend(filter_warnings)` (`:631`), `"logs": logs` (`:671`, `:968`) — are
 all present and spelled as the task assumes.
+
+**Defect found during execution (Task 5).** The reconciliation above was a
+static audit; this one only surfaced when the code ran. Task 5's brief mandated
+`test_a_dict_payload_passes_through_unprojected`, asserting that `get_alerts`
+hands a bare-dict payload back untouched. Those tools have always normalised
+`data` to a list, and the skills layer depends on it (`handlers.py:286` types it
+`list[dict[str, Any]]` and enumerates it; `:327`, `:527`, `:542` iterate it), so
+satisfying the test meant a dict payload would iterate as dict *keys* — silently
+wrong data on a path no test covers. Adjudicated by the human partner in favour
+of the existing code contract: the coercion stays, the test is struck from this
+plan, and `project_payload` keeps its list-only rule at the `query/shape.py`
+layer, where it remains correct and tested. The lesson generalises — a plan may
+assert a contract the code never had, and a mandated test is not evidence.
 
 **One decision about error codes, recorded so it is not read as an oversight.**
 The spec's error table maps an unknown name in `fields` to `unknown_field`. This

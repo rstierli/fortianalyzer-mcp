@@ -332,15 +332,21 @@ class TestGetAlertsProjection:
 
         assert result["fields_returned"] == ["alertid", "severity"]
 
-    async def test_a_dict_payload_passes_through_unprojected(
+    async def test_a_non_list_data_value_is_wrapped_into_a_single_row(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Some responses answer with an object, not a row list."""
-        self._install(monkeypatch, {"total": 3})
+        """A "data" value that isn't a list is still coerced into a one-row list.
 
-        result = await event_tools.get_alerts()
+        Some FAZ responses collapse a singleton result to a bare object rather
+        than a one-item list. The skills layer (handlers.py) relies on
+        get_alerts always handing back a list under "data" -- iterating a
+        bare dict would walk its keys, not rows.
+        """
+        self._install(monkeypatch, {"data": dict(self.ROW)})
 
-        assert result["data"] == {"total": 3}
+        result = await event_tools.get_alerts(fields=["*"])
+
+        assert result["data"] == [self.ROW]
 
     async def test_an_empty_fields_list_is_a_typed_error(
         self, monkeypatch: pytest.MonkeyPatch

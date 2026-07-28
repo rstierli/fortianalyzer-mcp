@@ -109,11 +109,9 @@ async def get_incidents(
             offset=offset,
         )
 
-        # Some responses answer with a bare object (e.g. a status/count
-        # envelope) rather than a "data"-wrapped row list. Preserve that
-        # shape rather than discarding it -- project_payload only projects
-        # a list and passes anything else through untouched.
-        data = result.get("data", result) if isinstance(result, dict) else result
+        data = result.get("data", []) if isinstance(result, dict) else result
+        if not isinstance(data, list):
+            data = [data] if data else []
 
         data, returned, projection_warnings = project_payload("incident", data, fields)
 
@@ -121,7 +119,7 @@ async def get_incidents(
             "status": "success",
             "adom": adom,
             "time_range": tr,
-            "count": len(data) if isinstance(data, list) else 0,
+            "count": len(data),
             "data": data,
             "fields_returned": returned,
             "warnings": projection_warnings,
