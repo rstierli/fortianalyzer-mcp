@@ -516,10 +516,17 @@ async def search_devices(
         fields: Which keys each device carries. Unlike the log tools this is
             native -- the list is sent to dvmdb, so the untrimmed object never
             crosses the wire. Omit for a curated default (name, ip, sn,
-            hostname, version, platform, status, vdom); pass ["*"] for every
-            field the appliance defines, roughly 60 per device and mostly empty
-            placeholders; or name the fields you want. English aliases work here
-            exactly as they do in `filters` -- serial_number resolves to sn.
+            hostname, os_ver, mr, patch, platform_str, conn_status, dev_status,
+            vdom); pass ["*"] for every field the appliance defines, roughly 60
+            per device and mostly empty placeholders; or name the fields you
+            want. English aliases work here exactly as they do in `filters` --
+            serial_number resolves to sn, os_version to os_ver, platform to
+            platform_str, connection_status to conn_status.
+            Unlike `filters`, a name outside the list above is NOT an error
+            here: it is forwarded to dvmdb with a warning, so appliance fields
+            this server does not enumerate (``oid``, ``ha_mode``, ``os_type``,
+            ``last_checked``, ...) are reachable. A field the appliance does
+            not define simply does not appear in the rows.
             The appliance always adds ``oid`` to each object regardless.
 
     Returns:

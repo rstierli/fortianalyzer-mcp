@@ -54,8 +54,19 @@ def resolve_projection(
         answer.
 
     Raises:
-        ValidationError: on an empty list, ``"*"`` mixed with real names, or an
-            unknown name in a vocabulary that enumerates its fields.
+        ValidationError: on an empty list, ``"*"`` mixed with real names, or a
+            name not shaped like a field name at all.
+
+    Note:
+        An unknown name is never rejected here, not even for a vocabulary that
+        enumerates its fields. ``complete=True`` is a *filter*-path boundary --
+        a filter interpolates the name into an expression, so an unrecognised
+        one is an injection surface. A projection only ever selects keys, and
+        the dvmdb sets here are small enough that enforcing them blocked
+        reads of real appliance fields (``oid``, which ``search_devices``' own
+        docstring says the appliance always adds, plus ``ha_mode``,
+        ``os_type``, ``last_checked``, ``devvds``) that worked before
+        projection existed. Unknown names come back with a warning instead.
     """
     if fields is None:
         vocab = get_vocabulary(vocabulary)
@@ -87,7 +98,7 @@ def resolve_projection(
     keys: set[str] = set()
     warnings: list[str] = []
     for name in fields:
-        canonical, warning = resolve_field(vocabulary, name)
+        canonical, warning = resolve_field(vocabulary, name, enforce_complete=False)
         if warning:
             warnings.append(warning)
         keys.add(canonical)

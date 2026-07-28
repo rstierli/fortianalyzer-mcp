@@ -824,18 +824,37 @@ def has_projection(vocabulary: str) -> bool:
     return bool(get_vocabulary(vocabulary).projection)
 
 
-def resolve_field(vocabulary: str, name: str) -> tuple[str, str | None]:
+def resolve_field(
+    vocabulary: str,
+    name: str,
+    *,
+    enforce_complete: bool = True,
+) -> tuple[str, str | None]:
     """Resolve a caller-supplied field name to its canonical FAZ spelling.
 
     Returns ``(canonical_name, warning_or_None)``.
 
+    Args:
+        vocabulary: The logtype or object type whose names apply.
+        name: The caller's spelling; aliases are accepted.
+        enforce_complete: Whether ``complete=True`` may *reject* an unknown
+            name. True on the filter path, where the canonical set is a
+            security boundary: the string dialect interpolates the resolved
+            name unquoted, and the array dialect builds an operator clause
+            around it, so a name the appliance does not define is an
+            injection surface rather than a typo. False on the projection
+            path, where a field name only ever selects which keys come back
+            -- rejecting there blocks legitimate reads of real appliance
+            fields this module's small dvmdb sets never enumerated (``oid``,
+            ``ha_mode``, ``os_type``, ``last_checked``, ``devvds``), all of
+            which worked before projection existed. The shape check still
+            applies on both paths.
+
     Raises:
-        ValidationError: if the vocabulary enumerates its fields
-            (``complete=True``) and the name is neither canonical nor an alias,
-            or if the name is not shaped like a field name at all (whitespace,
-            quotes, operator characters) -- the string dialect interpolates the
-            resolved name unquoted, so a malformed name is an injection
-            attempt, not a spelling the appliance might know.
+        ValidationError: if ``enforce_complete`` and the vocabulary enumerates
+            its fields (``complete=True``) and the name is neither canonical
+            nor an alias, or if the name is not shaped like a field name at
+            all (whitespace, quotes, operator characters).
     """
     vocab = get_vocabulary(vocabulary)
     lowered = name.strip().lower()
@@ -845,7 +864,7 @@ def resolve_field(vocabulary: str, name: str) -> tuple[str, str | None]:
     if lowered in vocab.aliases:
         return vocab.aliases[lowered], None
 
-    if vocab.complete:
+    if vocab.complete and enforce_complete:
         valid = ", ".join(sorted(vocab.canonical))
         raise ValidationError(f"Unknown field '{name}' for {vocab.name}. Valid fields: {valid}")
 
@@ -854,6 +873,15 @@ def resolve_field(vocabulary: str, name: str) -> tuple[str, str | None]:
             f"'{name}' cannot be a FortiAnalyzer field name. Field names are letters, "
             "digits, underscores, dots or hyphens; operators and quoting belong in "
             "'op' and 'value'."
+        )
+
+    if vocab.complete:
+        # Only reachable with enforce_complete=False. The get_log_fields hint
+        # below is a logview thing and would be a dead end here.
+        return lowered, (
+            f"field '{name}' is not in this server's {vocab.name} field set; requesting "
+            f"it from FortiAnalyzer anyway. If the appliance does not define it the key "
+            f"is simply absent from each row."
         )
 
     return lowered, (

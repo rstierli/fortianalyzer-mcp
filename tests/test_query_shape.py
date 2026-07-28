@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from fortianalyzer_mcp.query.fields import resolve_field
 from fortianalyzer_mcp.query.shape import (
     fields_returned,
     project_rows,
@@ -67,9 +68,35 @@ class TestResolveProjection:
             resolve_projection("traffic", [])
         assert "empty" in str(exc.value).lower()
 
-    def test_unknown_field_on_a_complete_vocabulary_raises(self) -> None:
+    def test_unknown_field_on_a_complete_vocabulary_warns_rather_than_raises(self) -> None:
+        """``complete=True`` is a filter boundary, not a projection one.
+
+        The dvmdb sets here enumerate 16 names; the appliance defines roughly
+        sixty. Enforcing them on the projection path turned real device fields
+        that worked before projection existed -- ``oid``, ``ha_mode``,
+        ``os_type``, ``last_checked``, ``devvds`` -- into ValidationErrors, and
+        ``oid`` is named in search_devices' own docstring as a field the
+        appliance always adds. A filter interpolates the name into an
+        expression, so rejecting an unknown one there is a security decision;
+        a projection only chooses which keys come back.
+        """
+        keys, warnings = resolve_projection("device", ["name", "oid"])
+
+        assert keys == frozenset({"name", "oid"})
+        assert len(warnings) == 1
+        assert "oid" in warnings[0]
+        # The logview catalogue hint would be a dead end for a dvmdb object.
+        assert "get_log_fields" not in warnings[0]
+
+    def test_a_malformed_name_is_still_rejected_on_the_projection_path(self) -> None:
+        """Permissive is not unguarded: the shape check applies to both paths."""
         with pytest.raises(ValidationError):
-            resolve_projection("device", ["not_a_device_field"])
+            resolve_projection("device", ['name" or 1=1'])
+
+    def test_the_filter_path_still_rejects_an_unknown_device_field(self) -> None:
+        """Guards the split: loosening projection must not loosen filters."""
+        with pytest.raises(ValidationError):
+            resolve_field("device", "not_a_device_field")
 
     def test_unknown_field_on_an_incomplete_vocabulary_warns_and_passes(self) -> None:
         keys, warnings = resolve_projection("traffic", ["srcip", "mystery"])
