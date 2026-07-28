@@ -67,8 +67,15 @@ from fortianalyzer_mcp.utils.validation import sanitize_filter_value
 
 logger = logging.getLogger(__name__)
 
-# field==value / field=value / field contain value, single or double quoted
+# field==value / field=value / field contain value, single or double quoted.
+# The lookbehind keeps the field group from starting mid-word: without it a
+# non-clause fragment like "a-srcip=<ip>" reads as a srcip clause and the
+# address is silently transformed (#73 7a). The cost is that a dotted
+# spelling ("foo.srcip") no longer resolves as srcip, which prices at zero:
+# on live 7.6.7 and 8.0.0 a dotted field matches nothing at the appliance,
+# so such a clause only ever produced zero rows.
 _FILTER_CLAUSE_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])"
     r"(?P<field>[A-Za-z_][A-Za-z0-9_]*)"
     r"\s*(?P<op>==|!=|<=|>=|=~|!~|<|>|=(?![=~])|~|!contain\b|\bcontain\b|\b(?ai:like)\b)\s*"
     r"(?P<quote>[\"']?)(?P<value>[^\"'\s()]+)(?P=quote)"

@@ -150,6 +150,25 @@ class TestFilterExpressions:
             unmasker.unmask_filter(f'!(srcip like "%{token}%")') == '!(srcip like "%192.0.2.102%")'
         )
 
+    def test_field_must_start_at_a_word_boundary(self, unmasker: ArgUnmasker):
+        # #73 item 7a: the field group could start mid-word, so a non-clause
+        # fragment like "a-srcip=<ip>" was read as a srcip clause and the
+        # address silently transformed to a different one.
+        fragment = "note a-srcip=192.0.2.7 tail"
+
+        assert unmasker.unmask_filter(fragment) == fragment
+
+    def test_dotted_field_is_left_untouched(self, unmasker: ArgUnmasker, engine: FPEEngine):
+        # The documented cost of the anchor: "foo.srcip" no longer resolves
+        # as srcip. Priced at zero against the appliance: on live 7.6.7 and
+        # 8.0.0 a dotted spelling matches nothing (srcmac==<present mac>
+        # returns thousands of rows, foo.srcmac==<same> returns zero), so a
+        # dotted clause only ever produced zero rows anyway.
+        token = engine.mask_ip("192.0.2.102")
+        expression = f'foo.srcip=="{token}"'
+
+        assert unmasker.unmask_filter(expression) == expression
+
     @pytest.mark.parametrize(
         "expression",
         [
