@@ -64,10 +64,11 @@ def _patch_client(monkeypatch: pytest.MonkeyPatch, payload: Any) -> _FakeClient:
 
 class TestGetEndpoints:
     async def test_success_and_param_forwarding(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # epname/epip are the real (curated) identity fields, so this
+        # exercises the default projection rather than opting out with
+        # fields=["*"] -- see TestUebaProjection for why that matters.
         fake = _patch_client(monkeypatch, [{"epname": "host-1", "epip": "10.0.0.5"}])
-        result = await ueba_tools.get_endpoints(
-            adom="root", epids=[7], detail_level="basic", fields=["*"]
-        )
+        result = await ueba_tools.get_endpoints(adom="root", epids=[7], detail_level="basic")
         assert result["status"] == "success"
         assert result["data"][0]["epname"] == "host-1"
         sent = fake.calls["get_endpoints"]
@@ -332,12 +333,29 @@ class TestUebaClientMethods:
 
 
 class TestUebaProjection:
-    """Endpoints and endusers project, keeping epid/euid."""
+    """Endpoints and endusers project against realistic UEBA rows.
 
-    async def test_endpoints_default_keeps_the_join_keys(
+    Rows here are shaped like the live appliance response -- epname/epip for
+    endpoints, euname for end-users -- per the evidence in
+    ``masking/fields.py`` (verified against live 7.6.7/8.0.0 schemas),
+    ``skills/handlers.py``'s field usages, and the docstring ``Example``
+    blocks in this module. A row shaped like the wrong, guessed field names
+    (``hostname``/``ip``/``username``) would pass the default-projection
+    assertions below whether or not the curated set was correct, so it
+    cannot catch a curated set drifting from what the appliance sends --
+    only a realistic row can.
+    """
+
+    async def test_endpoints_default_keeps_identity_and_join_keys(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        row = {"epid": 1, "euid": 2, "hostname": "h", "vulnstat": {"big": "payload"}}
+        row = {
+            "epid": 1,
+            "euid": 2,
+            "epname": "WS-ALPHA",
+            "epip": "192.0.2.10",
+            "vulnstat": {"big": "payload"},
+        }
 
         class FakeClient:
             async def ensure_connected(self) -> None:
@@ -352,10 +370,42 @@ class TestUebaProjection:
 
         assert result["data"][0]["epid"] == 1
         assert result["data"][0]["euid"] == 2
+        assert result["data"][0]["epname"] == "WS-ALPHA"
+        assert result["data"][0]["epip"] == "192.0.2.10"
         assert "vulnstat" not in result["data"][0]
 
+    async def test_endusers_default_drops_email_keeps_euname(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No ``fields`` at all -- the no-op-catcher finding 2 asked for.
+
+        Every other ``get_endusers`` call in this file passes ``fields=["*"]``
+        (an identity pass-through) or never reaches a successful projection,
+        so none of them would notice a regression that silently reverted the
+        default path (e.g. ``"data": result`` instead of the projected
+        ``data``). This one omits ``fields`` and checks both directions: a
+        canonical-but-not-curated field (``email``) is actually gone, and a
+        curated field (``euname``) actually survives.
+        """
+        row = {"euid": 2, "euname": "jdoe", "email": "jdoe@example.com"}
+
+        class FakeClient:
+            async def ensure_connected(self) -> None:
+                return None
+
+            async def get_endusers(self, **kwargs: object) -> list[dict[str, object]]:
+                return [row]
+
+        monkeypatch.setattr(ueba_tools, "_get_client", lambda: FakeClient())
+
+        result = await ueba_tools.get_endusers()
+
+        assert result["data"][0]["euid"] == 2
+        assert result["data"][0]["euname"] == "jdoe"
+        assert "email" not in result["data"][0]
+
     async def test_endusers_star_returns_everything(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        row = {"euid": 2, "username": "jdoe", "phone": "555"}
+        row = {"euid": 2, "euname": "jdoe", "email": "jdoe@example.com"}
 
         class FakeClient:
             async def ensure_connected(self) -> None:
@@ -368,4 +418,4 @@ class TestUebaProjection:
 
         result = await ueba_tools.get_endusers(fields=["*"])
 
-        assert result["data"][0]["phone"] == "555"
+        assert result["data"][0]["email"] == "jdoe@example.com"

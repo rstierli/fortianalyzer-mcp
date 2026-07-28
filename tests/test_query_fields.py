@@ -109,7 +109,17 @@ class TestRegistryMatchesTheToolsItReplaces:
 class TestCuratedProjections:
     """Every curated set is a subset of what the vocabulary says exists."""
 
-    CURATED = ("traffic", "event", "attack", "device", "task", "alert", "incident")
+    CURATED = (
+        "traffic",
+        "event",
+        "attack",
+        "device",
+        "task",
+        "alert",
+        "incident",
+        "endpoint",
+        "enduser",
+    )
 
     @pytest.mark.parametrize("name", CURATED)
     def test_curated_vocabularies_have_a_projection(self, name: str) -> None:

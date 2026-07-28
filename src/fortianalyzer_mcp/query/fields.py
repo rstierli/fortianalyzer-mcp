@@ -527,76 +527,61 @@ _INCIDENT_ALIASES: Mapping[str, str] = {
     "owner": "assignee",
 }
 
+
+# UEBA field names, keyed to live evidence rather than the FNDN prose gloss
+# ("hostname, IP, MAC, OS, department...") that produced the previous, wrong
+# set. Every name below is backed by a live-verified or live-observed use
+# elsewhere in this repo -- see fix-round-1 of the query-engine-projection
+# plan's Task 6 report for the field-by-field citation. A field with no such
+# citation was dropped rather than carried over on the strength of the old
+# prose: masking a (or here, curating around a) nonexistent field is a
+# silent no-op, and the point of this correction is to stop doing that.
 _ENDPOINT_FIELDS: frozenset[str] = frozenset(
     {
         "epid",
-        "hostname",
-        "ip",
-        "mac",
-        "os",
-        "osversion",
-        "firstseen",
-        "lastseen",
-        "department",
+        "epname",
+        "epip",
         "euid",
-        "username",
-        "vulnstat",
-        "devname",
-        "devid",
-        "onnet",
-        "status",
+        "user",
         "detectkey",
     }
 )
 _ENDPOINT_PROJECTION: frozenset[str] = frozenset(
     {
         "epid",
-        "hostname",
-        "ip",
-        "mac",
-        "os",
-        "lastseen",
-        "department",
+        "epname",
+        "epip",
         "euid",
-        "username",
-        "status",
+        "user",
     }
 )
 _ENDPOINT_ALIASES: Mapping[str, str] = {
     "endpoint_id": "epid",
-    "host": "hostname",
-    "last_seen": "lastseen",
+    "host": "epname",
+    "hostname": "epname",
+    "ip": "epip",
+    "username": "user",
 }
 
 _ENDUSER_FIELDS: frozenset[str] = frozenset(
     {
         "euid",
-        "username",
-        "groups",
+        "euname",
         "email",
-        "department",
-        "title",
-        "phone",
-        "vpnip",
-        "firstseen",
-        "lastseen",
         "epids",
     }
 )
 _ENDUSER_PROJECTION: frozenset[str] = frozenset(
     {
         "euid",
-        "username",
-        "groups",
-        "department",
-        "lastseen",
+        "euname",
         "epids",
     }
 )
 _ENDUSER_ALIASES: Mapping[str, str] = {
     "enduser_id": "euid",
-    "user": "username",
-    "last_seen": "lastseen",
+    "user": "euname",
+    "username": "euname",
 }
 
 _REPORT_FIELDS: frozenset[str] = frozenset(

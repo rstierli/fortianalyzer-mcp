@@ -67,9 +67,9 @@ async def get_endpoints(
 ) -> dict[str, Any]:
     """Get UEBA endpoint (asset) records from FortiAnalyzer.
 
-    Resolves endpoint/asset profiles: hostname, IP, MAC, OS, first/last
-    seen, department, associated users and vulnerability-stat counts.
-    Requires UEBA to be enabled/licensed on the FortiAnalyzer.
+    Resolves endpoint/asset profiles: name and IP (``epname``/``epip``),
+    the detecting appliance, and the ``user`` association list. Requires
+    UEBA to be enabled/licensed on the FortiAnalyzer.
 
     Args:
         adom: ADOM name (default: from config DEFAULT_ADOM)
@@ -78,9 +78,10 @@ async def get_endpoints(
         time_range: Optional first-seen window, e.g. "7-day" or a custom
             "start|end" range
         fields: Which keys each endpoint record carries. Omit for a curated
-            default (hostname, IP, MAC, OS, department and the epid/euid
-            join keys), ["*"] for the full object, or name the fields you
-            want.
+            default (epname/epip identity, the associated-user list, and the
+            epid/euid join keys), ["*"] for the full object, or name the
+            fields you want. "hostname"/"host"/"ip"/"username" are accepted
+            as aliases for the real field names.
 
     Returns:
         dict with endpoint records under "data"
@@ -197,18 +198,19 @@ async def get_endusers(
 ) -> dict[str, Any]:
     """Get UEBA end-user (identity) records from FortiAnalyzer.
 
-    Resolves user identity records: username, groups, VPN IP, first/last
-    seen. With detail_level "extended", also returns email, department,
-    title and phone. Requires UEBA to be enabled/licensed on the FAZ.
+    Resolves user identity records keyed on ``euname``. With detail_level
+    "extended", also returns ``email``. Requires UEBA to be enabled/licensed
+    on the FAZ.
 
     Args:
         adom: ADOM name (default: from config DEFAULT_ADOM)
         euids: Optional list of end-user IDs to scope the query
         detail_level: "basic", "standard" or "extended" (default: "standard")
         fields: Which keys each end-user record carries. Omit for a curated
-            default (username, groups, department, lastseen and the
-            euid/epids join keys), ["*"] for the full object, or name the
-            fields you want.
+            default (euname identity and the euid/epids join keys), ["*"]
+            for the full object (needed for "email" at detail_level
+            "extended"), or name the fields you want. "username"/"user"
+            are accepted as aliases for "euname".
 
     Returns:
         dict with end-user records under "data"
