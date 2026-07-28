@@ -263,3 +263,46 @@ class TestFortiViewProjection:
         )
 
         assert result["data"] == [{"srcip": "10.0.0.1", "bandwidth": 100}]
+
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            "get_top_sources",
+            "get_top_destinations",
+            "get_top_applications",
+            "get_top_threats",
+            "get_top_websites",
+            "get_top_cloud_applications",
+            "get_policy_hits",
+        ],
+    )
+    async def test_the_wrappers_do_not_emit_an_unfollowable_instruction(
+        self, monkeypatch: pytest.MonkeyPatch, tool_name: str
+    ) -> None:
+        """Seven tools told the caller to pass a parameter they do not have.
+
+        Each returns get_fortiview_data's dict verbatim and exposes no
+        ``fields``, so the uncurated-vocabulary warning ("Pass fields=[...] to
+        select what you need") arrived on every successful call with no way to
+        act on it -- and run_app_usage forwarded it into a skill result too. An
+        instruction the caller structurally cannot follow is worse than
+        silence, so the wrappers take the documented opt-out.
+        """
+        self._install(monkeypatch)
+        tool = getattr(fortiview_tools, tool_name)
+
+        result = await tool()
+
+        assert result["status"] == "success"
+        assert result["warnings"] == []
+        assert result["data"][0].keys() == self.ROWS[0].keys(), "full row, exactly as before"
+
+    async def test_get_fortiview_data_still_warns_because_it_has_the_parameter(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The suppression is scoped to the wrappers, not to the warning."""
+        self._install(monkeypatch)
+
+        result = await fortiview_tools.get_fortiview_data(view_name="top-sources")
+
+        assert any("fields" in w for w in result["warnings"])

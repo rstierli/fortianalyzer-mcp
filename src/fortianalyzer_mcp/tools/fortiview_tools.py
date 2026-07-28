@@ -402,7 +402,9 @@ async def get_top_sources(
             - "threatweight": Sort by threat score
 
     Returns:
-        dict with top sources data
+        dict with top sources data. Rows are the view's full columns:
+        this wrapper has no `fields` of its own, so use get_fortiview_data
+        directly when you want to narrow them.
 
     Example:
         >>> result = await get_top_sources(time_range="24-hour", limit=5)
@@ -416,6 +418,13 @@ async def get_top_sources(
         time_range=time_range,
         limit=limit,
         sort_by=sort_by,
+        # fields=["*"]: this wrapper returns get_fortiview_data's dict
+        # verbatim and exposes no `fields` of its own. Without the opt-out
+        # every successful call carried "no curated field set exists for
+        # fortiview yet ... Pass fields=[...] to select what you need" --
+        # an instruction naming a parameter the caller structurally does not
+        # have. Give the wrapper a fixed top-N shape and stay silent.
+        fields=["*"],
     )
     return result
 
@@ -440,7 +449,8 @@ async def get_top_destinations(
         sort_by: Sort field (default: "bandwidth")
 
     Returns:
-        dict with top destinations data
+        dict with top destinations data (full columns; use
+        get_fortiview_data directly to narrow them)
     """
     result: dict[str, Any] = await get_fortiview_data(
         view_name="top-destinations",
@@ -449,6 +459,13 @@ async def get_top_destinations(
         time_range=time_range,
         limit=limit,
         sort_by=sort_by,
+        # fields=["*"]: this wrapper returns get_fortiview_data's dict
+        # verbatim and exposes no `fields` of its own. Without the opt-out
+        # every successful call carried "no curated field set exists for
+        # fortiview yet ... Pass fields=[...] to select what you need" --
+        # an instruction naming a parameter the caller structurally does not
+        # have. Give the wrapper a fixed top-N shape and stay silent.
+        fields=["*"],
     )
     return result
 
@@ -473,7 +490,8 @@ async def get_top_applications(
         sort_by: Sort field (default: "bandwidth")
 
     Returns:
-        dict with top applications data
+        dict with top applications data (full columns; use
+        get_fortiview_data directly to narrow them)
 
     Example:
         >>> result = await get_top_applications(time_range="24-hour")
@@ -487,6 +505,13 @@ async def get_top_applications(
         time_range=time_range,
         limit=limit,
         sort_by=sort_by,
+        # fields=["*"]: this wrapper returns get_fortiview_data's dict
+        # verbatim and exposes no `fields` of its own. Without the opt-out
+        # every successful call carried "no curated field set exists for
+        # fortiview yet ... Pass fields=[...] to select what you need" --
+        # an instruction naming a parameter the caller structurally does not
+        # have. Give the wrapper a fixed top-N shape and stay silent.
+        fields=["*"],
     )
     return result
 
@@ -514,7 +539,8 @@ async def get_top_threats(
             - "incidents": Sort by incident count
 
     Returns:
-        dict with top threats data
+        dict with top threats data (full columns; use get_fortiview_data
+        directly to narrow them)
 
     Example:
         >>> result = await get_top_threats(time_range="7-day")
@@ -528,6 +554,13 @@ async def get_top_threats(
         time_range=time_range,
         limit=limit,
         sort_by=sort_by,
+        # fields=["*"]: this wrapper returns get_fortiview_data's dict
+        # verbatim and exposes no `fields` of its own. Without the opt-out
+        # every successful call carried "no curated field set exists for
+        # fortiview yet ... Pass fields=[...] to select what you need" --
+        # an instruction naming a parameter the caller structurally does not
+        # have. Give the wrapper a fixed top-N shape and stay silent.
+        fields=["*"],
     )
     return result
 
@@ -552,7 +585,8 @@ async def get_top_websites(
         sort_by: Sort field (default: "bandwidth")
 
     Returns:
-        dict with top websites data
+        dict with top websites data (full columns; use get_fortiview_data
+        directly to narrow them)
     """
     result: dict[str, Any] = await get_fortiview_data(
         view_name="top-websites",
@@ -561,6 +595,13 @@ async def get_top_websites(
         time_range=time_range,
         limit=limit,
         sort_by=sort_by,
+        # fields=["*"]: this wrapper returns get_fortiview_data's dict
+        # verbatim and exposes no `fields` of its own. Without the opt-out
+        # every successful call carried "no curated field set exists for
+        # fortiview yet ... Pass fields=[...] to select what you need" --
+        # an instruction naming a parameter the caller structurally does not
+        # have. Give the wrapper a fixed top-N shape and stay silent.
+        fields=["*"],
     )
     return result
 
@@ -594,7 +635,8 @@ async def get_top_cloud_applications(
         sort_by: Sort field (default: "sessions"; "d_risk" also useful)
 
     Returns:
-        dict with top cloud applications data
+        dict with top cloud applications data (full columns; use
+        get_fortiview_data directly to narrow them)
     """
     result: dict[str, Any] = await get_fortiview_data(
         view_name="top-cloud-applications",
@@ -603,6 +645,13 @@ async def get_top_cloud_applications(
         time_range=time_range,
         limit=limit,
         sort_by=sort_by,
+        # fields=["*"]: this wrapper returns get_fortiview_data's dict
+        # verbatim and exposes no `fields` of its own. Without the opt-out
+        # every successful call carried "no curated field set exists for
+        # fortiview yet ... Pass fields=[...] to select what you need" --
+        # an instruction naming a parameter the caller structurally does not
+        # have. Give the wrapper a fixed top-N shape and stay silent.
+        fields=["*"],
     )
     return result
 
@@ -629,7 +678,8 @@ async def get_policy_hits(
             - "bandwidth": Sort by total bytes
 
     Returns:
-        dict with policy hit statistics including policyid
+        dict with policy hit statistics including policyid (full columns;
+        use get_fortiview_data directly to narrow them)
     """
     result: dict[str, Any] = await get_fortiview_data(
         view_name="policy-hits",
@@ -638,5 +688,12 @@ async def get_policy_hits(
         time_range=time_range,
         limit=limit,
         sort_by=sort_by,
+        # fields=["*"]: this wrapper returns get_fortiview_data's dict
+        # verbatim and exposes no `fields` of its own. Without the opt-out
+        # every successful call carried "no curated field set exists for
+        # fortiview yet ... Pass fields=[...] to select what you need" --
+        # an instruction naming a parameter the caller structurally does not
+        # have. Give the wrapper a fixed top-N shape and stay silent.
+        fields=["*"],
     )
     return result
