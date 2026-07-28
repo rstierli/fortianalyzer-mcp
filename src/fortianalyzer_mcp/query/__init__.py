@@ -29,6 +29,7 @@ from fortianalyzer_mcp.query.filters import (
 from fortianalyzer_mcp.query.shape import (
     ALL_FIELDS,
     fields_returned,
+    project_payload,
     project_rows,
     resolve_projection,
 )
@@ -46,6 +47,7 @@ __all__ = [
     "fields_returned",
     "get_vocabulary",
     "has_projection",
+    "project_payload",
     "project_rows",
     "resolve_field",
     "resolve_projection",

@@ -8,9 +8,10 @@ import logging
 from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
+from fortianalyzer_mcp.query.shape import project_payload
 from fortianalyzer_mcp.server import get_faz_client, mcp
 from fortianalyzer_mcp.tool_annotations import CREATES, DESTRUCTIVE, READ_ONLY
-from fortianalyzer_mcp.utils.responses import redact
+from fortianalyzer_mcp.utils.responses import error_response, redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
@@ -62,6 +63,7 @@ async def get_incidents(
     filter: str | None = None,
     limit: int = 100,
     offset: int = 0,
+    fields: list[str] | None = None,
 ) -> dict[str, Any]:
     """Get security incidents from FortiAnalyzer.
 
@@ -77,6 +79,10 @@ async def get_incidents(
         filter: Filter expression (e.g., "severity==critical")
         limit: Maximum number of incidents to return (1-2000)
         offset: Record offset for pagination
+        fields: Which keys each incident carries. Omit for a curated default
+            (identity, severity, status, timing and the epid/euid/alertid
+            join keys), ["*"] for the full object, or name the fields you
+            want.
 
     Returns:
         dict with incidents data
@@ -103,17 +109,30 @@ async def get_incidents(
             offset=offset,
         )
 
-        data = result.get("data", []) if isinstance(result, dict) else result
-        if not isinstance(data, list):
-            data = [data] if data else []
+        # Some responses answer with a bare object (e.g. a status/count
+        # envelope) rather than a "data"-wrapped row list. Preserve that
+        # shape rather than discarding it -- project_payload only projects
+        # a list and passes anything else through untouched.
+        data = result.get("data", result) if isinstance(result, dict) else result
+
+        data, returned, projection_warnings = project_payload("incident", data, fields)
 
         return {
             "status": "success",
             "adom": adom,
             "time_range": tr,
-            "count": len(data),
+            "count": len(data) if isinstance(data, list) else 0,
             "data": data,
+            "fields_returned": returned,
+            "warnings": projection_warnings,
         }
+    except ValidationError as e:
+        return error_response(
+            error="validation_error",
+            message=e,
+            operation="get_incidents",
+            adom=adom,
+        )
     except Exception as e:
         logger.error(f"Failed to get incidents: {e}")
         return {"status": "error", "message": redact(str(e))}

@@ -6,6 +6,7 @@ Follows the same pattern as test_system_tools.py to avoid server initialization.
 
 import pytest
 
+import fortianalyzer_mcp.tools.incident_tools as incident_tools
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 
 
@@ -290,3 +291,49 @@ class TestIncidentClient:
                     "end": "2024-01-02 00:00:00",
                 },
             )
+
+
+class TestGetIncidentsProjection:
+    """Incidents project under the incident vocabulary."""
+
+    ROW = {
+        "incid": 5,
+        "severity": "high",
+        "status": "open",
+        "alertid": "A-1",
+        "epid": 12,
+        "euid": 34,
+        "description": "long free text",
+    }
+
+    def _install(self, monkeypatch: pytest.MonkeyPatch, rows: object) -> None:
+        class FakeClient:
+            async def ensure_connected(self) -> None:
+                return None
+
+            async def get_system_timezone(self) -> None:
+                return None
+
+            async def get_incidents(self, **kwargs: object) -> object:
+                return rows
+
+        monkeypatch.setattr(incident_tools, "_get_client", lambda: FakeClient())
+
+    async def test_default_projection_keeps_the_join_keys(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._install(monkeypatch, [dict(self.ROW)])
+
+        result = await incident_tools.get_incidents()
+
+        row = result["data"][0]
+        assert "description" not in row
+        assert row["alertid"] == "A-1"
+        assert row["epid"] == 12 and row["euid"] == 34
+
+    async def test_star_returns_the_full_incident(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._install(monkeypatch, [dict(self.ROW)])
+
+        result = await incident_tools.get_incidents(fields=["*"])
+
+        assert result["data"][0]["description"] == "long free text"

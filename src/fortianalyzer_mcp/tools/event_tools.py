@@ -8,9 +8,11 @@ import logging
 from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
+from fortianalyzer_mcp.query.shape import project_payload
 from fortianalyzer_mcp.server import get_faz_client, mcp
 from fortianalyzer_mcp.tool_annotations import CREATES, READ_ONLY, UPDATES
-from fortianalyzer_mcp.utils.responses import redact
+from fortianalyzer_mcp.utils.errors import ValidationError
+from fortianalyzer_mcp.utils.responses import error_response, redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import get_default_adom, validate_adom
 
@@ -47,6 +49,7 @@ async def get_alerts(
     filter: str | None = None,
     limit: int = 100,
     offset: int = 0,
+    fields: list[str] | None = None,
 ) -> dict[str, Any]:
     """Get alert events from FortiAnalyzer.
 
@@ -61,6 +64,9 @@ async def get_alerts(
         filter: Filter expression (e.g., "severity==critical")
         limit: Maximum number of alerts to return (1-2000)
         offset: Record offset for pagination
+        fields: Which keys each alert carries. Omit for a curated default
+            (identity, severity, status, timing and the epid/euid/alertid join
+            keys), ["*"] for the full object, or name the fields you want.
 
     Returns:
         dict with alerts data and metadata
@@ -87,17 +93,30 @@ async def get_alerts(
             offset=offset,
         )
 
-        data = result.get("data", []) if isinstance(result, dict) else result
-        if not isinstance(data, list):
-            data = [data] if data else []
+        # Some responses answer with a bare object (e.g. a status/count
+        # envelope) rather than a "data"-wrapped row list. Preserve that
+        # shape rather than discarding it -- project_payload only projects
+        # a list and passes anything else through untouched.
+        data = result.get("data", result) if isinstance(result, dict) else result
+
+        data, returned, projection_warnings = project_payload("alert", data, fields)
 
         return {
             "status": "success",
             "adom": adom,
             "time_range": tr,
-            "count": len(data),
+            "count": len(data) if isinstance(data, list) else 0,
             "data": data,
+            "fields_returned": returned,
+            "warnings": projection_warnings,
         }
+    except ValidationError as e:
+        return error_response(
+            error="validation_error",
+            message=e,
+            operation="get_alerts",
+            adom=adom,
+        )
     except Exception as e:
         logger.error(f"Failed to get alerts: {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -233,6 +252,7 @@ async def get_alert_logs(
     adom: str | None = None,
     limit: int = 1000,
     offset: int = 0,
+    fields: list[str] | None = None,
 ) -> dict[str, Any]:
     """Get log entries associated with alerts.
 
@@ -243,6 +263,10 @@ async def get_alert_logs(
         adom: ADOM name (default: from config DEFAULT_ADOM)
         limit: Maximum number of logs (1-2000)
         offset: Record offset for pagination
+        fields: Which keys each log row carries. Omit for a curated default,
+            ["*"] for the full object, or name the fields you want. These
+            rows are the logs that triggered the alert, not the alerts
+            themselves, so they project under the event field set.
 
     Returns:
         dict with alert logs
@@ -263,12 +287,23 @@ async def get_alert_logs(
             offset=offset,
         )
 
+        data, returned, projection_warnings = project_payload("event", result, fields)
+
         return {
             "status": "success",
             "adom": adom,
             "alert_count": len(alert_ids),
-            "data": result,
+            "data": data,
+            "fields_returned": returned,
+            "warnings": projection_warnings,
         }
+    except ValidationError as e:
+        return error_response(
+            error="validation_error",
+            message=e,
+            operation="get_alert_logs",
+            adom=adom,
+        )
     except Exception as e:
         logger.error(f"Failed to get alert logs: {e}")
         return {"status": "error", "message": redact(str(e))}

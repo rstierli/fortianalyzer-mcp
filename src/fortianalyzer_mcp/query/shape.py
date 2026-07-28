@@ -132,3 +132,29 @@ def fields_returned(
         if isinstance(row, dict):
             observed.update(row)
     return sorted(observed)
+
+
+def project_payload(
+    vocabulary: str,
+    payload: Any,
+    fields: list[str] | None,
+) -> tuple[Any, list[str], list[str]]:
+    """Project a response payload that may or may not be a row list.
+
+    Several FortiAnalyzer readers answer with a list of rows under ``data``,
+    but some answer with an object instead (a count, a status envelope). Only
+    a list is projected; anything else passes through untouched and reports no
+    ``fields_returned``, because claiming a projection that did not happen is
+    worse than reporting none.
+
+    Returns:
+        ``(payload, fields_returned, warnings)``.
+
+    Raises:
+        ValidationError: from :func:`resolve_projection`.
+    """
+    keys, warnings = resolve_projection(vocabulary, fields)
+    if not isinstance(payload, list):
+        return payload, [], warnings
+    rows = project_rows(payload, keys)
+    return rows, fields_returned(rows, keys), warnings
