@@ -267,3 +267,59 @@ def test_curated_default_is_described_as_a_default_not_a_limit(
     """The opt-out must be discoverable in the same breath as the default."""
     lowered = instructions.lower()
     assert "curated" in lowered
+
+
+def test_the_projection_tool_list_matches_the_tools_that_actually_take_fields(
+    instructions: str,
+) -> None:
+    """The guide named the surface wrong in both directions before this.
+
+    It claimed "Every read tool takes `fields`" when 15 of ~85 do -- and the
+    ones an LLM reaches for most (get_top_*, list_tasks, get_alert_details,
+    get_incident) still do not. An overclaim here is worse than silence: it
+    sends the model to spend a call discovering a parameter that is not there.
+
+    Derived from the tool signatures rather than from a second hand-written
+    list, so adding or removing a `fields` parameter fails this test until the
+    guide is updated with it.
+    """
+    import ast
+    import pathlib
+
+    import fortianalyzer_mcp.tools as tools_pkg
+
+    root = pathlib.Path(next(iter(tools_pkg.__path__)))
+    taking_fields = {
+        node.name
+        for path in root.glob("*.py")
+        for node in ast.walk(ast.parse(path.read_text()))
+        if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef)
+        and "fields" in {a.arg for a in node.args.args + node.args.kwonlyargs}
+    }
+
+    assert taking_fields, "sanity: some tool must take fields"
+    missing = sorted(name for name in taking_fields if name not in instructions)
+    assert not missing, f"the usage guide does not name these fields-taking tools: {missing}"
+    assert str(len(taking_fields)) in instructions, (
+        f"{len(taking_fields)} tools take fields; the guide states a different count"
+    )
+
+
+def test_the_guide_does_not_claim_every_read_tool_takes_fields(instructions: str) -> None:
+    """The specific overclaim, frozen so it cannot come back."""
+    assert "Every read tool takes" not in instructions
+
+
+def test_response_size_and_projection_do_not_contradict_each_other(instructions: str) -> None:
+    """Two sections, six lines apart, said opposite things about the default.
+
+    ``## Projection`` said the default is curated; ``## Response size`` said
+    list_adoms and list_devices "return every field by default". Both were
+    true of different tools, which is exactly what made the pair read as a
+    contradiction. The reconciliation is that the tools with no curated
+    default are named as such in both places.
+    """
+    assert "return every field by default" not in instructions
+    projection = instructions.split("## Projection")[1].split("## Choosing")[0]
+    assert "no curated default" in projection
+    assert "list_adoms and list_devices have no curated default" in instructions

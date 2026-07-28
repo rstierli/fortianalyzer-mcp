@@ -103,13 +103,18 @@ On these two tools the narrow parameters (`name_filter`, `platform_filter`,
 overridden by it, so a condition on the same field in both places must agree
 or nothing matches.
 
-## Projection
+## Projection: `fields`
 
-Every read tool takes `fields`, and the default is curated rather than
-complete:
+Fifteen read tools take `fields`. Not every read tool does -- check the
+docstring. They are:
 
-  fields omitted   -> the curated set for that vocabulary
-  fields=["*"]     -> the full object, exactly as before
+  query_logs, fetch_more_logs, search_traffic_logs, search_security_logs,
+  search_event_logs, get_alerts, get_alert_logs, get_incidents,
+  get_endpoints, get_endusers, get_report_history, get_fortiview_data,
+  search_devices, list_adoms, list_devices
+
+  fields omitted   -> the curated set for that vocabulary, where one exists
+  fields=["*"]     -> the full object
   fields=[...]     -> those fields (English aliases work, same as in filters)
 
 The curated set carries identity, the discriminator, the magnitude, the
@@ -117,14 +122,26 @@ human-readable summary, and every key another tool takes as input -- so
 `sessionid` survives for get_pcap_by_session and `alertid` for get_alert_logs.
 It is a default, not a ceiling: ask for `["*"]` whenever you need the rest.
 
+Which vocabularies are curated is not uniform, and the response says which
+case you got:
+
+- Curated today: the traffic/event/attack/virus/webfilter/app-ctrl/dns
+  logtypes, alerts, incidents, UEBA endpoints and end-users, devices, tasks.
+  Omitting `fields` trims.
+- NOT curated: uncommon logtypes (voip, icap, dlp, ...), every FortiView view,
+  and report history -- there is no verified catalogue of what those emit, so
+  omitting `fields` returns the FULL row plus a warning naming `fields`, never
+  a guessed subset. list_adoms and list_devices have no curated default either;
+  omitting `fields` there means no projection at all.
+
 `fields_returned` in every response lists the keys the rows carry, and is
 reported even when a page comes back empty -- that is the only signal of what
 is queryable next when there are no rows to inspect.
 
-Vocabularies without a curated set yet (uncommon logtypes, FortiView views)
-return full rows plus a warning naming `fields`, never a guessed subset.
-list_adoms, list_devices and search_devices project on the appliance, so their
-`fields` also shrinks what crosses the wire.
+Where the trim happens differs, and it matters for response size: list_adoms,
+list_devices and search_devices project on the appliance, so `fields` also
+shrinks what crosses the wire. Everywhere else the appliance sends the whole
+row and the trim is in-process -- it saves your context, not bandwidth.
 
 ## Choosing among overlapping tools
 
@@ -156,10 +173,17 @@ your clock, because FortiAnalyzer reads naive timestamps in its own timezone.
 
 ## Response size
 
-list_adoms and list_devices return every field by default, most of them empty
-placeholders. Both take `fields` -- pass e.g. fields=["name","state"] or
-fields=["name","ip","os_ver","platform_str"] and the response shrinks by an
-order of magnitude. get_log_fields takes name_filter for the same reason.
+The biggest wins, all consequences of the Projection section above rather than
+separate advice:
+
+- list_adoms and list_devices have no curated default, so they return every
+  field, most of them empty placeholders. Pass e.g. fields=["name","state"] or
+  fields=["name","ip","os_ver","platform_str"] and the response shrinks by an
+  order of magnitude. search_devices trims by default; these two do not.
+- The uncurated vocabularies above (FortiView views, uncommon logtypes, report
+  history) return full rows for the same reason. Name the columns you want.
+- get_log_fields takes name_filter -- the unfiltered catalogue is hundreds of
+  entries.
 
 ## Error shapes are not yet uniform
 
