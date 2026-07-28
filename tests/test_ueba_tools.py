@@ -368,11 +368,16 @@ class TestUebaProjection:
 
         result = await ueba_tools.get_endpoints()
 
-        assert result["data"][0]["epid"] == 1
-        assert result["data"][0]["euid"] == 2
-        assert result["data"][0]["epname"] == "WS-ALPHA"
-        assert result["data"][0]["epip"] == "192.0.2.10"
-        assert "vulnstat" not in result["data"][0]
+        row = result["data"][0]
+        # Keys plus the non-PII values. `epname` and `epip` are masked types,
+        # so their values are rewritten by the arg unmasker when
+        # MASKING_ENABLED is set -- asserting on them makes the outcome depend
+        # on a deployment flag rather than on the projection. The join-key ids
+        # carry no type, so they still pin that real values came through.
+        assert row.keys() == {"epid", "euid", "epname", "epip"}
+        assert row["epid"] == 1
+        assert row["euid"] == 2
+        assert "vulnstat" not in row
 
     async def test_endusers_default_drops_email_keeps_euname(
         self, monkeypatch: pytest.MonkeyPatch
@@ -400,9 +405,10 @@ class TestUebaProjection:
 
         result = await ueba_tools.get_endusers()
 
-        assert result["data"][0]["euid"] == 2
-        assert result["data"][0]["euname"] == "jdoe"
-        assert "email" not in result["data"][0]
+        row = result["data"][0]
+        assert row.keys() == {"euid", "euname"}
+        assert row["euid"] == 2, "a real value, not a null-padded key"
+        assert "email" not in row
 
     async def test_endusers_star_returns_everything(self, monkeypatch: pytest.MonkeyPatch) -> None:
         row = {"euid": 2, "euname": "jdoe", "email": "jdoe@example.com"}
@@ -418,4 +424,8 @@ class TestUebaProjection:
 
         result = await ueba_tools.get_endusers(fields=["*"])
 
-        assert result["data"][0]["email"] == "jdoe@example.com"
+        # The claim is that ["*"] keeps the key the curated default drops, so
+        # key presence is the whole assertion; `email` is a masked type and its
+        # value is rewritten under MASKING_ENABLED.
+        assert result["data"][0].keys() == set(row)
+        assert "email" in result["data"][0]

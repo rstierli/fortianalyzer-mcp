@@ -262,7 +262,10 @@ class TestFortiViewProjection:
             view_name="top-sources", fields=["srcip", "bandwidth"]
         )
 
-        assert result["data"] == [{"srcip": "10.0.0.1", "bandwidth": 100}]
+        # Keys plus the non-PII value: `srcip` is IP-typed, so its value is
+        # rewritten by the arg unmasker under MASKING_ENABLED.
+        assert result["data"][0].keys() == {"srcip", "bandwidth"}
+        assert result["data"][0]["bandwidth"] == 100
 
     @pytest.mark.parametrize(
         "tool_name",

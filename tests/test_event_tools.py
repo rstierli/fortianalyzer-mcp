@@ -439,7 +439,13 @@ class TestGetAlertLogsProjection:
 
         result = await event_tools.get_alert_logs(alert_ids=["A-1"], fields=["action", "user"])
 
-        assert result["data"]["data"][0] == {"action": "login", "user": "admin"}
+        row = result["data"]["data"][0]
+        # Keys, not values: `user` is a masked type, so its value is rewritten
+        # by the arg unmasker when MASKING_ENABLED is on and asserting on it
+        # makes the test depend on a deployment flag. `action` is not a masked
+        # type, so it pins that a real value survived the projection.
+        assert row.keys() == {"action", "user"}
+        assert row["action"] == "login"
         assert result["fields_returned"] == ["action", "user"]
 
     async def test_an_empty_fields_list_is_a_typed_error(

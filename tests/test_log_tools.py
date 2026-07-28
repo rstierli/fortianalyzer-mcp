@@ -329,9 +329,15 @@ class TestQueryLogsProjection:
 
         result = await log_tools.query_logs(logtype="traffic", time_range=self.CUSTOM_RANGE)
 
-        assert "noise" not in result["logs"][0]
-        assert result["logs"][0]["srcip"] == "10.0.0.1"
-        assert "sessionid" in result["logs"][0], "join key must survive the default"
+        row = result["logs"][0]
+        # Keys and non-PII values only. `srcip` is an IP-typed field, so its
+        # value is rewritten by the arg unmasker under MASKING_ENABLED; the
+        # projection question is which keys survived, which is flag-independent.
+        assert "noise" not in row
+        assert "another_noise" not in row
+        assert "srcip" in row, "identity must survive the default"
+        assert row["dstport"] == 443, "a real value, not a null-padded key"
+        assert "sessionid" in row, "join key must survive the default"
 
     async def test_star_returns_the_full_row(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._install(monkeypatch, [dict(self.ROW)])
@@ -350,7 +356,8 @@ class TestQueryLogsProjection:
             logtype="traffic", time_range=self.CUSTOM_RANGE, fields=["srcip", "dstport"]
         )
 
-        assert result["logs"] == [{"srcip": "10.0.0.1", "dstport": 443}]
+        assert result["logs"][0].keys() == {"srcip", "dstport"}
+        assert result["logs"][0]["dstport"] == 443
         assert result["fields_returned"] == ["dstport", "srcip"]
 
     async def test_alias_in_fields_resolves(self, monkeypatch: pytest.MonkeyPatch) -> None:
