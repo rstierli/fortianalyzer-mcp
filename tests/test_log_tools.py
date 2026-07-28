@@ -452,3 +452,109 @@ class TestFetchMoreLogsProjection:
         second = await log_tools.fetch_more_logs(tid=first["tid"], offset=1, fields=["dstport"])
 
         assert second["fields_returned"] == ["dstport"]
+
+
+class TestSearchWrappersForwardFields:
+    """search_traffic/security/event_logs expose the projection they inherit.
+
+    All three delegate to ``query_logs``, so they inherited its curated
+    default the moment projection landed -- while their docstrings still
+    promised "List of traffic log entries" and neither took a ``fields``
+    parameter. The full row was unreachable from them: no argument widened it,
+    and ``search_event_logs`` was worst, since ten keys survive an event row.
+
+    Assertions here are on the KEYS a row carries and on non-PII values
+    (ports), never on IP/hostname/username values -- those are rewritten by
+    the argument unmasker when masking is enabled, and a test that asserts on
+    one passes or fails depending on a deployment flag.
+    """
+
+    CUSTOM_RANGE = "2024-01-01 00:00:00|2024-01-02 00:00:00"
+
+    ROW = {
+        "date": "2024-01-01",
+        "time": "00:00:01",
+        "srcip": "10.0.0.1",
+        "dstport": 443,
+        "sessionid": 99,
+        "subtype": "vpn",
+        "level": "notice",
+        "srcintf": "port1",
+        "noise": "unused",
+    }
+
+    class _Faz:
+        async def ensure_connected(self) -> None:
+            return None
+
+        async def get_system_timezone(self) -> None:
+            return None
+
+    def _install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def fake_page(client: object, **kwargs: object) -> dict[str, object]:
+            return {
+                "timed_out": False,
+                "tid": 7,
+                "logs": [dict(self.ROW)],
+                "total": 1,
+            }
+
+        monkeypatch.setattr(log_tools, "get_faz_client", lambda: self._Faz())
+        monkeypatch.setattr(log_tools, "_run_logsearch_page", fake_page)
+
+    @pytest.mark.parametrize(
+        "tool_name",
+        ["search_traffic_logs", "search_security_logs", "search_event_logs"],
+    )
+    async def test_star_reaches_the_full_row(
+        self, monkeypatch: pytest.MonkeyPatch, tool_name: str
+    ) -> None:
+        """The escape hatch these three did not have."""
+        self._install(monkeypatch)
+        tool = getattr(log_tools, tool_name)
+
+        result = await tool(time_range=self.CUSTOM_RANGE, fields=["*"])
+
+        assert result["logs"][0].keys() == self.ROW.keys()
+        assert result["fields_returned"] == sorted(self.ROW)
+
+    @pytest.mark.parametrize(
+        "tool_name",
+        ["search_traffic_logs", "search_security_logs", "search_event_logs"],
+    )
+    async def test_explicit_fields_are_forwarded(
+        self, monkeypatch: pytest.MonkeyPatch, tool_name: str
+    ) -> None:
+        self._install(monkeypatch)
+        tool = getattr(log_tools, tool_name)
+
+        result = await tool(time_range=self.CUSTOM_RANGE, fields=["dstport", "sessionid"])
+
+        assert result["logs"][0].keys() == {"dstport", "sessionid"}
+        assert result["logs"][0]["dstport"] == 443
+        assert result["fields_returned"] == ["dstport", "sessionid"]
+
+    async def test_an_alias_resolves_through_the_wrapper(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._install(monkeypatch)
+
+        result = await log_tools.search_traffic_logs(
+            time_range=self.CUSTOM_RANGE, fields=["destination_port"]
+        )
+
+        assert result["fields_returned"] == ["dstport"]
+
+    async def test_omitting_fields_still_curates_per_logtype(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Each wrapper inherits its own logtype's curated set, not one shared one."""
+        self._install(monkeypatch)
+
+        traffic = await log_tools.search_traffic_logs(time_range=self.CUSTOM_RANGE)
+        events = await log_tools.search_event_logs(time_range=self.CUSTOM_RANGE)
+
+        assert "noise" not in traffic["logs"][0]
+        assert "sessionid" in traffic["logs"][0], "traffic join key must survive"
+        assert "srcintf" not in events["logs"][0], "srcintf is not an event field"
+        assert "subtype" in events["logs"][0], "event discriminator must survive"

@@ -1271,6 +1271,7 @@ async def search_traffic_logs(
     time_range: str = "1-hour",
     limit: int = 100,
     timeout: int = DEFAULT_SEARCH_TIMEOUT,
+    fields: list[str] | None = None,
 ) -> dict[str, Any]:
     """Search traffic logs with common filter criteria.
 
@@ -1294,12 +1295,18 @@ async def search_traffic_logs(
         time_range: Time range (default: "1-hour")
         limit: Maximum logs to return (default: 100)
         timeout: Search timeout in seconds (default: 60)
+        fields: Which keys each returned row should carry. Omit for the
+            curated traffic default, ["*"] for the full row, or name the fields
+            you want -- forwarded to query_logs unchanged, English aliases and
+            all.
 
     Returns:
         dict: Log search results with keys:
             - status: "success" or "error"
             - count: Number of logs found
-            - logs: List of traffic log entries
+            - logs: List of traffic log entries, carrying the keys
+              `fields` selected (the curated traffic set by default)
+            - fields_returned: Those keys, echoed for a zero-row page too
             - filter_applied: Filter string used
             - tid: Reusable pagination handle -- this tool wraps query_logs,
               so the tid pages onward with fetch_more_logs like any
@@ -1347,6 +1354,7 @@ async def search_traffic_logs(
             filter=filter_str,
             limit=limit,
             timeout=timeout,
+            fields=fields,
         )
 
         if result.get("status") == "success":
@@ -1383,6 +1391,7 @@ async def search_security_logs(
     time_range: str = "24-hour",
     limit: int = 100,
     timeout: int = DEFAULT_SEARCH_TIMEOUT,
+    fields: list[str] | None = None,
 ) -> dict[str, Any]:
     """Search security logs (IPS, AV, etc.) with common filters.
 
@@ -1404,12 +1413,18 @@ async def search_security_logs(
         time_range: Time range (default: "24-hour")
         limit: Maximum logs to return (default: 100)
         timeout: Search timeout in seconds (default: 60)
+        fields: Which keys each returned row should carry. Omit for the
+            curated attack default, ["*"] for the full row, or name the fields
+            you want -- forwarded to query_logs unchanged, English aliases and
+            all.
 
     Returns:
         dict: Security log results with keys:
             - status: "success" or "error"
             - count: Number of security events found
-            - logs: List of security log entries
+            - logs: List of security log entries, carrying the keys
+              `fields` selected (the curated attack set by default)
+            - fields_returned: Those keys, echoed for a zero-row page too
             - filter_applied: Filter string used
             - tid: Reusable pagination handle -- this tool wraps query_logs,
               so the tid pages onward with fetch_more_logs like any
@@ -1456,6 +1471,7 @@ async def search_security_logs(
             filter=filter_str,
             limit=limit,
             timeout=timeout,
+            fields=fields,
         )
 
         if result.get("status") == "success":
@@ -1490,6 +1506,7 @@ async def search_event_logs(
     time_range: str = "24-hour",
     limit: int = 100,
     timeout: int = DEFAULT_SEARCH_TIMEOUT,
+    fields: list[str] | None = None,
 ) -> dict[str, Any]:
     """Search system event logs.
 
@@ -1510,12 +1527,18 @@ async def search_event_logs(
         time_range: Time range (default: "24-hour")
         limit: Maximum logs to return (default: 100)
         timeout: Search timeout in seconds (default: 60)
+        fields: Which keys each returned row should carry. Omit for the
+            curated event default, ["*"] for the full row, or name the fields
+            you want -- forwarded to query_logs unchanged, English aliases and
+            all.
 
     Returns:
         dict: Event log results with keys:
             - status: "success" or "error"
             - count: Number of events found
-            - logs: List of event log entries
+            - logs: List of event log entries, carrying the keys `fields`
+              selected (the curated event set by default)
+            - fields_returned: Those keys, echoed for a zero-row page too
             - filter_applied: Filter string used
             - tid: Reusable pagination handle -- this tool wraps query_logs,
               so the tid pages onward with fetch_more_logs like any
@@ -1549,6 +1572,7 @@ async def search_event_logs(
             filter=filter_str,
             limit=limit,
             timeout=timeout,
+            fields=fields,
         )
 
         if result.get("status") == "success":
