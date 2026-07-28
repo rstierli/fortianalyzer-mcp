@@ -23,6 +23,18 @@ logger = logging.getLogger(__name__)
 _VALID_ENDPOINT_DETAIL = {"simple", "basic", "standard"}
 _VALID_ENDUSER_DETAIL = {"basic", "standard", "extended"}
 _VALID_DETECTBY = {"FortiClient", "FortiGate"}
+
+
+def _vuln_records(payload: Any) -> list[Any]:
+    """Normalize a vulnerability response to a list of per-endpoint records."""
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        return data if isinstance(data, list) else ([payload] if payload else [])
+    return []
+
+
 _VALID_ENDUSER_STATS_ITEM = {"total-count", "new-count"}
 
 
@@ -109,7 +121,10 @@ async def get_endpoint_vulnerabilities(
     Args:
         adom: ADOM name (default: from config DEFAULT_ADOM)
         epids: Optional list of endpoint IDs to scope the query
-        detectby: Optional detector filter: "FortiClient" or "FortiGate"
+        detectby: Detector filter ("FortiClient" or "FortiGate"). Omitted
+            (the default) queries every detector and returns the combined
+            records, because the appliance returns nothing when the filter
+            is absent.
 
     Returns:
         dict with vulnerability records under "data"
@@ -131,9 +146,22 @@ async def get_endpoint_vulnerabilities(
 
         logger.info(f"Getting UEBA endpoint vulnerabilities from ADOM {adom}")
 
-        result = await client.get_endpoint_vulnerabilities(
-            adom=adom, epids=epids, detectby=detectby
-        )
+        if detectby is None:
+            # The appliance returns nothing when the detector filter is
+            # absent, so an omitted detectby silently read as "no
+            # vulnerabilities" (#87). Query every detector and combine the
+            # per-endpoint records so an omitted filter means "all", not "none".
+            combined: list[Any] = []
+            for det in sorted(_VALID_DETECTBY):
+                recs = await client.get_endpoint_vulnerabilities(
+                    adom=adom, epids=epids, detectby=det
+                )
+                combined.extend(_vuln_records(recs))
+            result: Any = combined
+        else:
+            result = await client.get_endpoint_vulnerabilities(
+                adom=adom, epids=epids, detectby=detectby
+            )
         return {"status": "success", "data": result}
     except Exception as e:
         logger.error(f"Failed to get UEBA endpoint vulnerabilities: {e}")

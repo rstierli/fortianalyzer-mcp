@@ -21,6 +21,7 @@ class _FakeClient:
     def __init__(self, payload: Any) -> None:
         self.payload = payload
         self.calls: dict[str, dict[str, Any]] = {}
+        self.vuln_detectby_seen: list[Any] = []
 
     async def get_endpoints(self, **kwargs: Any) -> Any:
         self.calls["get_endpoints"] = kwargs
@@ -28,6 +29,7 @@ class _FakeClient:
 
     async def get_endpoint_vulnerabilities(self, **kwargs: Any) -> Any:
         self.calls["get_endpoint_vulnerabilities"] = kwargs
+        self.vuln_detectby_seen.append(kwargs.get("detectby"))
         return self.payload
 
     async def get_endusers(self, **kwargs: Any) -> Any:
@@ -104,11 +106,18 @@ class TestGetEndpointVulnerabilities:
         assert result["status"] == "error"
         assert "Validation error" in result["message"]
 
-    async def test_detectby_optional(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        fake = _patch_client(monkeypatch, [])
+    async def test_detectby_omitted_unions_all_detectors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The appliance returns nothing without a detector filter, so an
+        # omitted detectby must query every detector and combine (#87), not
+        # forward a single None that reads as "no vulnerabilities".
+        fake = _patch_client(monkeypatch, [{"epid": "1", "vuln-group": {"vulnerabilities": []}}])
         result = await ueba_tools.get_endpoint_vulnerabilities()
         assert result["status"] == "success"
-        assert fake.calls["get_endpoint_vulnerabilities"]["detectby"] is None
+        assert sorted(fake.vuln_detectby_seen) == ["FortiClient", "FortiGate"]
+        # one record per detector call is combined into the result
+        assert len(result["data"]) == 2
 
 
 # --------------------------------------------------------------------- #
