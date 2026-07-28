@@ -239,6 +239,22 @@ FIELD_TYPES: dict[str, str] = {
     "ui": TEXT,  # event: frequently embeds the admin source IP, e.g. GUI(10.0.0.1)
     "prompt": TEXT,  # app-ctrl: GenAI prompt text
     "description": TEXT,  # eventmgmt handler config: operator-authored prose
+    # --- resolved address-object labels (traffic logs). srcuuid_name /
+    # dstuuid_name are the *names* of the firewall address objects that
+    # matched the session's src/dst — operator-authored labels populated on
+    # ~90% of live rows (230,092/256,483 on the reference estate, #80). The
+    # raw uuids (srcuuid/dstuuid) carry no human content and are left out;
+    # the resolved *name* is the leak. TEXT rather than HOSTNAME: an object
+    # label is free-form ("Printer Floor 3", "jdoe-laptop", "all"), so
+    # HOSTNAME masking would burn anything carrying a space or punctuation
+    # to an irreversible placeholder. TEXT never burns and masks any
+    # embedded IOC (bare IPv4/MAC/email) in place. Documented residual: a
+    # plain descriptive label with no embedded IOC rides through clear —
+    # accepted here as the conservative direction (a burned routing/label
+    # value is worse than a readable object name); revisit at GA if a
+    # burn-tolerant name type is added.
+    "srcuuid_name": TEXT,
+    "dstuuid_name": TEXT,
     # --- eventmgmt / incidentmgmt object keys (NOT log fields; found by
     # leak-testing verbatim alert and incident records)
     "endpoint": IP_OR_HOST,  # incident: an address or an endpoint name

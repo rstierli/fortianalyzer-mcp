@@ -184,6 +184,24 @@ class TestTextScan:
         assert "bob@example.com" not in str(masked)
         assert masked["msg"][1] == "second line"
 
+    def test_uuid_name_labels_typed_text(self):
+        # srcuuid_name/dstuuid_name are resolved address-object labels, added
+        # as TEXT (#80): free-form, so HOSTNAME would burn on spaces.
+        assert FIELD_TYPES["srcuuid_name"] == TEXT
+        assert FIELD_TYPES["dstuuid_name"] == TEXT
+        # The raw uuids carry no human content and stay out of the table.
+        assert "srcuuid" not in FIELD_TYPES
+        assert "dstuuid" not in FIELD_TYPES
+
+    def test_uuid_name_masks_embedded_ioc_leaves_label_clear(self, masker: OutputMasker):
+        # TEXT masks an embedded IOC in place; a plain label rides through
+        # (the documented residual).
+        masked = masker.mask_result(
+            {"srcuuid_name": "host 192.0.2.51", "dstuuid_name": "Printer Floor 3"}
+        )
+        assert "192.0.2.51" not in masked["srcuuid_name"]
+        assert masked["dstuuid_name"] == "Printer Floor 3"
+
     def test_text_dict_typed_key_is_not_double_masked(self, masker: OutputMasker):
         nested = masker.mask_result({"msg": {"srcip": "192.0.2.9"}})["msg"]["srcip"]
         bare = masker.mask_result({"srcip": "192.0.2.9"})["srcip"]
