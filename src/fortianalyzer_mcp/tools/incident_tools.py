@@ -80,9 +80,12 @@ async def get_incidents(
         limit: Maximum number of incidents to return (1-2000)
         offset: Record offset for pagination
         fields: Which keys each incident carries. Omit for a curated default
-            (identity, severity, status, timing and the epid/euid/alertid
-            join keys), ["*"] for the full object, or name the fields you
-            want.
+            (incid/epid/euid/alertid join keys, name, severity, status,
+            category, timing, the `endpoint` the incident is about, and the
+            reporter/lastuser/assigned_to workflow slots), ["*"] for the full
+            object, or name the fields you want. The record spells the title
+            `name` and the owner `assigned_to`; `title`, `banner`, `owner` and
+            `assignee` are accepted as aliases for them.
 
     Returns:
         dict with incidents data

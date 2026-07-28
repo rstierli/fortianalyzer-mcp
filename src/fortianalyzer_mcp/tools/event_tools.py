@@ -65,8 +65,12 @@ async def get_alerts(
         limit: Maximum number of alerts to return (1-2000)
         offset: Record offset for pagination
         fields: Which keys each alert carries. Omit for a curated default
-            (identity, severity, status, timing and the epid/euid/alertid join
-            keys), ["*"] for the full object, or name the fields you want.
+            (alertid/epid/euid join keys, the epname/epip endpoint identity,
+            severity, status, both ack spellings, timing, subject and the
+            groupby dimensions), ["*"] for the full object, or name the fields
+            you want. Note live alerts spell acknowledgement `ackflag`, not
+            `acknowledged`; both are in the default so whichever this build
+            emits survives.
 
     Returns:
         dict with alerts data and metadata

@@ -147,3 +147,85 @@ class TestCuratedProjections:
         assert "action" in traffic, "discriminator missing"
         assert {"sentbyte", "rcvdbyte"} <= traffic, "magnitude missing"
         assert {"service", "app"} <= traffic, "summary missing"
+
+
+class TestCuratedSetsAgreeWithTheLiveFixtures:
+    """The alert and incident sets, checked against the repo's live records.
+
+    ``tests/test_masking_leak.py``'s ALERT and INCIDENT dicts are documented
+    as shapes taken from live 7.6.7 responses, and ``masking/fields.py``'s
+    allowlist is documented as verified against live 7.6.7/8.0.0 schemas.
+    Those are the two strongest statements about real FAZ field names this
+    repo contains, and the first cut of these curated sets contradicted both:
+    it kept ``acknowledged`` where live alerts carry ``ackflag``, omitted
+    every human-readable endpoint key on the live alert record, and curated an
+    incident around ``banner`` and ``assignee`` -- one with zero occurrences
+    repo-wide, the other an UPDATE request parameter.
+
+    Asserting against the fixture rather than against a hand-written list is
+    the point: the fixture is maintained by the leak tests, so a future live
+    record shape lands here automatically instead of being re-guessed.
+    """
+
+    def test_every_live_alert_key_is_a_known_alert_field(self) -> None:
+        from tests.test_masking_leak import ALERT
+
+        vocab = get_vocabulary("alert")
+        unknown = set(ALERT) - vocab.canonical
+        assert not unknown, (
+            f"the live 7.6.7 alert record carries {sorted(unknown)}, which the "
+            "alert vocabulary does not know; asking for one warns that a real "
+            "field is unknown"
+        )
+
+    def test_every_live_incident_key_is_a_known_incident_field(self) -> None:
+        from tests.test_masking_leak import INCIDENT
+
+        vocab = get_vocabulary("incident")
+        unknown = set(INCIDENT) - vocab.canonical
+        assert not unknown, (
+            f"the live 7.6.7 incident record carries {sorted(unknown)}, which "
+            "the incident vocabulary does not know"
+        )
+
+    def test_the_alert_default_carries_the_live_ack_spelling(self) -> None:
+        """The regression this class exists for.
+
+        ``skills/handlers.py`` records that live FAZ alerts carry ``ackflag``.
+        With only ``acknowledged`` curated, ``get_alerts()`` returned no
+        acknowledgement state at all against a real appliance -- a default
+        that silently drops the field an analyst triages on.
+        """
+        projection = get_vocabulary("alert").projection
+
+        assert "ackflag" in projection
+        assert "acknowledged" in projection, "keep both; project_rows never invents the absent one"
+
+    def test_the_alert_default_carries_readable_endpoint_identity(self) -> None:
+        """``epid`` alone is a number; ``epname``/``epip`` are the answer."""
+        projection = get_vocabulary("alert").projection
+
+        assert {"epid", "epname", "epip"} <= projection
+
+    def test_the_incident_default_carries_the_endpoint_it_is_about(self) -> None:
+        assert "endpoint" in get_vocabulary("incident").projection
+
+    @pytest.mark.parametrize("name", ["banner", "assignee", "updatetime", "ticket"])
+    def test_unattested_incident_names_are_gone_from_canonical(self, name: str) -> None:
+        """Canonical membership is a claim that the appliance emits the name."""
+        assert name not in get_vocabulary("incident").canonical
+
+    @pytest.mark.parametrize(
+        "spelling,canonical",
+        [
+            ("banner", "name"),
+            ("title", "name"),
+            ("assignee", "assigned_to"),
+            ("owner", "assigned_to"),
+        ],
+    )
+    def test_the_english_incident_spellings_survive_as_aliases(
+        self, spelling: str, canonical: str
+    ) -> None:
+        """Demoted, not deleted: the LLM-facing spelling still resolves."""
+        assert resolve_field("incident", spelling) == (canonical, None)

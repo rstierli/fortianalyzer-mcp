@@ -435,45 +435,78 @@ _NO_COERCIONS: Mapping[str, Mapping[str, int]] = {}
 # incidentmgmt take the string dialect, which Plan 1 already emits), but they
 # need canonical sets so projection can validate names against something.
 
+# eventmgmt alert rows. Corrected against the live 7.6.7 alert fixture in
+# tests/test_masking_leak.py, the live-verified allowlist in
+# masking/fields.py, and the alert keys skills/handlers.py actually reads --
+# the same discipline the UEBA sets were rebuilt under.
+#
+# Out, for want of any evidence: `firstlogtime`, `count`, `comments` and
+# `adom` have zero occurrences as an alert response key anywhere in this repo.
+#
+# In, because the live fixture carries every one of them: the human-readable
+# endpoint identity (`epname`/`epip`, and their `dstep*` peers), the composite
+# group-by dimensions the masking layer already has handlers for
+# (`groupby1`/`groupby2`), the nested `event_details`, and `csf`.
+#
+# `ackflag` is the load-bearing correction. handlers.py records that live FAZ
+# alerts carry `ackflag` where this set had only `acknowledged`, so the
+# curated default returned no acknowledgement state at all on a real
+# appliance. Both are carried and both are projected: whichever the build
+# emits survives, and project_rows never invents the absent one.
 _ALERT_FIELDS: frozenset[str] = frozenset(
     {
         "alertid",
-        "adom",
         "severity",
         "status",
+        "ackflag",
+        "acknowledged",
         "alerttime",
-        "firstlogtime",
+        "timestamp",
+        "createtime",
         "lastlogtime",
-        "count",
         "eventtype",
+        "alerttype",
+        "triggername",
+        "name",
+        "logdesc",
+        "description",
         "extrainfo",
-        "devname",
-        "devid",
         "subject",
         "subject_details",
-        "triggername",
+        "devname",
+        "devid",
+        "csf",
         "epid",
+        "epname",
+        "epip",
         "euid",
-        "acknowledged",
-        "comments",
+        "dstepname",
+        "dstepip",
+        "event_details",
+        "groupby1",
+        "groupby2",
         "target",
     }
 )
 _ALERT_PROJECTION: frozenset[str] = frozenset(
     {
         "alertid",
-        "severity",
-        "status",
         "alerttime",
         "lastlogtime",
-        "count",
-        "eventtype",
-        "devname",
-        "subject",
-        "triggername",
-        "epid",
-        "euid",
+        "severity",
+        "status",
+        "ackflag",
         "acknowledged",
+        "eventtype",
+        "triggername",
+        "subject",
+        "devname",
+        "epid",
+        "epname",
+        "epip",
+        "euid",
+        "groupby1",
+        "groupby2",
     }
 )
 _ALERT_ALIASES: Mapping[str, str] = {
@@ -481,41 +514,70 @@ _ALERT_ALIASES: Mapping[str, str] = {
     "event_type": "eventtype",
     "device_name": "devname",
     "trigger": "triggername",
+    "acknowledged_flag": "ackflag",
+    "endpoint_name": "epname",
+    "endpoint_ip": "epip",
+    "endpoint_id": "epid",
+    "enduser_id": "euid",
 }
 
+# incidentmgmt incident rows. Same sources, same discipline.
+#
+# Out: `banner` has zero occurrences repo-wide -- client.create_incident takes
+# `name`, which the appliance persists on the record, and the conftest
+# incident fixture carries `name`. `updatetime` is likewise unattested;
+# handlers.py reads `lastupdate`. `assignee` is an UPDATE *request* param
+# (api/client.update_incident), not a record key: the live record spells the
+# workflow slots `assigned_to`/`remedy_executor`/`remedy_approver`, which is
+# what masking/fields.py types. `attachment`, `connector` and `ticket` are
+# unattested too -- incident/alert correlation runs through the attachments
+# endpoint rather than a field on either object, and the `connector` this repo
+# knows is an event subtype.
+#
+# In, from the live 7.6.7 incident fixture: `endpoint` (dropped by the old
+# projection despite being the incident's subject), `lastuser`,
+# `incident_reporter` and the composite `grpby`.
+#
+# `banner`, `assignee` and `owner` survive as aliases: they are the English an
+# LLM reaches for, and an alias can never shadow a canonical name.
 _INCIDENT_FIELDS: frozenset[str] = frozenset(
     {
         "incid",
-        "adom",
+        "name",
         "severity",
         "status",
         "category",
-        "createtime",
-        "updatetime",
-        "banner",
         "description",
-        "assignee",
-        "reporter",
+        "createtime",
+        "lastupdate",
+        "timestamp",
         "endpoint",
+        "reporter",
+        "lastuser",
+        "incident_reporter",
+        "assigned_to",
+        "remedy_executor",
+        "remedy_approver",
+        "grpby",
         "epid",
         "euid",
         "alertid",
-        "attachment",
-        "connector",
-        "ticket",
     }
 )
 _INCIDENT_PROJECTION: frozenset[str] = frozenset(
     {
         "incid",
+        "name",
         "severity",
         "status",
         "category",
         "createtime",
-        "updatetime",
-        "banner",
-        "assignee",
+        "lastupdate",
+        "timestamp",
+        "endpoint",
         "reporter",
+        "lastuser",
+        "assigned_to",
         "epid",
         "euid",
         "alertid",
@@ -523,8 +585,12 @@ _INCIDENT_PROJECTION: frozenset[str] = frozenset(
 )
 _INCIDENT_ALIASES: Mapping[str, str] = {
     "incident_id": "incid",
-    "title": "banner",
-    "owner": "assignee",
+    "title": "name",
+    "banner": "name",
+    "owner": "assigned_to",
+    "assignee": "assigned_to",
+    "endpoint_id": "epid",
+    "enduser_id": "euid",
 }
 
 
