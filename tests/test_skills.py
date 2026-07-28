@@ -936,7 +936,23 @@ class TestNestedWarningRedaction:
 # call-site discipline: curating readers must not default in handlers.py #
 # --------------------------------------------------------------------- #
 
-#: The Task 6 readers that curate their response when ``fields`` is omitted.
+#: Every tool that routes its ``fields`` argument through
+#: ``query.shape.resolve_projection``.
+#:
+#: Deliberately *not* "the readers that curate today". The first version of
+#: this list was the curating subset and it omitted ``query_logs``, so the
+#: guard reported a clean audit while six handler call sites took the curated
+#: traffic/event/attack default and quietly dropped srcintf, hostname, msg,
+#: logid and a dozen more from output models documented as verbatim. A
+#: vocabulary can also *gain* a curated set later (report and fortiview are
+#: uncurated today), which would turn a currently-harmless call site into the
+#: same silent truncation with no code change here to notice it. Membership is
+#: therefore "resolver-backed", which is a property of the tool signature and
+#: does not move when a curation lands.
+#:
+#: ``list_adoms``/``list_devices`` are excluded on purpose: they forward
+#: ``fields`` straight to the appliance without the resolver, and omitting it
+#: means "no projection", not "the curated one".
 _PROJECTING_READERS = frozenset(
     {
         "get_endpoints",
@@ -945,6 +961,10 @@ _PROJECTING_READERS = frozenset(
         "get_alert_logs",
         "get_incidents",
         "get_report_history",
+        "get_fortiview_data",
+        "query_logs",
+        "fetch_more_logs",
+        "search_devices",
     }
 )
 

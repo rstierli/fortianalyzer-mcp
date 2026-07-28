@@ -436,6 +436,11 @@ async def run_log_search(params: LogSearchParams) -> LogSearchResult:
         filter=params.filter,
         limit=params.limit,
         timeout=params.timeout,
+        # LogSearchResult.rows is documented "verbatim FAZ log rows", and
+        # log_search exposes no `fields` of its own -- so the curated default
+        # would silently and unfixably strip srcintf/dstintf/hostname/msg/
+        # logid/level/devid/itime and the rest from every caller.
+        fields=["*"],
     )
     if search_res is None:
         raise SkillExecutionError(f"log search failed ({err})")
@@ -1490,6 +1495,8 @@ async def run_identity_profile(params: IdentityProfileParams) -> IdentityProfile
             time_range=params.time_range,
             filter=f"user=={safe_user} and {_IDENTITY_ACTIVITY_CLAUSE}",
             limit=params.activity_limit,
+            # IdentityProfileResult.recent_activity is documented verbatim.
+            fields=["*"],
         )
         if logs_res is None:
             recent_activity = FeatureGap(reason=f"activity search unavailable: {err}")
@@ -1583,6 +1590,10 @@ async def run_app_usage(params: AppUsageParams) -> AppUsageResult:
             device=params.device,
             time_range=params.time_range,
             limit=params.dlp_limit,
+            # AppUsageResult.dlp_events is documented verbatim. (dlp has no
+            # curated set today, so this is also what silences the uncurated
+            # warning from leaking into AppUsageResult.warnings.)
+            fields=["*"],
         )
         if search_res is None:
             warnings.append(f"DLP log search unavailable: {err}")
@@ -1700,7 +1711,11 @@ async def run_network_context(params: NetworkContextParams) -> NetworkContextRes
     ]
     if params.include_geo:
         attempted.append("top_countries")
-        coros.append(_call(get_fortiview_data, view_name=_GEO_VIEW, **common))
+        # fields=["*"]: FortiView rows pass through verbatim here, and it also
+        # keeps get_fortiview_data's uncurated-vocabulary warning (which names
+        # a `fields` parameter this skill's caller does not have) out of the
+        # skill's warnings list.
+        coros.append(_call(get_fortiview_data, view_name=_GEO_VIEW, fields=["*"], **common))
     vpn_window = params.time_range
     if params.include_vpn:
         attempted.append("vpn_tunnels")
@@ -1709,7 +1724,12 @@ async def run_network_context(params: NetworkContextParams) -> NetworkContextRes
         # (an explicit vpn_time_range wins).
         vpn_window = params.vpn_time_range or _vpn_window(params.time_range)
         coros.append(
-            _call(get_fortiview_data, view_name=_VPN_VIEW, **{**common, "time_range": vpn_window})
+            _call(
+                get_fortiview_data,
+                view_name=_VPN_VIEW,
+                fields=["*"],
+                **{**common, "time_range": vpn_window},
+            )
         )
 
     results = await _gather_bounded(coros)
@@ -1876,6 +1896,7 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
             time_range=params.time_range,
             filter=entity_filter,
             limit=100,
+            fields=["*"],
         )
         if threats_res is None:
             warnings.append(f"threat dimension unavailable ({err}); its subscore is 0")
@@ -1898,6 +1919,9 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
             time_range=params.time_range,
             filter=f"action==failure and {entity_filter}",
             limit=1000,
+            # Counts rows and reads `total`; keeps the row shape the skill's
+            # other log reads use rather than a silently different one.
+            fields=["*"],
         )
         if logs_res is None:
             warnings.append(f"auth-failure dimension unavailable ({err}); its subscore is 0")
@@ -2619,6 +2643,10 @@ async def _hunt_sweep(
             time_range=time_range,
             filter=pivot,
             limit=params.sweep_limit,
+            # SweepMatch.rows is documented "Verbatim matched rows", and the
+            # sweep fans out over logtypes whose curated sets differ -- a
+            # per-logtype trim would make the matches non-comparable.
+            fields=["*"],
         )
         if logs_res is None:
             matches.append(
@@ -3055,6 +3083,10 @@ async def _entity_impact(
             time_range=time_range,
             filter=pivot,
             limit=lateral_limit,
+            # EntityImpact.lateral_activity is documented "Per-logtype
+            # verbatim rows"; same per-logtype comparability point as the
+            # hunt sweep above.
+            fields=["*"],
         )
         if logs_res is None:
             lateral[logtype] = FeatureGap(reason=f"lateral '{logtype}' search unavailable: {err}")
