@@ -2163,7 +2163,7 @@ It covers all thirteen removed names, including the ten already deleted."
 
 **Files:**
 - Modify: `src/fortianalyzer_mcp/skills/handlers.py` — the import/call pairs at :760/:829 (`run_incident_summary`), :1268/:1359 (`run_threat_intel`), :1497-1524 (`run_app_usage`, three views) and :1655-1670 (`run_network_context`, two views)
-- Test: `tests/test_skills_handlers.py`
+- Test: `tests/test_skills*.py` (there is no `test_skills_handlers.py`; the skills suite is split per skill — `test_skills.py`, `test_skills_app_usage.py`, `test_skills_threat_intel.py`, `test_skills_network_context.py`, `test_skills_wave2.py`, and siblings)
 
 **Interfaces:** no new names. Every call becomes
 `get_fortiview_data(view_name=…, …)`.
@@ -2178,7 +2178,7 @@ migration is complete.
 
 ```bash
 FORTIANALYZER_HOST=ci-dummy.local FAZ_SKILLS_ENABLED=true PYTHONPATH=src uv run pytest \
-  tests/test_skills_handlers.py -q --no-cov 2>&1 | tail -30
+  tests/test_skills*.py -q --no-cov 2>&1 | tail -30
 ```
 Record the failing test names. Each names a handler and the tool it cannot
 import — that list is the work.
@@ -2253,7 +2253,7 @@ actually requested rather than which wrapper name was invoked.
 
 ```bash
 FORTIANALYZER_HOST=ci-dummy.local FAZ_SKILLS_ENABLED=true PYTHONPATH=src uv run pytest \
-  tests/test_skills_handlers.py tests/test_skills_catalog.py -q --no-cov
+  tests/test_skills*.py -q --no-cov
 FORTIANALYZER_HOST=ci-dummy.local PYTHONPATH=src uv run pytest tests/ --ignore=tests/integration -q --no-cov
 uv run ruff format src/ tests/ && uv run ruff check src/ tests/ && uv run ruff format --check src/ tests/ && PYTHONPATH=src uv run mypy src/
 ```
@@ -2264,13 +2264,13 @@ Also confirm the skills still work end-to-end with masking on, since
 
 ```bash
 MASKING_ENABLED=true FAZ_MASKING_KEY=$(python3 -c "print('0'*64)") FAZ_SKILLS_ENABLED=true \
-  FORTIANALYZER_HOST=ci-dummy.local PYTHONPATH=src uv run pytest tests/test_skills_handlers.py -q --no-cov
+  FORTIANALYZER_HOST=ci-dummy.local PYTHONPATH=src uv run pytest tests/test_skills*.py -q --no-cov
 ```
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/fortianalyzer_mcp/skills/handlers.py tests/test_skills_handlers.py
+git add src/fortianalyzer_mcp/skills/handlers.py tests/test_skills*.py  # quote or expand the glob for your shell
 git commit -m "refactor(skills): compose get_fortiview_data instead of the get_top_* wrappers
 
 Six call sites across run_incident_summary, run_threat_intel, run_app_usage and
