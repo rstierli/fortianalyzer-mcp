@@ -263,9 +263,10 @@ class OutputMasker:
         there is no reliable type for reversible masking. So does a whole
         ``target`` that is not a list, an entry that is not a dict, and a
         map-shaped ``value`` whose key carries the identifier. An entry
-        that IS a dict but carries neither ``name`` nor ``value`` is still
-        walked by the allowlist, so an identifier parked in its own key
-        survives; that shape is unattested and tracked separately.
+        that IS a dict but carries neither ``name`` nor ``value`` burns
+        whole for the same reason: with no slot to type it by, the
+        identifier is parked in the entry's own key, which the allowlist
+        walk would copy through in clear (#73).
         """
         out: list[Any] = []
         for item in value:
@@ -277,12 +278,19 @@ class OutputMasker:
                 continue
             name: Any = ""
             raw: Any = None
+            has_name = False
+            has_value = False
             for key, item_value in item.items():
                 lowered = key.lower()
                 if lowered == "name":
                     name = item_value
+                    has_name = True
                 elif lowered == "value":
                     raw = item_value
+                    has_value = True
+            if not has_name and not has_value:
+                out.append(self._burn_strings(item, keep))
+                continue
             vtype = TARGET_NAME_TYPES.get(str(name).lower())
             if vtype is None:
                 masked_value = self._burn_strings(raw, keep)
@@ -318,9 +326,24 @@ class OutputMasker:
                     entry[key] = masked_value
                 elif lowered == "asset_value":
                     # asset_value repeats the identifier on some targets and
-                    # carries an internal numeric id on others; mask only the
-                    # former.
-                    entry[key] = masked_value if item_value == raw else item_value
+                    # carries an internal id on others. The id case is a bare
+                    # number; a differing non-numeric string is a second
+                    # identifier for the same asset, so it gets the entry's
+                    # own type, and with no type to mask by it burns like the
+                    # value did (#73). Differing containers burn whole.
+                    if item_value == raw:
+                        entry[key] = masked_value
+                    elif isinstance(item_value, str):
+                        if item_value in keep or item_value.isdigit():
+                            entry[key] = item_value
+                        elif vtype is None:
+                            entry[key] = self._burn_strings(item_value, keep)
+                        else:
+                            entry[key] = self._mask_scalar(vtype, item_value, mapping)
+                    elif isinstance(item_value, list | tuple | dict):
+                        entry[key] = self._burn_strings(item_value, keep)
+                    else:
+                        entry[key] = item_value
                 else:
                     entry[key] = self._mask_entry(key, item_value, mapping, keep)
             out.append(entry)
@@ -725,10 +748,29 @@ class OutputMasker:
         lowered = key.lower()
         if lowered in COMPOSITE_PREFIXED and isinstance(value, str):
             return self._mask_prefixed(value, mapping)
+        if lowered in COMPOSITE_PREFIXED and isinstance(value, list):
+            # list-valued group-bys are a normal FAZ variation (#73): each
+            # element gets the same prefixed treatment the string form gets.
+            # A dict-shaped groupby stays with the allowlist walk below,
+            # which types it by its inner keys.
+            return [
+                self._mask_prefixed(item, mapping)
+                if isinstance(item, str)
+                else self._mask_structured(item, mapping, keep)
+                for item in value
+            ]
         if lowered in COMPOSITE_JSON and isinstance(value, str):
             return self._mask_json_blob(value, mapping)
         if lowered in COMPOSITE_URL_HOST and isinstance(value, str):
             return self._mask_url_host(value, mapping)
+        if lowered in COMPOSITE_URL_HOST and isinstance(value, list):
+            # same list convention the typed fields handle below
+            return [
+                self._mask_url_host(item, mapping)
+                if isinstance(item, str)
+                else self._mask_structured(item, mapping, keep)
+                for item in value
+            ]
         if lowered in COMPOSITE_URL_FULL and isinstance(value, str):
             return self._mask_url_full(value, mapping)
         if lowered in COMPOSITE_URL_FULL and isinstance(value, list):
@@ -739,6 +781,16 @@ class OutputMasker:
                 else self._mask_structured(item, mapping, keep)
                 for item in value
             ]
+        if (lowered in COMPOSITE_URL_HOST or lowered in COMPOSITE_URL_FULL) and isinstance(
+            value, dict
+        ):
+            # A map under a URL key has no slot the URL handlers can type,
+            # and the allowlist walk knows none of its inner keys, so the
+            # destination would ride through in clear (#73). Fail closed on
+            # the whole shape, same policy as a non-list target below. The
+            # cost is the same too: any analytic structure a producer put
+            # there burns rather than round-tripping.
+            return self._burn_strings(value, keep)
         if lowered in COMPOSITE_TARGET:
             if isinstance(value, list):
                 return self._mask_target(value, mapping, keep)

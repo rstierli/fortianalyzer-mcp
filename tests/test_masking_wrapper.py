@@ -545,3 +545,137 @@ class TestInstallMasking:
         import os
 
         assert os.environ.get("FAZ_MASKING_KEY") == KEY
+
+
+class TestCompositeListShapes:
+    """#73 item 1: composite keys arriving as lists must not fall through
+    to the allowlist walk, which cannot type a bare string element."""
+
+    def test_prefixed_list_masks_each_element(self, masker: OutputMasker):
+        raw = "192.0.2.90"
+        masked = masker.mask_result({"groupby1": [f"srcip:{raw}", "srcport:443"]})
+
+        assert raw not in str(masked)
+        assert masked["groupby1"][0].startswith("srcip:")
+        # same treatment as the string shape, element for element
+        twin = masker.mask_result({"groupby1": f"srcip:{raw}"})["groupby1"]
+        assert masked["groupby1"][0] == twin
+        # an untyped inner field is left alone, exactly like the string shape
+        assert masked["groupby1"][1] == "srcport:443"
+
+    def test_prefixed_list_non_string_item_is_walked(self, masker: OutputMasker):
+        masked = masker.mask_result({"groupby1": ["srcip:192.0.2.90", {"srcip": "192.0.2.91"}]})
+
+        assert "192.0.2.90" not in str(masked)
+        assert "192.0.2.91" not in str(masked)
+
+    def test_url_host_list_masks_each_element(self, masker: OutputMasker):
+        masked = masker.mask_result(
+            {"http_url": ["https://bad.example.com/x", "https://other.example.net/y"]}
+        )
+
+        assert "bad.example.com" not in str(masked)
+        assert "other.example.net" not in str(masked)
+        # host-only masking: request mechanics stay readable
+        assert masked["http_url"][0].endswith("/x")
+        twin = masker.mask_result({"http_url": "https://bad.example.com/x"})["http_url"]
+        assert masked["http_url"][0] == twin
+
+
+class TestCompositeDictShapesFailClosed:
+    """#73 item 1, the dict half: a map under a URL composite key has no
+    slot the handler can type, so it burns whole, same policy as target."""
+
+    def test_url_full_dict_burns(self, masker: OutputMasker):
+        masked = masker.mask_result({"url": {"u": "https://bad.example.com/x"}})
+
+        assert "bad.example.com" not in str(masked)
+        # keys burn too: a key can carry the identifier just as a value can
+        value = next(iter(masked["url"].values()))
+        assert value.startswith("masked-unrepresentable-")
+
+    def test_url_host_dict_burns(self, masker: OutputMasker):
+        masked = masker.mask_result({"http_url": {"u": "https://bad.example.com/x"}})
+
+        assert "bad.example.com" not in str(masked)
+
+    def test_url_dict_key_is_burned(self, masker: OutputMasker):
+        masked = masker.mask_result({"url": {"https://bad.example.com/x": 3}})
+
+        assert "bad.example.com" not in str(masked)
+
+    def test_prefixed_dict_keeps_allowlist_walk(self, masker: OutputMasker):
+        # groupby1 as a dict is typed by its inner keys and was never the
+        # leak; pin that it keeps the reversible walk rather than burning.
+        raw = "192.0.2.92"
+        masked = masker.mask_result({"groupby1": {"srcip": raw}})
+
+        assert raw not in str(masked)
+        assert not masked["groupby1"]["srcip"].startswith("masked-unrepresentable-")
+
+
+class TestTargetEntryWithoutNameOrValue:
+    """#73 item 2: an entry dict with neither slot parks the identifier in
+    its own key, where the rebuild loop used to copy it through."""
+
+    def test_entry_keyed_by_identifier_burns(self, masker: OutputMasker):
+        masked = masker.mask_result({"target": [{"192.0.2.5": {"note": "campus"}}]})
+
+        assert "192.0.2.5" not in str(masked)
+        assert "campus" not in str(masked)
+
+    def test_entry_with_name_slot_keeps_current_treatment(self, masker: OutputMasker):
+        # Only the neither-slot shape burns; a named entry keeps the walk.
+        masked = masker.mask_result({"target": [{"name": "ip", "note": "campus"}]})
+
+        assert masked["target"][0]["note"] == "campus"
+
+
+class TestAssetValueDiffering:
+    """#73 item 3: an asset_value that differs from value used to pass
+    through in clear even when it is a second identifier."""
+
+    def test_differing_string_asset_value_masks_by_name_type(self, masker: OutputMasker):
+        import ipaddress
+
+        masked = masker.mask_result(
+            {"target": [{"name": "ip", "value": "192.0.2.57", "asset_value": "192.0.2.58"}]}
+        )
+        entry = masked["target"][0]
+
+        assert "192.0.2.58" not in str(masked)
+        # reversibly masked by the entry's own type, not burned
+        ipaddress.IPv4Address(entry["asset_value"])
+
+    def test_numeric_id_asset_value_stays_clear(self, masker: OutputMasker):
+        masked = masker.mask_result(
+            {"target": [{"name": "ip", "value": "192.0.2.57", "asset_value": "84021"}]}
+        )
+
+        assert masked["target"][0]["asset_value"] == "84021"
+
+    def test_differing_asset_value_unknown_name_burns(self, masker: OutputMasker):
+        masked = masker.mask_result(
+            {"target": [{"name": "whatever", "value": "x", "asset_value": "192.0.2.59"}]}
+        )
+
+        assert "192.0.2.59" not in str(masked)
+        assert masked["target"][0]["asset_value"].startswith("masked-unrepresentable-")
+
+    def test_differing_container_asset_value_burns(self, masker: OutputMasker):
+        masked = masker.mask_result(
+            {"target": [{"name": "ip", "value": "192.0.2.60", "asset_value": ["192.0.2.61"]}]}
+        )
+
+        assert "192.0.2.61" not in str(masked)
+
+    def test_asset_value_in_keep_stays_clear(self, masker: OutputMasker):
+        devid = "FGT60F0000000000"
+        masked = masker.mask_result(
+            {
+                "devid": devid,
+                "target": [{"name": "ip", "value": "192.0.2.62", "asset_value": devid}],
+            }
+        )
+
+        assert masked["target"][0]["asset_value"] == devid
