@@ -32,11 +32,23 @@ JOIN_KEYS = [
     ("endpoint", "euid", "get_endusers(euids=[...])"),
     ("enduser", "euid", "get_endusers(euids=[...])"),
     ("enduser", "epids", "get_endpoints(epids=[...])"),
-    ("report", "id", "get_report_data(...) / save_report(...)"),
+    ("report", "tid", "fetch_report(tid=...) / get_report_data(tid=...) / save_report(tid=...)"),
     ("device", "sn", "query_logs(device=...) / get_device(...)"),
     ("device", "name", "get_device(name=...) / delete_device(device=...)"),
     ("task", "id", "get_task(task_id=...)"),
 ]
+
+#: Vocabularies deliberately left uncurated: no verified catalogue of what the
+#: appliance emits exists for them, so the tool returns full rows plus a
+#: warning and the join key survives because nothing is dropped.
+#:
+#: Listed rather than skipped, because both directions are regressions. A
+#: vocabulary that silently LOSES its curation still fails the assertion
+#: below; a vocabulary that GAINS one has to be removed from this set, which
+#: is exactly the moment someone has to re-check that the join key is in it.
+#: ``report`` is here because the first curated report set was guessed from
+#: names no report record carries and dropped ``tid``, the only usable handle.
+UNCURATED = frozenset({"report"})
 
 
 @pytest.mark.parametrize(
@@ -46,6 +58,13 @@ JOIN_KEYS = [
 )
 def test_join_key_survives_the_curated_projection(vocabulary: str, key: str, consumer: str) -> None:
     projection = get_vocabulary(vocabulary).projection
+    if vocabulary in UNCURATED:
+        assert not projection, (
+            f"{vocabulary} gained a curated projection but is still listed as "
+            f"UNCURATED. Drop it from that set so this test checks '{key}' is in "
+            f"the new projection -- {consumer} needs it."
+        )
+        return
     assert projection, f"{vocabulary} lost its curated projection"
     assert key in projection, (
         f"{vocabulary} projection drops '{key}', which {consumer} needs. "

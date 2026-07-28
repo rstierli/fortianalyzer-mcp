@@ -280,10 +280,28 @@ class TestReportFormats:
 
 
 class TestReportHistoryProjection:
-    """Report rows project under the report vocabulary."""
+    """Report rows project under the (deliberately uncurated) report vocabulary.
 
-    async def test_default_trims_and_keeps_the_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        row = {"id": "r-1", "title": "Weekly", "state": "done", "owner": "admin"}
+    The row below is the ``MOCK_REPORT_STATE`` shape from ``tests/conftest.py``
+    -- the same fixture ``TestReportClient.test_report_get_state_success``
+    asserts against, and the closest thing this repo has to a real
+    ``report_get_state`` record. The first version of this test used a
+    fabricated ``{"id": ..., "owner": ...}`` row, which is why it passed while
+    the curated set stripped ``tid`` and kept an ``id`` no report record
+    carries: a row shaped like the guessed field names cannot fail on the
+    guess. Same reasoning as ``test_ueba_tools.TestUebaProjection``.
+    """
+
+    ROW = {
+        "tid": "report-uuid-001",
+        "title": "Security Report",
+        "state": "generated",
+        "start_time": 1704067200,
+        "end_time": 1704067260,
+    }
+
+    def _patch_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        row = dict(self.ROW)
 
         class FakeClient:
             async def ensure_connected(self) -> None:
@@ -302,7 +320,51 @@ class TestReportHistoryProjection:
 
         monkeypatch.setattr(report_tools, "_get_client", lambda: FakeClient())
 
+    async def test_default_returns_full_rows_and_warns(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Uncurated means nothing is dropped, and the caller is told so."""
+        self._patch_client(monkeypatch)
+
         result = await report_tools.get_report_history()
 
-        assert result["data"][0]["id"] == "r-1"
-        assert "owner" not in result["data"][0]
+        assert result["data"][0].keys() == self.ROW.keys()
+        assert result["data"][0]["tid"] == "report-uuid-001"
+        assert any("no curated field set" in w for w in result["warnings"])
+        assert "report" in " ".join(result["warnings"])
+
+    async def test_explicit_fields_keep_the_tid_handle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``tid`` is a known report field, so asking for it must not warn.
+
+        The curated set that dropped ``tid`` also warned "field 'tid' is not
+        in the known report field set" -- steering a caller off the only
+        spelling every downstream report tool accepts.
+        """
+        self._patch_client(monkeypatch)
+
+        result = await report_tools.get_report_history(fields=["tid", "state"])
+
+        assert result["data"][0].keys() == {"tid", "state"}
+        assert result["data"][0]["tid"] == "report-uuid-001"
+        assert result["fields_returned"] == ["state", "tid"]
+        assert result["warnings"] == []
+
+    async def test_id_is_an_alias_for_the_tid_handle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._patch_client(monkeypatch)
+
+        result = await report_tools.get_report_history(fields=["id"])
+
+        assert result["data"][0] == {"tid": "report-uuid-001"}
+        assert result["warnings"] == []
+
+    async def test_star_returns_everything_without_warning(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._patch_client(monkeypatch)
+
+        result = await report_tools.get_report_history(fields=["*"])
+
+        assert result["data"][0].keys() == self.ROW.keys()
+        assert result["warnings"] == []

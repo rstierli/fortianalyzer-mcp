@@ -598,9 +598,12 @@ async def get_report_history(
         adom: ADOM name (default: from config DEFAULT_ADOM)
         time_range: Time range to search (default: "30-day")
         title: Filter by report title (optional)
-        fields: Which keys each report record carries. Omit for a curated
-            default (id, title, state, timing and format), ["*"] for the
-            full object, or name the fields you want.
+        fields: Which keys each report record carries. There is no verified
+            catalogue of what a report record emits, so omitting this returns
+            full rows plus a warning rather than a guessed subset. Pass the
+            keys you want -- ``tid`` is the handle fetch_report,
+            get_report_data and save_report all take -- or ["*"] to keep full
+            rows and silence the warning.
 
     Returns:
         dict with report history
@@ -609,6 +612,8 @@ async def get_report_history(
         >>> result = await get_report_history(time_range="7-day")
         >>> for report in result["data"]:
         ...     print(f"{report['title']}: {report['state']}")
+        >>> # Narrow to the handle plus enough to pick a report:
+        >>> result = await get_report_history(fields=["tid", "title", "state"])
     """
     try:
         adom = validate_adom(adom or get_default_adom())

@@ -584,37 +584,39 @@ _ENDUSER_ALIASES: Mapping[str, str] = {
     "username": "euname",
 }
 
+# Report rows, corrected against evidence after the first cut curated a set
+# no report record has ever carried. ``id`` (the old join key), ``start-time``,
+# ``end-time``, ``progress-percent``, ``template``, ``format``, ``size`` and
+# ``owner`` have zero occurrences as a *response* key anywhere in this repo,
+# and ``period-start``/``period-end`` are request params on the report
+# schedule (api/client.py, report_tools._run_window) rather than row keys.
+# What a report row demonstrably carries is the handle every downstream report
+# tool consumes -- ``tid`` (report_tools' polling loop reads ``report["tid"]``,
+# fetch_report/get_report_data/save_report all take it) -- plus ``title`` and
+# ``state``, both of which report_get_state also filters on server-side.
 _REPORT_FIELDS: frozenset[str] = frozenset(
     {
-        "id",
-        "title",
-        "adom",
-        "start-time",
-        "end-time",
-        "state",
-        "progress-percent",
-        "period-start",
-        "period-end",
-        "template",
-        "format",
-        "size",
-        "owner",
-    }
-)
-_REPORT_PROJECTION: frozenset[str] = frozenset(
-    {
-        "id",
+        "tid",
         "title",
         "state",
-        "start-time",
-        "end-time",
-        "period-start",
-        "period-end",
-        "format",
     }
 )
+#: Deliberately empty: **report is uncurated.** Three evidenced names are the
+#: three names this repo happens to have observed, not a verified catalogue of
+#: what ``/report/adom/{adom}/reports/state`` emits -- so curating to them
+#: would silently drop every live key nobody here has seen yet. That is the
+#: exact failure the previous set produced (it stripped ``tid``, leaving rows
+#: with no usable handle). Absent a catalogue, ``get_report_history`` returns
+#: full rows plus the uncurated warning, which is this module's prescribed
+#: honest fallback. ``tests/test_projection_join_keys.py`` records report as
+#: uncurated on purpose, so re-curating it without re-checking ``tid`` fails.
+_REPORT_PROJECTION: frozenset[str] = frozenset()
 _REPORT_ALIASES: Mapping[str, str] = {
-    "report_id": "id",
+    "report_id": "tid",
+    # The spelling the previous curated set guessed at, and the one an LLM
+    # reaches for. Kept as an alias so it lands on the real handle instead of
+    # warning its way through to a key no report row carries.
+    "id": "tid",
     "name": "title",
     "status": "state",
 }
