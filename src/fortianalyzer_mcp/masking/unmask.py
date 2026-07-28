@@ -67,7 +67,7 @@ logger = logging.getLogger(__name__)
 # field==value / field=value / field contain value, single or double quoted
 _FILTER_CLAUSE_RE = re.compile(
     r"(?P<field>[A-Za-z_][A-Za-z0-9_]*)"
-    r"\s*(?P<op>==|!=|<=|>=|=~|!~|<|>|=(?![=~])|~|!contain\b|\bcontain\b|\blike\b)\s*"
+    r"\s*(?P<op>==|!=|<=|>=|=~|!~|<|>|=(?![=~])|~|!contain\b|\bcontain\b|\b(?ai:like)\b)\s*"
     r"(?P<quote>[\"']?)(?P<value>[^\"'\s()]+)(?P=quote)"
 )
 _FILTER_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
