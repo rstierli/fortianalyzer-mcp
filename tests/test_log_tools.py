@@ -4,6 +4,8 @@ Tests the client methods for log search and analysis operations.
 Follows the same pattern as test_system_tools.py to avoid server initialization.
 """
 
+from typing import Any
+
 import pytest
 
 import fortianalyzer_mcp.tools.log_tools as log_tools
@@ -289,3 +291,164 @@ class TestQueryLogsStructuredFilters:
 
         assert result["status"] == "error"
         assert result["error"] == "validation_error"
+
+
+class TestQueryLogsProjection:
+    """fields selects; the response says what it selected."""
+
+    CUSTOM_RANGE = "2024-01-01 00:00:00|2024-01-02 00:00:00"
+
+    class _Faz:
+        async def ensure_connected(self) -> None:
+            return None
+
+        async def get_system_timezone(self) -> None:
+            return None
+
+    def _install(self, monkeypatch: pytest.MonkeyPatch, rows: list[dict[str, Any]]) -> None:
+        async def fake_page(client: object, **kwargs: object) -> dict[str, object]:
+            return {"timed_out": False, "tid": 7, "logs": rows, "total": len(rows)}
+
+        monkeypatch.setattr(log_tools, "get_faz_client", lambda: self._Faz())
+        monkeypatch.setattr(log_tools, "_run_logsearch_page", fake_page)
+
+    ROW = {
+        "date": "2024-01-01",
+        "time": "00:00:01",
+        "srcip": "10.0.0.1",
+        "dstport": 443,
+        "sessionid": 99,
+        "noise": "unused",
+        "another_noise": "also unused",
+    }
+
+    async def test_default_applies_the_curated_projection(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._install(monkeypatch, [dict(self.ROW)])
+
+        result = await log_tools.query_logs(logtype="traffic", time_range=self.CUSTOM_RANGE)
+
+        assert "noise" not in result["logs"][0]
+        assert result["logs"][0]["srcip"] == "10.0.0.1"
+        assert "sessionid" in result["logs"][0], "join key must survive the default"
+
+    async def test_star_returns_the_full_row(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._install(monkeypatch, [dict(self.ROW)])
+
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, fields=["*"]
+        )
+
+        assert result["logs"][0]["noise"] == "unused"
+        assert result["fields_returned"] == sorted(self.ROW)
+
+    async def test_explicit_fields_select_exactly(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._install(monkeypatch, [dict(self.ROW)])
+
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, fields=["srcip", "dstport"]
+        )
+
+        assert result["logs"] == [{"srcip": "10.0.0.1", "dstport": 443}]
+        assert result["fields_returned"] == ["dstport", "srcip"]
+
+    async def test_alias_in_fields_resolves(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._install(monkeypatch, [dict(self.ROW)])
+
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, fields=["source_ip"]
+        )
+
+        assert result["fields_returned"] == ["srcip"]
+
+    async def test_fields_returned_survives_a_zero_row_page(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The signal matters most when there is nothing else to go on."""
+        self._install(monkeypatch, [])
+
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, fields=["srcip", "dstport"]
+        )
+
+        assert result["logs"] == []
+        assert result["fields_returned"] == ["dstport", "srcip"]
+
+    async def test_uncurated_logtype_returns_full_rows_with_a_warning(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._install(monkeypatch, [{"a": 1, "b": 2}])
+
+        result = await log_tools.query_logs(logtype="voip", time_range=self.CUSTOM_RANGE)
+
+        assert result["logs"] == [{"a": 1, "b": 2}]
+        assert any("fields" in w for w in result["warnings"])
+
+    async def test_empty_fields_list_is_a_validation_error(self) -> None:
+        result = await log_tools.query_logs(logtype="traffic", fields=[])
+
+        assert result["status"] == "error"
+        assert result["error"] == "validation_error"
+
+
+class TestFetchMoreLogsProjection:
+    """Page 2 keeps page 1's shape unless the caller asks otherwise."""
+
+    async def test_stored_projection_is_reused_when_fields_is_omitted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rows = [{"srcip": "10.0.0.1", "dstport": 443, "noise": "x"}]
+
+        class _Faz:
+            async def ensure_connected(self) -> None:
+                return None
+
+            async def get_system_timezone(self) -> None:
+                return None
+
+        async def fake_page(client: object, **kwargs: object) -> dict[str, object]:
+            return {"timed_out": False, "tid": 7, "logs": rows, "total": 50}
+
+        monkeypatch.setattr(log_tools, "get_faz_client", lambda: _Faz())
+        monkeypatch.setattr(log_tools, "_run_logsearch_page", fake_page)
+
+        first = await log_tools.query_logs(
+            logtype="traffic",
+            time_range="2024-01-01 00:00:00|2024-01-02 00:00:00",
+            fields=["srcip", "dstport"],
+        )
+        handle = first["tid"]
+
+        second = await log_tools.fetch_more_logs(tid=handle, offset=1)
+
+        assert "noise" not in second["logs"][0]
+        assert second["fields_returned"] == ["dstport", "srcip"]
+
+    async def test_fields_on_the_page_call_overrides_the_stored_projection(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rows = [{"srcip": "10.0.0.1", "dstport": 443, "noise": "x"}]
+
+        class _Faz:
+            async def ensure_connected(self) -> None:
+                return None
+
+            async def get_system_timezone(self) -> None:
+                return None
+
+        async def fake_page(client: object, **kwargs: object) -> dict[str, object]:
+            return {"timed_out": False, "tid": 7, "logs": rows, "total": 50}
+
+        monkeypatch.setattr(log_tools, "get_faz_client", lambda: _Faz())
+        monkeypatch.setattr(log_tools, "_run_logsearch_page", fake_page)
+
+        first = await log_tools.query_logs(
+            logtype="traffic",
+            time_range="2024-01-01 00:00:00|2024-01-02 00:00:00",
+            fields=["srcip"],
+        )
+
+        second = await log_tools.fetch_more_logs(tid=first["tid"], offset=1, fields=["dstport"])
+
+        assert second["fields_returned"] == ["dstport"]

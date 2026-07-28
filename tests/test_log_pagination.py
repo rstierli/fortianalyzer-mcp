@@ -215,7 +215,7 @@ class TestQueryLogsPagination:
         _install(monkeypatch, fake)
 
         result = await log_tools.query_logs(
-            adom="root", logtype="traffic", time_range=CUSTOM_RANGE, limit=10
+            adom="root", logtype="traffic", time_range=CUSTOM_RANGE, limit=10, fields=["*"]
         )
 
         assert result["status"] == "success"
@@ -276,7 +276,9 @@ class TestFetchMoreLogs:
         fake = FakeFaz(_rows(25))
         _install(monkeypatch, fake)
 
-        first = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=10)
+        first = await log_tools.query_logs(
+            adom="root", time_range=CUSTOM_RANGE, limit=10, fields=["*"]
+        )
         assert first["has_more"] is True
         tid = first["tid"]
 

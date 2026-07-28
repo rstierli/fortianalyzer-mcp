@@ -10,6 +10,7 @@ from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.query.filters import FilterCondition, compile_to_string
+from fortianalyzer_mcp.query.shape import fields_returned, project_rows, resolve_projection
 from fortianalyzer_mcp.server import get_faz_client, mcp
 from fortianalyzer_mcp.tool_annotations import DESTRUCTIVE, READ_ONLY
 from fortianalyzer_mcp.utils.log_clock import resolve_time_window
@@ -409,6 +410,7 @@ async def query_logs(
     time_range: str = "1-hour",
     filter: str | None = None,
     filters: list[FilterCondition] | None = None,
+    fields: list[str] | None = None,
     limit: int = 100,
     offset: int = 0,
     timeout: int = DEFAULT_SEARCH_TIMEOUT,
@@ -467,6 +469,12 @@ async def query_logs(
                       {"field": "dstport", "op": "in", "value": [80, 443]}]
             English field names are accepted where unambiguous (source_ip,
             destination_port, application); get_log_fields lists the rest.
+        fields: Which keys each returned row should carry. Omit for a curated
+            default (the fields that answer most questions about this logtype,
+            including the ones other tools take as input); pass ["*"] for the
+            full row as before; or name the fields you want. English aliases
+            work here exactly as they do in `filters`.
+            Example: fields=["srcip", "dstip", "action", "sentbyte"]
         limit: Maximum logs to return (default: 100, max: 1000)
         offset: Offset for pagination (default: 0)
         timeout: Search timeout in seconds (default: 60)
@@ -494,6 +502,8 @@ async def query_logs(
             - has_more: Whether more results remain beyond this page
             - next_offset: Offset to pass to fetch_more_logs, or None when has_more is False
             - logs: List of log entries (bounded by `limit`)
+            - fields_returned: The keys each row carries. Reported even for a
+              zero-row page, so it still says what is queryable next.
             - adom, logtype, filter, device: Echoed query context (auditability)
             - filter: The filter string actually sent to FortiAnalyzer (the
               compiled form when `filters` was used)
@@ -545,6 +555,8 @@ async def query_logs(
             )
         if filters:
             filter, filter_warnings = compile_to_string(filters, logtype)
+
+        projection, projection_warnings = resolve_projection(logtype, fields)
 
         client = _get_client()
         await client.ensure_connected()
@@ -606,7 +618,7 @@ async def query_logs(
                 timezone=tz_name,
             )
 
-        logs = page["logs"]
+        logs = project_rows(page["logs"], projection)
         count = len(logs)
         total = page["total"]
         total_is_known = total is not None
@@ -629,6 +641,7 @@ async def query_logs(
             has_more=has_more,
         )
         warnings.extend(filter_warnings)
+        warnings.extend(projection_warnings)
         if count == 0 and total_is_known and total is not None and total > offset:
             warnings.append(
                 "FortiAnalyzer reports more matching rows beyond this offset but returned "
@@ -650,6 +663,7 @@ async def query_logs(
                 "time_basis_source": time_basis_source,
                 "clock_skew_seconds": clock_skew_seconds,
                 "initial_total": total,
+                "fields": fields,
             },
         )
 
@@ -669,6 +683,7 @@ async def query_logs(
             "has_more": has_more,
             "next_offset": next_offset,
             "logs": logs,
+            "fields_returned": fields_returned(logs, projection),
             "adom": adom,
             "logtype": logtype,
             "filter": filter,
@@ -758,6 +773,7 @@ async def fetch_more_logs(
     tid: int = 0,
     limit: int = 100,
     offset: int = 0,
+    fields: list[str] | None = None,
     timeout: int = DEFAULT_SEARCH_TIMEOUT,
 ) -> dict[str, Any]:
     """Fetch another page of a previous query_logs search using its handle.
@@ -774,6 +790,9 @@ async def fetch_more_logs(
         tid: Reusable pagination handle from a previous query_logs call
         limit: Maximum logs to return (default: 100)
         offset: Offset for pagination (default: 0)
+        fields: Override the projection for this page. Omit to reuse the
+            projection the original query_logs call resolved, so a later page
+            has the same shape as the first.
         timeout: Search timeout in seconds (default: 60) -- raise it to page over
             large windows (e.g. 30-day) that take longer than the default to scan
 
@@ -782,6 +801,8 @@ async def fetch_more_logs(
             - status: "success" or "error"
             - count: Number of logs returned in this page
             - logs: List of log entries
+            - fields_returned: The keys each row carries. Reported even for a
+              zero-row page, so it still says what is queryable next.
             - tid, adom, logtype, filter, device: Echoed pagination context
             - total: The handle's first-page Baseline total (stays fixed across pages;
               None if no baseline was ever captured). It is NOT this page's live count.
@@ -831,6 +852,9 @@ async def fetch_more_logs(
                 "search handle is not known to this server process",
             )
 
+        effective_fields = fields if fields is not None else context.get("fields")
+        projection, projection_warnings = resolve_projection(context["logtype"], effective_fields)
+
         # The handle is bound to the ADOM query_logs ran under: comparing a
         # baseline from one ADOM against a page from another is meaningless.
         if adom is None:
@@ -878,7 +902,7 @@ async def fetch_more_logs(
                 tid=tid,
             )
 
-        logs = page["logs"]
+        logs = project_rows(page["logs"], projection)
         count = len(logs)
         page_total = page["total"]
         initial_total = context.get("initial_total")
@@ -937,6 +961,7 @@ async def fetch_more_logs(
             timezone=timezone,
             has_more=has_more,
         )
+        warnings.extend(projection_warnings)
         if count == 0 and paging_total is not None and paging_total > offset:
             warnings.append(
                 "FortiAnalyzer reports more matching rows beyond this offset but returned "
@@ -966,6 +991,7 @@ async def fetch_more_logs(
             "status": "success",
             "count": count,
             "logs": logs,
+            "fields_returned": fields_returned(logs, projection),
             "tid": tid,
             "adom": adom,
             "logtype": context.get("logtype"),
