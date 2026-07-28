@@ -253,6 +253,16 @@ FIELD_TYPES: dict[str, str] = {
     # accepted here as the conservative direction (a burned routing/label
     # value is worse than a readable object name); revisit at GA if a
     # burn-tolerant name type is added.
+    # Round-trip residual: the traffic vocabulary is complete=False, so these
+    # names pass through as structured filter fields and the appliance does
+    # serve them (exact equality on a displayed label returns rows on 7.6.7
+    # and 8.0.0). A label carrying an embedded IOC masks outbound but does
+    # not resolve inbound: _unmask_entry passes a vtype to resolve_scalar
+    # only for IP/MAC/IP_OR_HOST, so a TEXT value falls through untyped and
+    # reverses only when the *whole* string is a marked token. An IP token
+    # sitting mid-string is neither, so re-using a displayed label as a
+    # filter value sends a plausible-but-wrong address to the appliance,
+    # silently. Pre-existing to every filterable TEXT field; tracked on #73.
     "srcuuid_name": TEXT,
     "dstuuid_name": TEXT,
     # --- eventmgmt / incidentmgmt object keys (NOT log fields; found by
