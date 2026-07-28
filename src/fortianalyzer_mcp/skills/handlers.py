@@ -274,12 +274,18 @@ async def run_incidents(params: IncidentsParams) -> IncidentsResult:
 
     warnings: list[str] = []
 
+    # fields=["*"]: these readers curate by default, and the skills below read
+    # keys outside that set (risk_score, importance, vuln-stats, and — here —
+    # the full incident/alert objects IncidentRecord promises "verbatim"). The
+    # curated default is for direct MCP callers; a composing skill wants the
+    # whole row.
     incidents_res, err = await _call(
         get_incidents,
         adom=params.adom,
         time_range=params.time_range,
         filter=params.filter,
         limit=params.limit,
+        fields=["*"],
     )
     if incidents_res is None:
         raise SkillExecutionError(f"could not retrieve incidents ({err})")
@@ -320,6 +326,7 @@ async def run_incidents(params: IncidentsParams) -> IncidentsResult:
             adom=params.adom,
             time_range=params.time_range,
             limit=params.alerts_scan_limit,
+            fields=["*"],
         )
         if alerts_res is None:
             warnings.append(f"alert correlation skipped: {err}")
@@ -383,6 +390,7 @@ async def run_reports(params: ReportsParams) -> ReportsResult:
             adom=params.adom,
             time_range=params.time_range,
             title=params.title,
+            fields=["*"],
         )
         if history_res is None:
             raise SkillExecutionError(f"could not retrieve report history ({err})")
@@ -517,6 +525,7 @@ async def run_triage(params: TriageParams) -> TriageResult:
             time_range=_SUBJECT_LOOKUP_WINDOW,
             filter=f"alertid=={safe_alert_id}",
             limit=5,
+            fields=["*"],
         )
         if lookup_res is None:
             warnings.append(f"alert filter lookup unavailable: {err}")
@@ -531,7 +540,11 @@ async def run_triage(params: TriageParams) -> TriageResult:
             )
         if not subject:
             alerts_res, err = await _call(
-                get_alerts, adom=params.adom, time_range=params.context_time_range, limit=500
+                get_alerts,
+                adom=params.adom,
+                time_range=params.context_time_range,
+                limit=500,
+                fields=["*"],
             )
             if alerts_res is None:
                 warnings.append(f"alert window scan unavailable: {err}")
@@ -568,7 +581,9 @@ async def run_triage(params: TriageParams) -> TriageResult:
                 "record (no severity -> priority 'informational')."
             )
 
-        logs_res, err = await _call(get_alert_logs, alert_ids=[params.alert_id], adom=params.adom)
+        logs_res, err = await _call(
+            get_alert_logs, alert_ids=[params.alert_id], adom=params.adom, fields=["*"]
+        )
         if logs_res is None:
             warnings.append(f"triggering logs unavailable: {err}")
         else:
@@ -592,7 +607,11 @@ async def run_triage(params: TriageParams) -> TriageResult:
             # present the attachsrcid param is ignored (both live-verified
             # on 7.6.7), so membership is checked per candidate incident.
             inc_res, err = await _call(
-                get_incidents, adom=params.adom, time_range=params.context_time_range, limit=50
+                get_incidents,
+                adom=params.adom,
+                time_range=params.context_time_range,
+                limit=50,
+                fields=["*"],
             )
             if inc_res is None:
                 warnings.append(f"incident context unavailable: {err}")
@@ -651,7 +670,11 @@ async def run_triage(params: TriageParams) -> TriageResult:
                     "fell back to linkage-key matching"
                 )
             alerts_res, err = await _call(
-                get_alerts, adom=params.adom, time_range=params.context_time_range, limit=200
+                get_alerts,
+                adom=params.adom,
+                time_range=params.context_time_range,
+                limit=200,
+                fields=["*"],
             )
             if alerts_res is None:
                 warnings.append(f"alert context unavailable: {err}")
@@ -780,7 +803,7 @@ async def run_incident_summary(params: IncidentSummaryParams) -> IncidentSummary
                 "fell back to linkage-key matching"
             )
         alerts_res, err = await _call(
-            get_alerts, adom=params.adom, time_range=params.time_range, limit=500
+            get_alerts, adom=params.adom, time_range=params.time_range, limit=500, fields=["*"]
         )
         if alerts_res is None:
             warnings.append(f"related alerts unavailable: {err}")
@@ -810,6 +833,7 @@ async def run_incident_summary(params: IncidentSummaryParams) -> IncidentSummary
                     alert_ids=[alert_id],
                     adom=params.adom,
                     limit=params.max_logs_per_alert,
+                    fields=["*"],
                 )
                 if logs_res is None:
                     warnings.append(f"logs for alert {alert_id} unavailable: {err}")
@@ -928,6 +952,7 @@ async def run_asset_lookup(params: AssetLookupParams) -> AssetLookupResult:
         epids=params.epids,
         detail_level=params.detail_level,
         time_range=params.time_range,
+        fields=["*"],
     )
     if endpoints_res is None:
         raise SkillExecutionError(f"could not retrieve UEBA endpoints ({err})")
@@ -1017,6 +1042,7 @@ async def run_identity_lookup(params: IdentityLookupParams) -> IdentityLookupRes
         adom=params.adom,
         euids=params.euids,
         detail_level=params.detail_level,
+        fields=["*"],
     )
     if users_res is None:
         raise SkillExecutionError(f"could not retrieve UEBA end-users ({err})")
@@ -1403,6 +1429,7 @@ async def run_identity_profile(params: IdentityProfileParams) -> IdentityProfile
         adom=params.adom,
         euids=[params.euid] if params.euid is not None else None,
         detail_level=params.detail_level,
+        fields=["*"],
     )
     if users_res is None:
         raise SkillExecutionError(f"could not retrieve UEBA end-users ({err})")
@@ -1432,7 +1459,9 @@ async def run_identity_profile(params: IdentityProfileParams) -> IdentityProfile
 
     endpoints: list[dict[str, Any]] = []
     if params.include_endpoints:
-        eps_res, err = await _call(get_endpoints, adom=params.adom, detail_level="standard")
+        eps_res, err = await _call(
+            get_endpoints, adom=params.adom, detail_level="standard", fields=["*"]
+        )
         if eps_res is None:
             warnings.append(f"endpoint context unavailable ({err})")
         else:
@@ -1759,7 +1788,11 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
     entity_filter_gap: str | None = None
     if params.epid is not None:
         eps_res, err = await _call(
-            get_endpoints, adom=params.adom, epids=[params.epid], detail_level="simple"
+            get_endpoints,
+            adom=params.adom,
+            epids=[params.epid],
+            detail_level="simple",
+            fields=["*"],
         )
         if eps_res is None:
             raise SkillExecutionError(f"could not resolve endpoint {params.epid} ({err})")
@@ -1777,7 +1810,9 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
         else:
             entity_filter_gap = f"endpoint {params.epid} carries no 'epip'"
     else:
-        users_res, err = await _call(get_endusers, adom=params.adom, euids=[params.euid])
+        users_res, err = await _call(
+            get_endusers, adom=params.adom, euids=[params.euid], fields=["*"]
+        )
         if users_res is None:
             raise SkillExecutionError(f"could not resolve end-user {params.euid} ({err})")
         record = next(
@@ -2271,7 +2306,7 @@ async def _entity_behavioral_alerts(
             "behavioural detections cannot be tied to it"
         )
     alerts_res, err = await _call(
-        get_alerts, adom=adom, time_range=time_range, filter=pivot, limit=200
+        get_alerts, adom=adom, time_range=time_range, filter=pivot, limit=200, fields=["*"]
     )
     if alerts_res is None:
         warnings.append(f"behavior[{entity_ref}]: behavioural alert lookup unavailable: {err}")
@@ -2318,7 +2353,7 @@ async def _hunt_behavior(
         # drop the target itself. The percentile denominator must be the full
         # current inventory (live-verified: a 7-day first-seen filter excluded
         # long-standing hosts on 8.0.0), so the estate read is unwindowed.
-        eps_res, err = await _call(get_endpoints, adom=adom, detail_level="standard")
+        eps_res, err = await _call(get_endpoints, adom=adom, detail_level="standard", fields=["*"])
         if eps_res is None:
             raise SkillExecutionError(f"could not retrieve UEBA endpoints ({err})")
         estate = _records(eps_res.get("data"))
@@ -2373,7 +2408,7 @@ async def _hunt_behavior(
         )
 
     # End-user: no risk_score — importance + behavioural alerts only.
-    users_res, err = await _call(get_endusers, adom=adom, euids=[entity_id])
+    users_res, err = await _call(get_endusers, adom=adom, euids=[entity_id], fields=["*"])
     if users_res is None:
         raise SkillExecutionError(f"could not retrieve UEBA end-users ({err})")
     record = next(
@@ -3079,7 +3114,9 @@ async def _resolve_impact_entities(
     resolved: list[dict[str, Any]] = []
 
     for epid in epids:
-        eps_res, err = await _call(get_endpoints, adom=adom, epids=[epid], detail_level="simple")
+        eps_res, err = await _call(
+            get_endpoints, adom=adom, epids=[epid], detail_level="simple", fields=["*"]
+        )
         record = None
         if eps_res is None:
             warnings.append(f"impact: endpoint {epid} lookup unavailable: {err}")
@@ -3095,7 +3132,7 @@ async def _resolve_impact_entities(
         resolved.append({"type": "endpoint", "ref": str(epid), "pivot": pivot, "epids": [epid]})
 
     for euid in euids:
-        users_res, err = await _call(get_endusers, adom=adom, euids=[euid])
+        users_res, err = await _call(get_endusers, adom=adom, euids=[euid], fields=["*"])
         record = None
         if users_res is None:
             warnings.append(f"impact: end-user {euid} lookup unavailable: {err}")
