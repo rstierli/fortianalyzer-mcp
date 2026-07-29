@@ -167,7 +167,7 @@ VALID_FORTIVIEW_VIEWS = {
     "top-applications",
     "top-websites",
     "top-threats",
-    "top-cloud-applications",
+    "top-cloud-applications",  # No bandwidth column (always-0 byte counts); sort by sessions/d_risk
     "top-countries",  # Top destination countries (geo) — network_context skill
     "site-to-site-ipsec",  # Site-to-site IPsec tunnels — network_context skill
     "policy-hits",  # Per-policy hit counts (correct endpoint)

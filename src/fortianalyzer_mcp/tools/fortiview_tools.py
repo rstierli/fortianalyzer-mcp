@@ -379,6 +379,12 @@ async def get_fortiview_data(
             - "bandwidth": Sort by total bytes
             - "sessions": Sort by session count
             - "threatweight": Sort by threat score
+            Per-view caveat -- "top-cloud-applications" (Shadow IT) has no
+            "bandwidth" column: its byte columns (total_size/upload_size/
+            download_size) are always 0, because FortiGate app-ctrl logs
+            carry no byte counts (a known FortiOS logging limitation).
+            Sorting that view by "bandwidth" raises a live FortiAnalyzer DB
+            error; use "sessions" (usage) or "d_risk" (risk score) instead.
         sort_order: Sort order "asc" or "desc" (default: "desc")
         fields: Which keys each row carries. FortiView columns differ per view
             and are not curated yet, so omitting this returns full rows with a
