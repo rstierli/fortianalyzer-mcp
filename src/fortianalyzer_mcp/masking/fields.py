@@ -346,7 +346,26 @@ FIELD_TYPES: dict[str, str] = {
 #: Structured-filter conditions are already handled this way for the same
 #: reason: ``unmask_filter_conditions`` resolves only ``value`` and leaves the
 #: sibling ``field`` untouched.
-FIELD_NAME_ARGS = ("fields",)
+#:
+#: Every key here names a field, a column, or a view -- never a value, so a
+#: caller has no legitimate reason to put a masked identifier in one, and each
+#: is echoed back somewhere:
+#:   fields      -> ``fields_returned`` (the original oracle, #95's shape)
+#:   group_by    -> ``query_logs``'s echoed ``group_by`` on success, and
+#:                  interpolated verbatim into the ``unsupported_group_dimension``
+#:                  / ``group_dimension_logtype_mismatch`` refusal messages,
+#:                  which is a *guaranteed* echo for any token, since a token
+#:                  can never be a mapped dimension
+#:   sample_by   -> ``query_logs``'s and ``analyze_policy_traffic``'s echoed
+#:                  ``sample_by``, plus every ``breakdowns`` key
+#:   sort_by     -> sort column names on the FortiView tools
+#:   view_name   -> echoed by ``run_fortiview``/``fetch_fortiview``/
+#:                  ``get_fortiview_data`` and by ``group_source``
+#: The refusal path is what makes this urgent rather than theoretical: an
+#: unmapped dimension is refused, and the refusal quotes the dimension. Resolve
+#: the token first and the refusal hands back the plaintext -- a token ->
+#: plaintext oracle that needs no valid query at all, only a bad one.
+FIELD_NAME_ARGS = ("fields", "group_by", "sample_by", "sort_by", "view_name")
 
 #: Composite keys whose value is a single string holding one or more
 #: identifiers inside a larger structure. Name matching cannot reach them,

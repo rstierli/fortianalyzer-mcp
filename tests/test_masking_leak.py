@@ -1484,10 +1484,13 @@ class TestProjectionEchoIsNotAnOracle:
     def test_a_bare_token_argument_is_still_resolved(
         self, masker: OutputMasker, unmasker: ArgUnmasker
     ) -> None:
-        """The skip is scoped to ``fields``, not to tokens in general.
+        """The skip is scoped to the field-NAME args, not to tokens in general.
 
-        Without this, the test above would pass just as well if argument
-        unmasking had been switched off wholesale.
+        ``device`` carries a value, so a token there must still resolve --
+        that is the whole point of argument unmasking. Without this, the tests
+        either side would pass just as well if argument unmasking had been
+        switched off wholesale, or if ``FIELD_NAME_ARGS`` had grown to swallow
+        a value-carrying key.
         """
         token = masker.mask_result({"hostname": SRC_NAME})["hostname"]
 
@@ -1528,6 +1531,116 @@ class TestProjectionEchoIsNotAnOracle:
         assert (
             masker.mask_result({"count": 0, "fields_returned": names})["fields_returned"] == names
         )
+
+
+class TestAggregationArgEchoIsNotAnOracle:
+    """``group_by``/``sample_by`` are the projection oracle again, worse.
+
+    ``fields`` needed a *valid* field name to reach ``fields_returned``. The
+    aggregation arguments do not: an unmapped ``group_by`` is refused, and the
+    refusal quotes the dimension back verbatim. So resolving a token there
+    would hand the plaintext to any caller who supplies a token that cannot
+    possibly be a dimension -- which every token is. Measured on the previous
+    code: ``group_by='host-2a85-...'`` came back as
+    ``secret-internal.corp.example`` inside the refusal message.
+
+    Both echoes are covered here, because both exist: ``sample_by`` is echoed
+    on the *success* path (and again as every ``breakdowns`` key), ``group_by``
+    on both.
+    """
+
+    @pytest.fixture
+    def unmasker(self, monkeypatch: pytest.MonkeyPatch) -> ArgUnmasker:
+        monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
+        return ArgUnmasker(FPEEngine(KEY))
+
+    @pytest.mark.parametrize("arg", ["group_by", "sort_by", "view_name"])
+    def test_a_token_in_a_name_argument_is_not_resolved(
+        self, masker: OutputMasker, unmasker: ArgUnmasker, arg: str
+    ) -> None:
+        token = masker.mask_result({"hostname": SRC_NAME})["hostname"]
+        assert token != SRC_NAME, "fixture precondition: the value must mask"
+
+        resolved = unmasker.unmask_args({arg: token})
+
+        assert resolved == {arg: token}
+        assert SRC_NAME not in str(resolved)
+
+    def test_a_token_in_sample_by_is_not_resolved(
+        self, masker: OutputMasker, unmasker: ArgUnmasker
+    ) -> None:
+        """sample_by takes a list, so the skip must survive the list walk."""
+        token = masker.mask_result({"hostname": SRC_NAME})["hostname"]
+
+        resolved = unmasker.unmask_args({"sample_by": [token, "app"]})
+
+        assert resolved == {"sample_by": [token, "app"]}
+        assert SRC_NAME not in str(resolved)
+
+    def test_nested_params_aggregation_args_are_skipped_too(
+        self, masker: OutputMasker, unmasker: ArgUnmasker
+    ) -> None:
+        """faz_skill nests every tool argument under ``params``."""
+        token = masker.mask_result({"hostname": SRC_NAME})["hostname"]
+
+        resolved = unmasker.unmask_args(
+            {"skill": "log_search", "params": {"group_by": token, "sample_by": [token]}}
+        )
+
+        assert SRC_NAME not in str(resolved)
+
+    async def test_the_refusal_path_hands_back_the_token_not_the_value(
+        self, masker: OutputMasker, unmasker: ArgUnmasker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End to end in the wrapper's own order: unmask args, run the tool,
+        mask the result. A token in group_by can only ever be refused, so the
+        refusal message is the echo that matters."""
+        import fortianalyzer_mcp.tools.log_tools as log_tools
+
+        token = masker.mask_result({"hostname": SRC_NAME})["hostname"]
+        args = unmasker.unmask_args({"logtype": "traffic", "group_by": token})
+
+        result = masker.mask_result(await log_tools.query_logs(**args))
+
+        assert result["status"] == "error"
+        assert SRC_NAME not in str(result)
+        assert token in result["message"]
+
+    async def test_the_success_echo_hands_back_the_token_not_the_value(
+        self, masker: OutputMasker, unmasker: ArgUnmasker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """sample_by *can* be a passthrough dimension, so it reaches the
+        success path and is echoed there and under ``breakdowns``."""
+        import fortianalyzer_mcp.tools.log_tools as log_tools
+
+        class _Faz:
+            async def ensure_connected(self) -> None:
+                return None
+
+            async def get_system_timezone(self) -> None:
+                return None
+
+        async def fake_page(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            return {"logs": [], "total": 0, "tid": 1, "timed_out": False, "percentage": 100}
+
+        monkeypatch.setattr(log_tools, "get_faz_client", lambda: _Faz())
+        monkeypatch.setattr(log_tools, "_run_logsearch_page", fake_page)
+
+        token = masker.mask_result({"hostname": SRC_NAME})["hostname"]
+        args = unmasker.unmask_args(
+            {
+                "logtype": "traffic",
+                "time_range": "2024-01-01 00:00:00|2024-01-02 00:00:00",
+                "sample_by": [token],
+            }
+        )
+
+        result = masker.mask_result(await log_tools.query_logs(**args))
+
+        assert result["status"] == "success"
+        assert SRC_NAME not in str(result)
+        assert result["sample_by"] == [token]
+        assert token in result["breakdowns"]
 
 
 class TestBreakdownsComposite:
