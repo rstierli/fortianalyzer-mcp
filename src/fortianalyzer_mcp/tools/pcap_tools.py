@@ -201,9 +201,10 @@ async def search_ips_logs(
     used to download associated PCAP files.
 
     This is the right entry point for IPS work -- it filters on CVE and PCAP
-    availability, which search_security_logs cannot. Note the returned `tid`
-    is NOT a pagination handle (see Returns); raise `limit` instead of trying
-    to page, and pass has_pcap=True when the goal is a PCAP download.
+    availability, which query_logs(logtype="attack", filters=[...]) cannot.
+    Note the returned `tid` is NOT a pagination handle (see Returns); raise
+    `limit` instead of trying to page, and pass has_pcap=True when the goal
+    is a PCAP download.
 
     Args:
         adom: ADOM name (default: from config DEFAULT_ADOM)
