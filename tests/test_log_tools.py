@@ -701,8 +701,12 @@ class TestQueryLogsGroupByDispatch:
         assert calls[0]["view_name"] == "top-applications"
         assert calls[0]["tr"] == self.RESOLVED_WINDOW
         assert calls[0]["tr"] == result["time_range"]
-        assert calls[0]["device"] == "All_Device"
         assert calls[0]["field_names"] == ["*"]
+        # The token query_logs hands over. What the appliance actually receives
+        # is one layer further down and is asserted in
+        # TestQueryLogsGroupByDeviceFilter -- this assertion alone passed while
+        # build_device_filter was re-encoding the token as devid: All_Device.
+        assert calls[0]["device"] == "All_Device"
 
     async def test_a_logtype_specific_dimension_dispatches_under_its_own_logtype(
         self, monkeypatch: pytest.MonkeyPatch
@@ -751,3 +755,108 @@ class TestQueryLogsGroupByDispatch:
         assert result["operation"] == "query_logs"
         assert "retry_count" in result
         assert "timed out" in result["message"]
+
+
+class TestQueryLogsGroupByDeviceFilter:
+    """What reaches ``client.fortiview_run``, not what reaches the helper.
+
+    The device token is translated twice on the ``group_by`` path -- once by
+    ``GroupPlan.all_devices_group`` and once by
+    ``build_fortiview_device_filter`` -- and only the second one produces the
+    payload FortiAnalyzer sees. Asserting the string ``query_logs`` handed to
+    ``_get_fortiview_data_impl`` (as ``TestQueryLogsGroupByDispatch`` does)
+    passed cleanly while that helper re-encoded ``All_Device`` through
+    logview's ``build_device_filter`` as ``[{"devid": "All_Device"}]`` -- a
+    spelling FortiView answers with an empty top-N and no error, i.e. "no
+    traffic" under ``is_exact: true``.
+
+    So these tests mock the *client*, one layer below every translation.
+    """
+
+    CUSTOM_RANGE = "2024-01-01 00:00:00|2024-01-02 00:00:00"
+    RESOLVED_WINDOW = {"start": "2024-01-01 00:00:00", "end": "2024-01-02 00:00:00"}
+
+    class _Faz:
+        def __init__(self) -> None:
+            self.run_calls: list[dict[str, Any]] = []
+
+        async def ensure_connected(self) -> None:
+            return None
+
+        async def get_system_timezone(self) -> None:
+            return None
+
+        async def fortiview_run(self, **kwargs: Any) -> dict[str, Any]:
+            self.run_calls.append(kwargs)
+            return {"tid": 4242}
+
+        async def fortiview_fetch(self, **kwargs: Any) -> dict[str, Any]:
+            return {"percentage": 100, "data": [{"srcip": "10.0.0.1", "sessions": 7}]}
+
+    def _install(self, monkeypatch: pytest.MonkeyPatch) -> "TestQueryLogsGroupByDeviceFilter._Faz":
+        faz = self._Faz()
+        monkeypatch.setattr(log_tools, "get_faz_client", lambda: faz)
+        return faz
+
+    async def test_the_default_reaches_the_client_as_fortiviews_own_token(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        faz = self._install(monkeypatch)
+
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, group_by="srcip"
+        )
+
+        assert result["status"] == "success"
+        assert len(faz.run_calls) == 1
+        assert faz.run_calls[0]["device"] == [{"devname": "All_Device"}]
+
+    async def test_the_resolved_window_reaches_the_client_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The window the response echoes is the window FortiView scanned."""
+        faz = self._install(monkeypatch)
+
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, group_by="srcip"
+        )
+
+        assert faz.run_calls[0]["time_range"] == self.RESOLVED_WINDOW
+        assert faz.run_calls[0]["time_range"] == result["time_range"]
+
+    @pytest.mark.parametrize("token", ["All_FortiGate", "All_FortiMail", "All_Device"])
+    async def test_every_all_devices_spelling_is_translated(
+        self, monkeypatch: pytest.MonkeyPatch, token: str
+    ) -> None:
+        """query_logs' own docstring advertises All_FortiGate; forwarded
+        verbatim it is an empty top-N with no error."""
+        faz = self._install(monkeypatch)
+
+        await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, group_by="srcip", device=token
+        )
+
+        assert faz.run_calls[0]["device"] == [{"devname": "All_Device"}]
+
+    async def test_a_named_device_is_sent_as_devname(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        faz = self._install(monkeypatch)
+
+        await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, group_by="srcip", device="FGT1"
+        )
+
+        assert faz.run_calls[0]["device"] == [{"devname": "FGT1"}]
+
+    async def test_a_serial_is_still_sent_as_devid(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A serial under devname silently matches nothing; only the
+        all-devices case is translated."""
+        faz = self._install(monkeypatch)
+
+        await log_tools.query_logs(
+            logtype="traffic",
+            time_range=self.CUSTOM_RANGE,
+            group_by="srcip",
+            device="FG100FTK19001333",
+        )
+
+        assert faz.run_calls[0]["device"] == [{"devid": "FG100FTK19001333"}]

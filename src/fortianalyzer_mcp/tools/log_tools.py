@@ -723,8 +723,12 @@ async def query_logs(
                 client=client,
                 adom=adom,
                 view_name=group_plan.target,
-                # The plan carries FortiView's own all-devices token; passing
-                # logview's All_FortiGate here returns an empty top-N silently.
+                # The plan carries FortiView's own all-devices token, and
+                # build_fortiview_device_filter inside the impl translates any
+                # remaining logview spelling (All_FortiGate, All_FortiMail) to
+                # the same All_Device. Either layer alone would do; both are
+                # kept because the wrong spelling is not an error -- it is an
+                # empty top-N that reads as "no traffic".
                 device=device or group_plan.all_devices_group,
                 tr=time_range_dict,
                 filter=filter,

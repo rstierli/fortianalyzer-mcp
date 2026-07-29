@@ -11,6 +11,7 @@ from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.utils.validation import (
     VALID_FORTIVIEW_VIEWS,
     ValidationError,
+    build_device_filter,
     validate_fortiview_view,
 )
 
@@ -70,6 +71,62 @@ class TestFortiViewHelpers:
         device = None
         device_filter = [{"devname": device}] if device else [{"devname": "All_Device"}]
         assert device_filter == [{"devname": "All_Device"}]
+
+
+class TestFortiViewDeviceFilter:
+    """The all-devices token has two spellings and only one of them works.
+
+    ``build_device_filter`` is logview's: it sends every ``All_*`` group as
+    ``devid`` and defaults to ``All_FortiGate``. FortiView answers only to
+    ``[{"devname": "All_Device"}]`` -- and answers the other spellings with an
+    empty top-N and no error, which reads as "no traffic".
+    """
+
+    def test_none_becomes_fortiviews_all_devices(self) -> None:
+        assert fortiview_tools.build_fortiview_device_filter(None) == [{"devname": "All_Device"}]
+
+    @pytest.mark.parametrize(
+        "token", ["All_FortiGate", "All_FortiMail", "All_Device", "All_FortiWeb"]
+    )
+    def test_every_all_devices_group_is_translated(self, token: str) -> None:
+        assert fortiview_tools.build_fortiview_device_filter(token) == [{"devname": "All_Device"}]
+        # The logview builder is what this exists to correct.
+        assert build_device_filter(token) == [{"devid": token}]
+
+    def test_a_named_device_is_untouched(self) -> None:
+        assert fortiview_tools.build_fortiview_device_filter("FGT1") == [{"devname": "FGT1"}]
+
+    def test_a_serial_still_goes_under_devid(self) -> None:
+        """A serial under devname silently matches nothing."""
+        assert fortiview_tools.build_fortiview_device_filter("FG100FTK19001333") == [
+            {"devid": "FG100FTK19001333"}
+        ]
+
+    async def test_get_fortiview_data_sends_the_translated_filter(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Asserted at the client, which is the only boundary that matters."""
+        captured: dict[str, object] = {}
+
+        class FakeClient:
+            async def get_system_timezone(self) -> None:
+                return None
+
+            async def fortiview_run(self, **kwargs: object) -> dict[str, object]:
+                captured.update(kwargs)
+                return {"tid": 1}
+
+            async def fortiview_fetch(self, **kwargs: object) -> dict[str, object]:
+                return {"percentage": 100, "data": []}
+
+        monkeypatch.setattr(fortiview_tools, "_get_client", lambda: FakeClient())
+
+        result = await fortiview_tools.get_fortiview_data(
+            view_name="top-sources", device="All_FortiGate", fields=["*"]
+        )
+
+        assert result["status"] == "success"
+        assert captured["device"] == [{"devname": "All_Device"}]
 
     def test_sort_by_param_build(self) -> None:
         """Test sort_by parameter building logic."""

@@ -9,6 +9,7 @@ import logging
 from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
+from fortianalyzer_mcp.query.groups import FORTIVIEW_ALL_DEVICES
 from fortianalyzer_mcp.query.shape import project_payload
 from fortianalyzer_mcp.server import get_faz_client, mcp
 from fortianalyzer_mcp.tool_annotations import READ_ONLY
@@ -31,6 +32,32 @@ def _get_client() -> FortiAnalyzerClient:
     if not client:
         raise RuntimeError("FortiAnalyzer client not initialized")
     return client
+
+
+def build_fortiview_device_filter(device: str | None) -> list[dict[str, str]]:
+    """Build the ``device`` filter FortiView understands.
+
+    ``build_device_filter`` speaks logview's dialect: its no-device default is
+    ``[{"devid": "All_FortiGate"}]`` and it routes *any* ``All_*`` token under
+    ``devid``. FortiView's all-devices group is ``All_Device`` under
+    ``devname`` (see ``client.fortiview_run``'s own default), and the wrong
+    spelling is not an error -- the view returns an empty top-N, which reads as
+    "no traffic" rather than as a mistake. So every all-devices form is
+    translated here, at the one boundary where a FortiView request is built:
+
+    * ``None`` -> ``[{"devname": "All_Device"}]``
+    * any ``All_*`` group (logview's ``All_FortiGate``, ``All_FortiMail``, ...,
+      and ``All_Device`` itself) -> ``[{"devname": "All_Device"}]``
+    * a serial-shaped value -> ``[{"devid": <serial>}]`` (unchanged)
+    * anything else -> ``[{"devname": <name>}]`` (unchanged)
+
+    A single named device therefore reaches FortiView exactly as
+    ``build_device_filter`` composes it; only the all-devices case differs,
+    because only the all-devices case has two spellings.
+    """
+    if not device or device.startswith("All_"):
+        return [{"devname": FORTIVIEW_ALL_DEVICES}]
+    return build_device_filter(device)
 
 
 async def _parse_time_range(time_range: str) -> dict[str, str]:
@@ -115,10 +142,10 @@ async def run_fortiview(
         tr = await _parse_time_range(time_range)
 
         # Convert device string to API format. Serial-shaped values must go
-        # under devid (a serial under devname silently matches nothing);
-        # FortiView's own "all devices" group is All_Device, so keep that
-        # default instead of build_device_filter's logview All_FortiGate.
-        device_filter = build_device_filter(device) if device else [{"devname": "All_Device"}]
+        # under devid (a serial under devname silently matches nothing), and
+        # every all-devices spelling is translated to FortiView's own
+        # All_Device -- logview's All_FortiGate returns an empty top-N here.
+        device_filter = build_fortiview_device_filter(device)
 
         # Build sort_by parameter in API format: [{"field": "...", "order": "..."}]
         sort_by_param = None
@@ -265,11 +292,12 @@ async def _get_fortiview_data_impl(
     to its own outer handler so the failure comes back as one full
     ``query_logs`` error envelope rather than a second, differently-shaped one.
     """
-    # Convert device string to API format. Serial-shaped values must go
-    # under devid (a serial under devname silently matches nothing);
-    # FortiView's own "all devices" group is All_Device, so keep that
-    # default instead of build_device_filter's logview All_FortiGate.
-    device_filter = build_device_filter(device) if device else [{"devname": "All_Device"}]
+    # Convert device string to API format. Serial-shaped values must go under
+    # devid (a serial under devname silently matches nothing), and every
+    # all-devices spelling -- including the All_FortiGate that query_logs's
+    # own device parameter advertises -- is translated to FortiView's
+    # All_Device, which is the only one this endpoint answers for.
+    device_filter = build_fortiview_device_filter(device)
 
     # Build sort_by parameter in API format
     sort_by_param = None
@@ -368,7 +396,10 @@ async def get_fortiview_data(
     Args:
         view_name: FortiView view type (see run_fortiview for options)
         adom: ADOM name (default: from config DEFAULT_ADOM)
-        device: Device filter (serial number or name, optional)
+        device: Device filter (serial number or name, optional). Omit for all
+            devices; any "All_*" group is translated to FortiView's own
+            All_Device, which is the only all-devices token this endpoint
+            answers for.
         time_range: Time range (default: "1-hour")
         filter: Filter expression (optional). Examples:
             - "srcintf!=wan1" - Exclude specific interface
