@@ -117,6 +117,41 @@ def _clear_reloadable() -> None:
         del sys.modules[name]
 
 
+def _restore_reloadable(saved_modules: dict[str, Any]) -> None:
+    """Put every reloaded module back, ``sys.modules`` *and* its parent attribute.
+
+    ``import fortianalyzer_mcp.server`` (elsewhere in the process, including
+    other test modules collected after this one) resolves through
+    ``sys.modules['fortianalyzer_mcp'].server`` -- an attribute set once by
+    the first-ever import and left untouched by a later cache hit -- not
+    through a fresh ``sys.modules['fortianalyzer_mcp.server']`` lookup.
+    Restoring the dict alone therefore leaves that attribute pointing at
+    whichever mode ``_load_tools`` reloaded last (``dynamic``), and any code
+    using a plain dotted ``import`` -- as opposed to
+    ``importlib.import_module``, which does re-check ``sys.modules`` -- would
+    silently see that stale module for the rest of the test session. Fix the
+    attribute in both directions: present in the snapshot means set back;
+    absent means the module was never imported before this fixture touched
+    it, so drop the attribute rather than leave the last reload dangling off
+    the parent package.
+    """
+    current = [name for name in sys.modules if _is_reloadable(name)]
+    for name in current:
+        del sys.modules[name]
+
+    for name in {*current, *saved_modules}:
+        parent_name, _, attr = name.rpartition(".")
+        parent = saved_modules.get(parent_name) or sys.modules.get(parent_name)
+        if parent is None:
+            continue
+        if name in saved_modules:
+            setattr(parent, attr, saved_modules[name])
+        elif getattr(parent, attr, None) is not None:
+            delattr(parent, attr)
+
+    sys.modules.update(saved_modules)
+
+
 def _load_tools(mode: str) -> dict[str, Any]:
     """Re-import the server in ``mode`` and return ``{name: Tool}``.
 
@@ -161,8 +196,7 @@ def registries() -> Iterator[dict[str, dict[str, Any]]]:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
-        _clear_reloadable()
-        sys.modules.update(saved_modules)
+        _restore_reloadable(saved_modules)
         config.get_settings.cache_clear()
 
 
