@@ -164,9 +164,6 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
                 ("cancel_log_search", "Cancel a running search"),
                 ("get_log_stats", "Get log statistics"),
                 ("get_log_fields", "Get available log fields"),
-                ("search_traffic_logs", "Search traffic logs"),
-                ("search_security_logs", "Search security logs"),
-                ("search_event_logs", "Search event logs"),
                 ("get_logfiles_state", "Get log file state info"),
                 ("get_pcap_file", "Get PCAP file from log"),
             ],
@@ -301,9 +298,6 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
             "cancel_log_search": log_tools.cancel_log_search,
             "get_log_stats": log_tools.get_log_stats,
             "get_log_fields": log_tools.get_log_fields,
-            "search_traffic_logs": log_tools.search_traffic_logs,
-            "search_security_logs": log_tools.search_security_logs,
-            "search_event_logs": log_tools.search_event_logs,
             "get_logfiles_state": log_tools.get_logfiles_state,
             "get_pcap_file": log_tools.get_pcap_file,
             # DVM tools
@@ -409,7 +403,7 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
                 },
                 "logs": {
                     "description": "Log search with TID workflow, analytics",
-                    "tool_count": 11,
+                    "tool_count": 8,
                 },
                 "dvm": {
                     "description": "Device management, add/delete, groups",
