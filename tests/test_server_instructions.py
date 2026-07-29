@@ -130,11 +130,12 @@ def test_instructions_point_large_result_sets_at_the_aggregation_tools(
 ) -> None:
     """A caller facing 100k rows should be steered off raw paging.
 
-    The policy family pre-aggregates server-side and is honest about
-    exactness; paging 100k rows through an LLM context is never the right
-    answer to a volume question.
+    analyze_policy_traffic (successor to the retired policy trio) and
+    query_logs's own group_by/sample_by pre-aggregate server-side and are
+    honest about exactness; paging 100k rows through an LLM context is never
+    the right answer to a volume question.
     """
-    assert "get_policy_traffic_profile" in instructions
+    assert "analyze_policy_traffic" in instructions
 
 
 def test_instructions_document_the_field_trim_escape_hatch(instructions: str) -> None:
@@ -323,3 +324,51 @@ def test_response_size_and_projection_do_not_contradict_each_other(instructions:
     projection = instructions.split("## Projection")[1].split("## Choosing")[0]
     assert "no curated default" in projection
     assert "list_adoms and list_devices have no curated default" in instructions
+
+
+AGGREGATION_PARAMETERS = ("group_by", "sample_by", "count_only", "top_n")
+
+CONSOLIDATED_TOOLS = (
+    "get_fortiview_data",
+    "analyze_policy_traffic",
+    "query_logs",
+)
+
+REMOVED_TOOL_NAMES = (
+    "get_top_sources",
+    "get_top_destinations",
+    "get_top_applications",
+    "get_top_threats",
+    "get_top_websites",
+    "get_top_cloud_applications",
+    "get_policy_hits",
+    "search_traffic_logs",
+    "search_security_logs",
+    "search_event_logs",
+    "get_policy_traffic_profile",
+    "get_policy_port_analysis",
+    "get_policy_protocol_summary",
+)
+
+
+@pytest.mark.parametrize("parameter", AGGREGATION_PARAMETERS)
+def test_aggregation_parameters_are_documented(instructions: str, parameter: str) -> None:
+    assert parameter in instructions, f"{parameter} missing from the usage guide"
+
+
+@pytest.mark.parametrize("name", CONSOLIDATED_TOOLS)
+def test_the_surviving_tools_are_named(instructions: str, name: str) -> None:
+    assert name in instructions
+
+
+@pytest.mark.parametrize("name", REMOVED_TOOL_NAMES)
+def test_removed_tools_are_not_recommended(instructions: str, name: str) -> None:
+    """A guide that still names a deleted tool sends every client to an error."""
+    assert name not in instructions, f"{name} was removed but is still recommended"
+
+
+def test_the_exactness_split_is_stated(instructions: str) -> None:
+    """group_by exact, sample_by bounded -- the reason there are two names."""
+    lowered = instructions.lower()
+    assert "exact" in lowered
+    assert "sample" in lowered

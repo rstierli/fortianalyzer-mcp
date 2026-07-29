@@ -105,11 +105,10 @@ or nothing matches.
 
 ## Projection: `fields`
 
-Fifteen read tools take `fields`. Not every read tool does -- check the
+Twelve read tools take `fields`. Not every read tool does -- check the
 docstring. They are:
 
-  query_logs, fetch_more_logs, search_traffic_logs, search_security_logs,
-  search_event_logs, get_alerts, get_alert_logs, get_incidents,
+  query_logs, fetch_more_logs, get_alerts, get_alert_logs, get_incidents,
   get_endpoints, get_endusers, get_report_history, get_fortiview_data,
   search_devices, list_adoms, list_devices
 
@@ -143,17 +142,44 @@ list_devices and search_devices project on the appliance, so `fields` also
 shrinks what crosses the wire. Everywhere else the appliance sends the whole
 row and the trim is in-process -- it saves your context, not bandwidth.
 
+## Aggregation
+
+Three parameters on query_logs, mutually exclusive, and the names carry the
+guarantee:
+
+  group_by="srcip"        exact. The appliance counted it.
+  sample_by=["port"]      bounded. A row scan, labelled as one.
+  count_only=True         just the total.
+
+`group_by` only accepts dimensions FortiAnalyzer aggregates natively: srcip,
+dstip, app, hostname, attack, policyid, dstcountry. Anything else is an error
+that names sample_by -- there is no silent fallback, because a top-N over a
+sample reads as fact.
+
+`sample_by` takes a list, because one scan yields several independent
+breakdowns (not a cross-tab). It accepts derived dimensions too: "port" is
+proto/dstport, and "icmp_type_code" decodes the ICMP type and code that
+FortiAnalyzer hides in the service field. `top_n` defaults to 10; `top_n=0`
+returns every bucket.
+
+Before quoting any sample_by number, read `is_exact`. When it is false,
+`analysis_mode` is "bounded_sample" and `total_hits` is a floor, not a total.
+
+analyze_policy_traffic is the same idea fanned out across policies: it takes
+the same sample_by and top_n and reports each policy separately under a shared
+query budget.
+
 ## Choosing among overlapping tools
 
-- Per-policy volume questions -> get_policy_traffic_profile,
-  get_policy_port_analysis, get_policy_protocol_summary. These pre-aggregate
-  on the appliance and report their own exactness (`is_exact`,
-  `analysis_mode`, `total_hits_is_known`). Never page raw rows to answer a
-  "how much" question.
-- Filtering on srcip/dstip/action/policy_id -> search_traffic_logs, which
-  takes typed parameters and builds the filter for you.
-- Anything else, or a filter the wrappers cannot express -> query_logs.
-- Top-N by dimension (destinations, apps, countries) -> the FortiView tools.
+- Raw log rows, any logtype, any filter -> query_logs.
+- "How much / top N", where the dimension is one FortiAnalyzer aggregates
+  natively -> query_logs(group_by="srcip"), or get_fortiview_data(view_name=...)
+  when you want the view's own columns. Both are exact.
+- "How much / top N" for any other dimension -> query_logs(sample_by=["..."]).
+  Bounded, and the response says so.
+- Per-policy breakdowns across several policies -> analyze_policy_traffic.
+- IPS/attack events, especially with PCAP -> search_ips_logs.
+- Unsure what is filterable -> get_log_fields(name_filter="...").
 
 ## time_range vocabularies
 
