@@ -196,27 +196,6 @@ class TestFortiViewViews:
             validate_fortiview_view(view)
 
 
-class TestCloudApplicationsSortDefault:
-    """The Shadow-IT cloud-apps view has no ``bandwidth`` column (its byte
-    columns are ``total_size``/... and always 0 — FGT app-ctrl logs carry no
-    bytes). Sorting by ``bandwidth`` raised a FAZ ``Missing columns`` DB
-    error, so the default must be a real, populated column."""
-
-    async def test_default_sort_is_sessions_not_bandwidth(self) -> None:
-        from unittest.mock import patch
-
-        from fortianalyzer_mcp.tools.fortiview_tools import get_top_cloud_applications
-
-        with patch(
-            "fortianalyzer_mcp.tools.fortiview_tools.get_fortiview_data",
-            autospec=True,
-            return_value={"status": "success", "data": []},
-        ) as gfd:
-            await get_top_cloud_applications()
-        assert gfd.call_args.kwargs["view_name"] == "top-cloud-applications"
-        assert gfd.call_args.kwargs["sort_by"] == "sessions"
-
-
 class TestFortiViewProjection:
     """FortiView rows are per-view, so there is no curated default."""
 
@@ -267,39 +246,6 @@ class TestFortiViewProjection:
         assert result["data"][0].keys() == {"srcip", "bandwidth"}
         assert result["data"][0]["bandwidth"] == 100
 
-    @pytest.mark.parametrize(
-        "tool_name",
-        [
-            "get_top_sources",
-            "get_top_destinations",
-            "get_top_applications",
-            "get_top_threats",
-            "get_top_websites",
-            "get_top_cloud_applications",
-            "get_policy_hits",
-        ],
-    )
-    async def test_the_wrappers_do_not_emit_an_unfollowable_instruction(
-        self, monkeypatch: pytest.MonkeyPatch, tool_name: str
-    ) -> None:
-        """Seven tools told the caller to pass a parameter they do not have.
-
-        Each returns get_fortiview_data's dict verbatim and exposes no
-        ``fields``, so the uncurated-vocabulary warning ("Pass fields=[...] to
-        select what you need") arrived on every successful call with no way to
-        act on it -- and run_app_usage forwarded it into a skill result too. An
-        instruction the caller structurally cannot follow is worse than
-        silence, so the wrappers take the documented opt-out.
-        """
-        self._install(monkeypatch)
-        tool = getattr(fortiview_tools, tool_name)
-
-        result = await tool()
-
-        assert result["status"] == "success"
-        assert result["warnings"] == []
-        assert result["data"][0].keys() == self.ROWS[0].keys(), "full row, exactly as before"
-
     async def test_get_fortiview_data_still_warns_because_it_has_the_parameter(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -309,3 +255,48 @@ class TestFortiViewProjection:
         result = await fortiview_tools.get_fortiview_data(view_name="top-sources")
 
         assert any("fields" in w for w in result["warnings"])
+
+
+class TestFortiViewWrapperEquivalence:
+    """Each removed wrapper was get_fortiview_data with a fixed view_name."""
+
+    VIEW_FOR_REMOVED_TOOL = {
+        "get_top_sources": "top-sources",
+        "get_top_destinations": "top-destinations",
+        "get_top_applications": "top-applications",
+        "get_top_threats": "top-threats",
+        "get_top_websites": "top-websites",
+        "get_top_cloud_applications": "top-cloud-applications",
+        "get_policy_hits": "policy-hits",
+    }
+
+    @pytest.mark.parametrize("view", sorted(set(VIEW_FOR_REMOVED_TOOL.values())))
+    async def test_the_replacement_reaches_each_view(
+        self, monkeypatch: pytest.MonkeyPatch, view: str
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        class FakeClient:
+            async def ensure_connected(self) -> None:
+                return None
+
+            async def get_system_timezone(self) -> None:
+                return None
+
+            async def fortiview_run(self, **kwargs: object) -> dict[str, object]:
+                captured.update(kwargs)
+                return {"tid": 1}
+
+            async def fortiview_fetch(self, **kwargs: object) -> dict[str, object]:
+                return {"percentage": 100, "data": []}
+
+        monkeypatch.setattr(fortiview_tools, "_get_client", lambda: FakeClient())
+
+        result = await fortiview_tools.get_fortiview_data(view_name=view, fields=["*"])
+
+        assert result["status"] == "success"
+        assert captured["view_name"] == view
+
+    @pytest.mark.parametrize("name", sorted(VIEW_FOR_REMOVED_TOOL))
+    def test_the_wrapper_is_gone(self, name: str) -> None:
+        assert not hasattr(fortiview_tools, name), f"{name} should have been removed"

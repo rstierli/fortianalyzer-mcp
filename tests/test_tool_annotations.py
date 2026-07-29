@@ -235,12 +235,15 @@ def test_full_mode_registers_the_whole_surface(full_tools: dict[str, Any]) -> No
     """Guard the premise of the frozen-set tests below.
 
     Every assertion about the write surface is vacuous if the tools never
-    registered, so pin the count: 83 raw tools plus the ``faz_skill``
-    dispatcher (85 minus the three ``get_policy_*`` tools ``analyze_policy_traffic``
-    replaced, plus that one). A tool added or removed is expected to update
-    this number together with the lists above.
+    registered, so pin the count: 84 minus the seven retired FortiView
+    wrappers (``get_top_sources``, ``get_top_destinations``,
+    ``get_top_applications``, ``get_top_threats``, ``get_top_websites``,
+    ``get_top_cloud_applications``, ``get_policy_hits``), each a fixed
+    ``view_name`` call to ``get_fortiview_data`` and nothing else. A tool
+    added or removed is expected to update this number together with the
+    lists above.
     """
-    assert len(full_tools) == 84, f"full mode registered {len(full_tools)} tools"
+    assert len(full_tools) == 77, f"full mode registered {len(full_tools)} tools"
     assert "faz_skill" in full_tools, "skills dispatcher did not register"
 
 
