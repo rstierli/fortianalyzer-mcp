@@ -252,7 +252,7 @@ Claude should respond using the MCP tools.
 
 ## Available Tools
 
-The MCP server provides **77 tools** across 10 categories (78 with the optional skills dispatcher enabled — see the README's "Skills Layer" and "Data Masking" sections for the two beta, off-by-default features). The lists below are a representative selection per category; the README's "Available Tools" section is the full reference.
+The MCP server provides **73 tools** across 12 categories (74 with the optional skills dispatcher enabled — see the README's "Skills Layer" and "Data Masking" sections for the two beta, off-by-default features). The lists below are a representative selection per category; the README's "Available Tools" section is the full reference.
 
 ### System Tools (11)
 - `get_system_status` - Get FortiAnalyzer system status
@@ -261,27 +261,29 @@ The MCP server provides **77 tools** across 10 categories (78 with the optional 
 - `list_devices` / `get_device` - Device listing
 - `list_tasks` / `get_task` / `wait_for_task` - Task management
 
-### Log Tools (11)
-- `query_logs` - Full log search with TID workflow
-- `search_traffic_logs` - Search firewall traffic logs
-- `search_security_logs` - Search IPS/attack logs
-- `search_event_logs` - Search system event logs
+### Log Tools (8)
+- `query_logs` - Full log search with TID workflow; also aggregates, via
+  `group_by` (exact), `sample_by` (bounded) or `count_only`. Pass `logtype`
+  plus structured `filters` for what the removed `search_traffic_logs` /
+  `search_security_logs` / `search_event_logs` helpers used to do.
 - `get_log_fields` - Get available log fields
 - `get_log_stats` - Get log statistics
 - `fetch_more_logs` - Pagination for log results
-- `cancel_log_search` - Cancel running search
+- `cancel_log_search` - Release a pagination handle
+- `get_log_search_progress` / `get_logfiles_state` - Search and log-file state
+- `get_pcap_file` - Download the PCAP for an IPS event
 
-### FortiView Tools (10)
-- `get_top_sources` - Top traffic sources
-- `get_top_destinations` - Top traffic destinations
-- `get_top_applications` - Top applications by bandwidth
-- `get_top_threats` - Top security threats
-- `get_top_websites` - Most accessed websites
-- `get_top_cloud_applications` - Top cloud/SaaS apps
-- `get_policy_hits` - Policy hit statistics
+### FortiView Tools (3)
+- `get_fortiview_data` - Run a view and wait for results. Pass `view_name`:
+  `top-sources`, `top-destinations`, `top-applications`, `top-websites`,
+  `top-threats`, `top-cloud-applications`, `top-countries`,
+  `site-to-site-ipsec`, `policy-hits`, `policy-line`. (The seven `get_top_*`
+  wrappers were removed; they only hard-coded this argument. They also
+  defaulted to a 24-hour window where this defaults to 1-hour, so pass
+  `time_range` explicitly when migrating.)
 - `run_fortiview` / `fetch_fortiview` - Raw FortiView queries
 
-### Event Tools (8)
+### Event Tools (9)
 - `get_alerts` - Get alert events
 - `get_alert_count` - Count alerts
 - `acknowledge_alerts` / `unacknowledge_alerts` - Manage alerts
@@ -314,10 +316,18 @@ The MCP server provides **77 tools** across 10 categories (78 with the optional 
 - `search_devices` - Search devices with filters
 - `list_device_groups` / `list_device_vdoms` - Groups and VDOMs
 
-### Traffic Analysis Tools (3)
-- `get_policy_port_analysis` - Per-policy port/service breakdown
-- `get_policy_protocol_summary` - Per-policy protocol summary
-- `get_policy_traffic_profile` - Per-policy traffic profile
+### Traffic Analysis Tools (1)
+- `analyze_policy_traffic` - Per-policy bounded breakdown; `sample_by` picks
+  the dimensions (default `["port", "service", "app"]`), `top_n=0` returns
+  every bucket. Replaces the three `get_policy_*` tools.
+
+### SOAR Tools (2)
+- `get_indicator_enrichment` - Stored threat-intel reputation for an indicator
+- `get_linked_indicators` - Indicators linked to an alert or incident
+
+### UEBA Tools (5)
+- `get_endpoints` / `get_endpoint_vulnerabilities` / `get_endpoint_stats`
+- `get_endusers` / `get_enduser_stats`
 
 ### PCAP Tools (5)
 - `search_ips_logs` - Find IPS logs with PCAP available
@@ -334,13 +344,13 @@ The MCP server provides **77 tools** across 10 categories (78 with the optional 
 
 > **You:** Show me the top 10 security threats from the last 24 hours
 
-Claude will use `get_top_threats` and provide a summary.
+Claude will use `get_fortiview_data(view_name="top-threats", time_range="24-hour")` and provide a summary.
 
 ### Log Search
 
 > **You:** Search for traffic from IP 192.168.1.100 in the last hour
 
-Claude will use `search_traffic_logs` with the srcip filter.
+Claude will use `query_logs(logtype="traffic", filters=[{"field": "srcip", "op": "eq", "value": "192.168.1.100"}])`.
 
 ### System Health
 

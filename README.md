@@ -384,6 +384,10 @@ networks:
 
 ## Available Tools
 
+**73 tools across 12 categories** (74 with the optional skills dispatcher —
+see "Skills Layer" below). The 2.11.0 release consolidated thirteen tools into
+three; see CHANGELOG.md for the migration table.
+
 ### System Tools (11 tools)
 
 | Tool | Description |
@@ -413,21 +417,43 @@ networks:
 | `get_device_info` | Get detailed device information |
 | `search_devices` | Search devices with filters |
 
-### Log Tools (11 tools)
+### Log Tools (8 tools)
 
 | Tool | Description |
 |------|-------------|
-| `query_logs` | Query logs; returns a page plus a reusable pagination handle, `total`, `has_more`, and FAZ timezone |
+| `query_logs` | Query logs, or aggregate them: rows plus a reusable pagination handle, or `group_by` / `sample_by` / `count_only` (see below) |
 | `get_log_search_progress` | Check log search progress |
 | `fetch_more_logs` | Fetch another page for a `query_logs` handle (re-runs the query at a new offset) |
 | `cancel_log_search` | Release a pagination handle |
 | `get_log_stats` | Get log statistics |
 | `get_log_fields` | Get available log fields for a log type |
-| `search_traffic_logs` | Search traffic/firewall logs |
-| `search_security_logs` | Search IPS/AV/web filter logs |
-| `search_event_logs` | Search system event logs |
 | `get_logfiles_state` | Get log file state information |
 | `get_pcap_file` | Download PCAP file for an IPS event |
+
+> **Aggregating instead of paging rows.** `query_logs` takes three mutually
+> exclusive aggregation parameters, and the names carry the guarantee:
+>
+> - `group_by="srcip"` — **exact**, because the appliance counted it. Only
+>   dimensions FortiAnalyzer aggregates natively are accepted, and each is tied
+>   to the logtype whose logs its native surface reads: `traffic` → `srcip`,
+>   `dstip`, `app`, `policyid`, `dstcountry`; `webfilter` → `hostname`,
+>   `website`; `attack` → `attack`, `threat`. Any other pairing is an error
+>   naming `sample_by`; there is no silent fallback, because a top-N over a
+>   sample reads as fact. It also cannot be combined with `filter`/`filters`
+>   (an unverified view might ignore the filter and return an unfiltered
+>   top-N labelled exact). Returns `groups`, `group_source`, `is_exact: true`,
+>   plus `group_limit`/`groups_truncated` — `limit` caps the number of groups
+>   here, and a cut ranking says so.
+> - `sample_by=["port", "service"]` — **bounded**, a single row scan labelled
+>   as one. Returns `breakdowns` per dimension plus `is_exact` /
+>   `analysis_mode` / `total_hits_is_known`; read those before quoting a
+>   number. Derived dimensions work here (`port` is proto/dstport,
+>   `icmp_type_code` decodes the pair FAZ hides in `service`).
+> - `count_only=True` — just `total` and `count_source`.
+>
+> The three former `search_traffic_logs` / `search_security_logs` /
+> `search_event_logs` helpers are gone: pass `logtype` plus structured
+> `filters` to `query_logs` instead.
 
 > **Paginating log results:** call `query_logs(..., limit=N)`, then page with
 > `fetch_more_logs(tid=<handle>, offset=next_offset, limit=...)`. The returned
@@ -437,8 +463,8 @@ networks:
 > `total` / `total_is_known`, `has_more`, `next_offset` (the offset for the next
 > page, or `null` when exhausted), `offset`/`limit`, and a `warnings` list (set
 > when the limit was clamped, the total is unknown, the timezone is undetected,
-> or the result set is large enough that the bounded policy tools are a better
-> fit). A 0-result search is a clean `status:"success"` with `count:0` and
+> or the result set is large enough that aggregating with `group_by`/`sample_by`
+> is a better fit). A 0-result search is a clean `status:"success"` with `count:0` and
 > `has_more:false`. Call `cancel_log_search(tid=<handle>)` when finished; an
 > expired/unknown handle returns `error:"tid_invalid_or_expired"`.
 >
@@ -466,22 +492,24 @@ networks:
 > `7-day`, `30-day`, `90-day`) or a custom
 > `"YYYY-MM-DD HH:MM:SS|YYYY-MM-DD HH:MM:SS"` window. Timestamps are interpreted
 > in the FAZ system timezone reported as `timezone`. For a 7-day or 30-day
-> investigation, set `time_range="7-day"` / `"30-day"` on `query_logs`, the
-> `search_*` helpers, or the policy tools and add the filters you need
+> investigation, set `time_range="7-day"` / `"30-day"` on `query_logs` or
+> `analyze_policy_traffic` and add the filters you need
 > (`action==accept`/`deny`, `policyid==N`, `srcip`/`dstip`/`dstport`, …).
 >
 > **Errors:** every tool error returns one envelope —
 > `{status:"error", error:<code>, message, operation, retry_count}` plus
 > `adom`/`logtype`/`tid` where relevant.
 >
-> **Filters:** the `search_*` helpers validate/sanitize their typed arguments;
-> the raw `filter=` argument on `query_logs` is a caller-controlled expert escape
-> hatch and is **not** parsed for injection safety — pass trusted input only.
+> **Filters:** prefer the structured `filters` list — its field names are
+> validated and its operator spelling is handled for you. The raw `filter=`
+> argument on `query_logs` is a caller-controlled expert escape hatch and is
+> **not** parsed for injection safety — pass trusted input only.
 
 ### Report Tools (9 tools)
 
 | Tool | Description |
 |------|-------------|
+| `list_report_templates` | List available report templates |
 | `list_report_layouts` | List available report layouts |
 | `run_report` | Start a report generation |
 | `fetch_report` | Check report generation status |
@@ -491,22 +519,27 @@ networks:
 | `run_and_wait_report` | Run report and wait for completion |
 | `save_report` | Download and save report to disk |
 
-### FortiView Analytics Tools (10 tools)
+### FortiView Analytics Tools (3 tools)
 
 | Tool | Description |
 |------|-------------|
 | `run_fortiview` | Start a FortiView analytics query |
 | `fetch_fortiview` | Fetch FortiView query results |
 | `get_fortiview_data` | Run FortiView and get results (auto-wait) |
-| `get_top_sources` | Get top traffic sources |
-| `get_top_destinations` | Get top traffic destinations |
-| `get_top_applications` | Get top applications by bandwidth |
-| `get_top_threats` | Get top security threats |
-| `get_top_websites` | Get top accessed websites |
-| `get_top_cloud_applications` | Get top cloud/SaaS applications |
-| `get_policy_hits` | Get firewall policy hit counts |
 
-### Event/Alert Tools (8 tools)
+The seven `get_top_*` / `get_policy_hits` wrappers are gone; they differed from
+`get_fortiview_data` only in a hard-coded `view_name`. Pass the view yourself:
+`top-sources`, `top-destinations`, `top-applications`, `top-websites`,
+`top-threats`, `top-cloud-applications`, `top-countries`, `site-to-site-ipsec`,
+`policy-hits`, `policy-line`. Note their defaults differed — `get_top_threats`
+and `get_policy_hits` defaulted to `24-hour`, `get_fortiview_data` defaults to
+`1-hour` — so pass `time_range` explicitly when migrating a call. An
+**unfiltered** view is exact; a **filtered** one is not verified (FortiAnalyzer
+does not reject filter fields it does not know, so an ignored filter would
+return an unfiltered top-N that looks exact). Use `query_logs(sample_by=[...],
+filters=[...])` when the answer must be filtered.
+
+### Event/Alert Tools (9 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -518,6 +551,7 @@ networks:
 | `get_alert_details` | Get detailed alert information |
 | `add_alert_comment` | Add comment to an alert |
 | `get_alert_incident_stats` | Get alert and incident statistics |
+| `get_alert_handlers` | List configured alert handlers (detection rules) |
 
 ### Incident Management Tools (6 tools)
 
@@ -541,15 +575,18 @@ networks:
 | `get_ioc_rescan_history` | Get rescan history |
 | `run_and_wait_ioc_rescan` | Run rescan and wait for completion |
 
-### Traffic Analysis Tools (3 tools)
+### Traffic Analysis Tools (1 tool)
 
 | Tool | Description |
 |------|-------------|
-| `get_policy_traffic_profile` | Get sampled traffic summary per policy (top ports, services, apps) |
-| `get_policy_port_analysis` | Get bounded port/protocol enumeration per policy with conservative `is_exact` semantics |
-| `get_policy_protocol_summary` | Get lightweight protocol breakdown (TCP/UDP/ICMP/other) per policy |
+| `analyze_policy_traffic` | Per-policy bounded traffic breakdown; `sample_by` picks the dimensions (default `["port", "service", "app"]`), `top_n=0` returns every bucket |
 
-Traffic analysis tools keep large windows practical by scanning a fixed, bounded
+It replaces `get_policy_traffic_profile` (the default `sample_by`),
+`get_policy_port_analysis` (`sample_by=["port"], top_n=0`) and
+`get_policy_protocol_summary` (`sample_by=["proto"]`, which reports numeric
+protocol values — `"6"`, `"17"` — where the old tool reported `TCP`/`UDP`).
+
+The traffic analysis tool keeps large windows practical by scanning a fixed, bounded
 number of log slices per request. A result is marked `is_exact=true` only when
 every queried slice returns below the per-slice log limit. If any slice reaches
 the limit, the tool returns observed results with `analysis_mode=bounded_sample`,
@@ -571,6 +608,23 @@ the summed per-slice total.
 | `download_pcap_by_url` | Download PCAP using pcapurl from search results |
 | `search_and_download_pcaps` | Search and automatically download all matching PCAPs |
 | `list_available_pcaps` | List IPS events that have PCAP files available |
+
+### SOAR Tools (2 tools)
+
+| Tool | Description |
+|------|-------------|
+| `get_indicator_enrichment` | Stored threat-intel reputation for an indicator (needs SOAR licensed) |
+| `get_linked_indicators` | Indicators linked to an alert or incident |
+
+### UEBA Tools (5 tools)
+
+| Tool | Description |
+|------|-------------|
+| `get_endpoints` | UEBA endpoint records |
+| `get_endpoint_vulnerabilities` | CVE records attributed to an endpoint |
+| `get_endpoint_stats` | Estate-scale endpoint statistics (risk denominators) |
+| `get_endusers` | UEBA end-user records |
+| `get_enduser_stats` | Estate-scale end-user statistics |
 
 ## Usage Examples
 
@@ -597,6 +651,9 @@ the summed per-slice total.
 "What are the top threats detected in the last 24 hours?"
 "List the most accessed websites today"
 ```
+
+(Claude reaches for `get_fortiview_data(view_name=...)` or
+`query_logs(group_by=...)` for these.)
 
 ### Alert Management
 

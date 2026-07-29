@@ -44,8 +44,12 @@ registered) under ``FAZ_SKILLS_ENABLED=true`` rather than being skipped.
 from __future__ import annotations
 
 import os
+import re
+from pathlib import Path
 
 import pytest
+
+from fortianalyzer_mcp.server import TOOL_CATALOGUE_NAMES
 
 _DYNAMIC_MODE_REASON = (
     "TOOL_CATALOGUE describes full mode's 73 tools; under a session-wide "
@@ -155,3 +159,95 @@ def test_consolidated_tools_are_absent_from_the_catalogue(removed: str) -> None:
 
 def test_the_replacement_is_present() -> None:
     assert "analyze_policy_traffic" in _catalogue_names()
+
+
+#: Docs that advertise the tool surface to a human reader. They drifted through
+#: the whole 85 -> 73 consolidation without a single test noticing, so they are
+#: checked here rather than trusted.
+SHIPPED_DOCS = (
+    "README.md",
+    "docs/SETUP_GUIDE.md",
+    "docs/DEMO_USE_CASES.md",
+    "docs/INTERNAL_ARCHITECTURE.md",
+)
+
+#: Every registered tool name starts with one of these. Requiring a prefix is
+#: what keeps the scan off ordinary snake_case prose (`time_range`,
+#: `total_hits`, `has_more_basis`) while still catching every removed tool.
+_TOOL_VERB_PREFIXES = (
+    "acknowledge_",
+    "add_",
+    "analyze_",
+    "cancel_",
+    "create_",
+    "delete_",
+    "download_",
+    "fetch_",
+    "get_",
+    "list_",
+    "query_",
+    "run_",
+    "save_",
+    "search_",
+    "unacknowledge_",
+    "update_",
+    "wait_",
+)
+
+
+def _non_tool_names() -> frozenset[str]:
+    """Names the docs may legitimately list that are not full-mode tools.
+
+    The skills dispatcher, dynamic mode's three discovery tools, and -- the
+    reason this is computed rather than written out -- every public
+    ``FortiAnalyzerClient`` method, since INTERNAL_ARCHITECTURE.md documents
+    the client layer by method name (``get_logfields``, ``add_device_list``)
+    and those are not tools and never were.
+    """
+    from fortianalyzer_mcp.api.client import FortiAnalyzerClient
+
+    return frozenset(
+        {
+            "faz_skill",
+            "find_fortianalyzer_tool",
+            "list_fortianalyzer_categories",
+            "execute_advanced_tool",
+            "get_faz_client",
+            "get_default_adom",
+        }
+        | {name for name in dir(FortiAnalyzerClient) if not name.startswith("_")}
+    )
+
+
+#: A markdown list item or table row whose cells are backticked identifiers --
+#: which is exactly how every tool inventory in these files is written.
+_LISTED_NAME_RE = re.compile(r"^\s*(?:[-*+]|\|)\s*.*?`([a-z][a-z0-9_]*)`")
+_BACKTICKED_RE = re.compile(r"`([a-z][a-z0-9_]*)`")
+
+
+def _listed_tool_names(text: str) -> set[str]:
+    """Tool-shaped names appearing in a list item or table row."""
+    allowed = _non_tool_names()
+    found: set[str] = set()
+    for line in text.splitlines():
+        if not _LISTED_NAME_RE.match(line):
+            continue
+        for name in _BACKTICKED_RE.findall(line):
+            if name.startswith(_TOOL_VERB_PREFIXES) and name not in allowed:
+                found.add(name)
+    return found
+
+
+@pytest.mark.parametrize("doc", SHIPPED_DOCS)
+def test_shipped_docs_only_list_tools_that_exist(doc: str) -> None:
+    """A deleted tool named in a shipped doc is a caller following a dead link.
+
+    Scoped to *listed* names (a bullet or a table row) rather than all prose,
+    so a sentence explaining what a tool used to be called does not fail the
+    suite -- but every inventory table and bullet list is covered, which is
+    where all thirteen removed tools survived the consolidation.
+    """
+    path = Path(__file__).resolve().parents[1] / doc
+    stale = sorted(_listed_tool_names(path.read_text()) - TOOL_CATALOGUE_NAMES)
+
+    assert not stale, f"{doc} lists tools that are not registered: {stale}"

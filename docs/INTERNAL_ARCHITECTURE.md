@@ -135,7 +135,7 @@ src/fortianalyzer_mcp/
 ```
 1. User asks Claude: "Show me top bandwidth consumers"
 
-2. Claude Desktop invokes MCP tool: get_top_sources()
+2. Claude Desktop invokes MCP tool: get_fortiview_data(view_name="top-sources")
    └─> tools/fortiview_tools.py
 
 3. Tool function calls API client method:
@@ -481,7 +481,12 @@ ERROR_CODE_MAP = {
 
 ## Log Investigation Response Contract
 
-`query_logs` and `fetch_more_logs` return one self-describing shape:
+`query_logs` returns one of **four** shapes, chosen by which aggregation
+parameter was passed (they are mutually exclusive; passing two is
+`error="conflicting_aggregation"`). `fetch_more_logs` only ever returns the
+rows shape.
+
+### Rows (no aggregation) — `query_logs` and `fetch_more_logs`
 
 - `status`, `count`, `logs`
 - `total`, `total_is_known` — the handle's **first-page Baseline total** (per ADR-0002),
@@ -509,20 +514,66 @@ ERROR_CODE_MAP = {
 - `offset`, `limit` — the clamped values actually used (`limit` is bounded to `[1, 1000]`)
 - `warnings` — deterministic advisories: clamped limit, unknown total, undetected
   timezone, or a high-volume result set
-  (`has_more and total >= max(10*limit, 10000)`) that should use the bounded policy tools
+  (`has_more and total >= max(10*limit, 10000)`) that should aggregate with
+  `query_logs(group_by=…)` / `query_logs(sample_by=[…])` instead of paging
 - `time_range`, `timezone`, `time_basis` — the resolved `{start, end}` window and
   the FAZ timezone the naive timestamps are interpreted in
+- `fields_returned` — the keys each row actually carries after projection.
+  Reported **even for a zero-row page**, since that is exactly when the caller
+  has nothing else to tell it what is queryable next. Projection selects,
+  never renames, and selects top-level keys only
 - `tid` — a **reusable pagination handle**, not the single-use appliance task id
 
-Every error path (across `query_logs`, `fetch_more_logs`, the `search_*` helpers,
-and the three policy tools) returns one envelope built by
+### `group_by` — exact, appliance-aggregated
+
+- `group_by` — the canonical dimension, after alias resolution
+- `groups` — the appliance's own rows for that dimension
+- `group_source` — `"fortiview:<view>"`, naming the surface that counted it
+- `is_exact` — always `true` here. `group_by` refuses anything it cannot
+  answer exactly rather than falling back to a sample, so the dimension must
+  have a native FortiView surface **and** that surface must serve the
+  requested `logtype` (a view aggregates its own log source, so answering
+  across that boundary would describe another population). The two refusals
+  are `error="unsupported_group_dimension"` (no surface at all) and
+  `error="group_dimension_logtype_mismatch"` (a surface, but for other logs);
+  both name `sample_by`
+- `group_limit`, `groups_truncated` — `limit` caps the number of *groups* on
+  this path, and a full-length ranking says so. This does not weaken
+  `is_exact`: what may be missing is groups, not accuracy
+- `filter` must be absent — `error="unsupported_view_filter"` otherwise, since
+  a view that silently ignored the filter would return an unfiltered top-N
+  under `is_exact: true` (see `docs/probes/2026-07-fortiview-surface.md`)
+- plus `adom`, `logtype`, `time_range`, `timezone`, `warnings`
+
+### `sample_by` — bounded, one row scan
+
+- `sample_by` — the dimensions requested (a list; one scan yields several
+  independent breakdowns, deliberately not a cross-tab)
+- `breakdowns` — `{dimension: [{"value", "hits"}, ...]}`, `top_n` per dimension
+  (`top_n=0` keeps every bucket)
+- `is_exact` / `analysis_mode` (`"exact"` | `"bounded_sample"`) — exact only
+  when the appliance's own total equals the rows actually scanned and the page
+  was not capped
+- `total_hits`, `total_hits_is_known`, `total_hit_source`, `observed_hits`
+- `log_limit_per_slice`, `slices_scanned`, `truncated_slices`, `recommendation`
+- plus `adom`, `logtype`, `filter`, `time_range`, `timezone`, `warnings`
+
+### `count_only`
+
+- `total`, `total_is_known`, `count_source` (`"logsearch_total_count"`)
+- plus `adom`, `logtype`, `filter`, `time_range`, `timezone`, `warnings`
+
+Every error path (across `query_logs`, `fetch_more_logs`, and
+`analyze_policy_traffic`) returns one envelope built by
 `utils/responses.py::error_response`:
 `{status:"error", error:<machine code>, message, operation, retry_count}` plus
 `adom`/`logtype`/`tid` where relevant. `retry_count` is the number of transient
 request retries `client._execute_resilient` performed (0 on non-retry paths).
 `message` is redacted (secrets masked) and length-bounded.
 
-The bounded policy tools add top-level `adom`/`time_range`/`timezone` and a
+`analyze_policy_traffic` (which replaced `get_policy_traffic_profile`,
+`get_policy_port_analysis` and `get_policy_protocol_summary` in 2.11.0) adds
+top-level `adom`/`time_range`/`timezone` and a
 per-policy `filter`, plus per-policy `total_hits`, `total_hits_is_known`, and
 `total_hit_source` (`"logsearch_total-count"` when every slice reported a total,
 `"observed_rows"` when any slice did not). The analysis window is resolved

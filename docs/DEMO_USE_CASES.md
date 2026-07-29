@@ -34,7 +34,7 @@ Show me the top 10 bandwidth consumers in the last 24 hours. Include source IP, 
 ```
 
 **Tools Used:**
-- `get_top_sources`
+- `get_fortiview_data(view_name="top-sources")` — or `query_logs(group_by="srcip")`
 
 **Expected Output:** Ranked list of source IPs with bandwidth usage, helping identify heavy users or potential data exfiltration.
 
@@ -51,8 +51,8 @@ What are the top security threats detected in the last 7 days? For the most crit
 ```
 
 **Tools Used:**
-- `get_top_threats`
-- `search_security_logs`
+- `get_fortiview_data(view_name="top-threats", time_range="24-hour")` — or `query_logs(logtype="attack", group_by="attack")`
+- `query_logs(logtype="attack", filters=[...])`
 
 **Expected Output:** List of threats by severity, detailed logs showing attack source, target, and action taken.
 
@@ -108,8 +108,8 @@ What are the top 10 applications by bandwidth in the last hour? Also show me the
 ```
 
 **Tools Used:**
-- `get_top_applications`
-- `get_top_cloud_applications`
+- `get_fortiview_data(view_name="top-applications")` — or `query_logs(group_by="app")`
+- `get_fortiview_data(view_name="top-cloud-applications")`
 
 **Expected Output:** Ranked applications list (YouTube, Microsoft 365, Zoom, etc.) with bandwidth and session counts.
 
@@ -145,7 +145,7 @@ Search for all traffic logs involving IP address 10.0.1.50 in the last 24 hours.
 ```
 
 **Tools Used:**
-- `search_traffic_logs`
+- `query_logs(logtype="traffic", filters=[...])`
 
 **Expected Output:** Filtered log entries showing all network activity for the specified IP, helping identify communication patterns.
 
@@ -162,8 +162,8 @@ Show me the top 20 websites accessed today. Also show me the firewall policy hit
 ```
 
 **Tools Used:**
-- `get_top_websites`
-- `get_policy_hits`
+- `get_fortiview_data(view_name="top-websites")` — or `query_logs(logtype="webfilter", group_by="hostname")`
+- `get_fortiview_data(view_name="policy-hits", time_range="24-hour")` — or `query_logs(group_by="policyid")`
 
 **Expected Output:** Most visited websites with bandwidth, policy rules ranked by hit count showing rule effectiveness.
 
