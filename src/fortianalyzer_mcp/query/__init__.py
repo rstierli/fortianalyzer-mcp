@@ -26,6 +26,12 @@ from fortianalyzer_mcp.query.filters import (
     compile_to_array,
     compile_to_string,
 )
+from fortianalyzer_mcp.query.groups import (
+    LOG_GROUP_SURFACES,
+    GroupPlan,
+    UnsupportedGroupDimension,
+    resolve_group_plan,
+)
 from fortianalyzer_mcp.query.shape import (
     ALL_FIELDS,
     fields_returned,
@@ -36,9 +42,12 @@ from fortianalyzer_mcp.query.shape import (
 
 __all__ = [
     "ALL_FIELDS",
+    "LOG_GROUP_SURFACES",
     "TASK_STATE_CODES",
     "FilterCondition",
     "FilterOp",
+    "GroupPlan",
+    "UnsupportedGroupDimension",
     "Vocabulary",
     "canonical_log_field",
     "coerce_value",
@@ -50,5 +59,6 @@ __all__ = [
     "project_payload",
     "project_rows",
     "resolve_field",
+    "resolve_group_plan",
     "resolve_projection",
 ]
