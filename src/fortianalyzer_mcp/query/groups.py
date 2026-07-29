@@ -26,9 +26,12 @@ if missed:
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
+from fortianalyzer_mcp.query.derive import dimension_value
 from fortianalyzer_mcp.query.fields import resolve_field
 from fortianalyzer_mcp.utils.errors import ValidationError
 
@@ -134,3 +137,49 @@ def resolve_group_plan(vocabulary: str, dimension: str) -> GroupPlan:
     if view is None:
         raise UnsupportedGroupDimension(dimension, _supported_for(vocabulary), vocabulary)
     return GroupPlan(dimension=canonical, surface="fortiview", target=view)
+
+
+def aggregate_breakdowns(
+    rows: list[Any],
+    dimensions: list[str],
+    top_n: int = 10,
+) -> dict[str, list[dict[str, Any]]]:
+    """Count rows per dimension, independently.
+
+    One scan yields one breakdown per requested dimension. This is deliberately
+    not a cross-tab: ``get_policy_traffic_profile`` wants ports *and* services
+    *and* applications from a single scan, and the product of three dimensions
+    would explode in cardinality to answer a question nobody asked.
+
+    Args:
+        rows: The sampled rows.
+        dimensions: Dimension names; plain fields and derived dimensions both
+            work.
+        top_n: Buckets to keep per dimension. ``0`` keeps every bucket, which
+            is what ``get_policy_port_analysis``'s complete port list needed.
+
+    Returns:
+        ``{dimension: [{"value": str, "hits": int}, ...]}``, each list ordered
+        by hits descending then value ascending, so equal counts come back in
+        a stable order rather than one that depends on scan order.
+    """
+    breakdowns: dict[str, list[dict[str, Any]]] = {}
+
+    for dimension in dimensions:
+        counter: Counter[str] = Counter()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            value = dimension_value(dimension, row)
+            # None means the row does not belong in this breakdown -- an
+            # absent field or a portless protocol -- rather than belonging in
+            # an "unknown" bucket that would inflate the total.
+            if value is not None:
+                counter[value] += 1
+
+        ordered = sorted(counter.items(), key=lambda item: (-item[1], item[0]))
+        if top_n > 0:
+            ordered = ordered[:top_n]
+        breakdowns[dimension] = [{"value": value, "hits": hits} for value, hits in ordered]
+
+    return breakdowns

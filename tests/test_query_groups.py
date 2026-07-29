@@ -7,6 +7,7 @@ import pytest
 from fortianalyzer_mcp.query.groups import (
     LOG_GROUP_SURFACES,
     UnsupportedGroupDimension,
+    aggregate_breakdowns,
     resolve_group_plan,
 )
 
@@ -96,3 +97,64 @@ class TestRefusal:
         """Vocabularies do not share a group surface."""
         with pytest.raises(UnsupportedGroupDimension):
             resolve_group_plan("alert", "srcip")
+
+
+class TestAggregateBreakdowns:
+    """One scan, several independent breakdowns."""
+
+    ROWS = [
+        {"proto": "6", "dstport": "443", "app": "HTTPS", "service": "HTTPS"},
+        {"proto": "6", "dstport": "443", "app": "HTTPS", "service": "HTTPS"},
+        {"proto": "6", "dstport": "80", "app": "HTTP", "service": "HTTP"},
+        {"proto": "1", "dstport": "0", "app": "PING", "service": "PING"},
+    ]
+
+    def test_counts_are_per_dimension_not_a_cross_tab(self) -> None:
+        result = aggregate_breakdowns(self.ROWS, ["app", "proto"])
+        assert set(result) == {"app", "proto"}
+        assert result["app"][0] == {"value": "HTTPS", "hits": 2}
+
+    def test_buckets_are_ordered_by_hits_descending(self) -> None:
+        result = aggregate_breakdowns(self.ROWS, ["app"])
+        hits = [bucket["hits"] for bucket in result["app"]]
+        assert hits == sorted(hits, reverse=True)
+
+    def test_top_n_truncates(self) -> None:
+        result = aggregate_breakdowns(self.ROWS, ["app"], top_n=1)
+        assert len(result["app"]) == 1
+        assert result["app"][0]["value"] == "HTTPS"
+
+    def test_top_n_zero_returns_every_bucket(self) -> None:
+        """get_policy_port_analysis returned the complete port list; that survives."""
+        result = aggregate_breakdowns(self.ROWS, ["app"], top_n=0)
+        assert len(result["app"]) == 3
+
+    def test_a_derived_dimension_works(self) -> None:
+        result = aggregate_breakdowns(self.ROWS, ["port"])
+        assert {"value": "6/443", "hits": 2} in result["port"]
+
+    def test_portless_rows_are_excluded_from_the_port_breakdown(self) -> None:
+        """The ICMP row has dstport 0, which is not a port."""
+        result = aggregate_breakdowns(self.ROWS, ["port"])
+        assert all(bucket["value"] != "1/0" for bucket in result["port"])
+
+    def test_icmp_breakdown_uses_the_derived_decoding(self) -> None:
+        result = aggregate_breakdowns(self.ROWS, ["icmp_type_code"])
+        assert result["icmp_type_code"] == [{"value": "type=8/code=0", "hits": 1}]
+
+    def test_rows_missing_the_dimension_are_skipped_not_bucketed_as_unknown(self) -> None:
+        rows = [{"app": "HTTPS"}, {"other": 1}]
+        result = aggregate_breakdowns(rows, ["app"])
+        assert result["app"] == [{"value": "HTTPS", "hits": 1}]
+
+    def test_no_dimensions_yields_an_empty_mapping(self) -> None:
+        assert aggregate_breakdowns(self.ROWS, []) == {}
+
+    def test_no_rows_yields_an_empty_bucket_list_per_dimension(self) -> None:
+        """The dimension key survives so the caller sees it was asked for."""
+        assert aggregate_breakdowns([], ["app"]) == {"app": []}
+
+    def test_ties_are_broken_deterministically_by_value(self) -> None:
+        rows = [{"app": "B"}, {"app": "A"}]
+        result = aggregate_breakdowns(rows, ["app"])
+        assert [b["value"] for b in result["app"]] == ["A", "B"]

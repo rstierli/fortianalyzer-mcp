@@ -30,6 +30,7 @@ from fortianalyzer_mcp.query.groups import (
     LOG_GROUP_SURFACES,
     GroupPlan,
     UnsupportedGroupDimension,
+    aggregate_breakdowns,
     resolve_group_plan,
 )
 from fortianalyzer_mcp.query.shape import (
@@ -49,6 +50,7 @@ __all__ = [
     "GroupPlan",
     "UnsupportedGroupDimension",
     "Vocabulary",
+    "aggregate_breakdowns",
     "canonical_log_field",
     "coerce_value",
     "compile_to_array",
