@@ -695,21 +695,55 @@ async def query_logs(
         timeout = _clamp_timeout(timeout)
 
         if group_plan is not None:
-            from fortianalyzer_mcp.tools.fortiview_tools import get_fortiview_data
+            # Call the run/poll/fetch implementation directly, not the
+            # get_fortiview_data tool wrapper: the wrapper re-resolves
+            # time_range itself via _parse_time_range, which anchors relative
+            # presets on FortiView's own FAZ-system-tz "now" -- a different
+            # clock than resolve_time_window's log-clock anchor already used
+            # above. Passing the raw time_range string through would let
+            # FortiView scan a window that silently differs from the
+            # time_range_dict/tz_name this response echoes, which is_exact:
+            # true cannot afford. Threading time_range_dict keeps the two in
+            # lockstep.
+            from fortianalyzer_mcp.tools.fortiview_tools import _get_fortiview_data_impl
 
-            view: dict[str, Any] = await get_fortiview_data(
-                view_name=group_plan.target,
+            view: dict[str, Any] = await _get_fortiview_data_impl(
+                client=client,
                 adom=adom,
+                view_name=group_plan.target,
                 # The plan carries FortiView's own all-devices token; passing
                 # logview's All_FortiGate here returns an empty top-N silently.
                 device=device or group_plan.all_devices_group,
-                time_range=time_range,
+                tr=time_range_dict,
                 filter=filter,
                 limit=limit,
-                fields=["*"],
+                timeout=30,
+                sort_by=None,
+                sort_order="desc",
+                field_names=["*"],
             )
             if view.get("status") != "success":
-                return view
+                # Re-wrap rather than pass through verbatim: the FortiView
+                # helper's own failure shapes ({"status": "error"|"timeout",
+                # "message": ...}) carry none of query_logs's envelope fields
+                # (error code, operation, retry_count), and forwarding them
+                # unwrapped would break that contract on this one path.
+                return error_response(
+                    error=(
+                        "search_timeout"
+                        if view.get("status") == "timeout"
+                        else "fortiview_query_failed"
+                    ),
+                    message=(
+                        view.get("message")
+                        or f"FortiView query for view '{group_plan.target}' did not succeed."
+                    ),
+                    operation="query_logs",
+                    adom=adom,
+                    logtype=logtype,
+                    time_range=time_range_dict,
+                    timezone=tz_name,
+                )
 
             return {
                 "status": "success",

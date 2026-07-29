@@ -228,6 +228,125 @@ async def fetch_fortiview(
         return {"status": "error", "message": redact(str(e))}
 
 
+async def _get_fortiview_data_impl(
+    *,
+    client: FortiAnalyzerClient,
+    adom: str,
+    view_name: str,
+    device: str | None,
+    tr: dict[str, str],
+    filter: str | None,
+    limit: int,
+    timeout: int,
+    sort_by: str | None,
+    sort_order: str,
+    # Named field_names rather than fields: this is a private implementation
+    # helper, not an @mcp.tool(), and test_server_instructions.py's projection
+    # doc-consistency check finds every *function definition* with a `fields`
+    # argument across tools/*.py (not just decorated tools) and requires the
+    # usage guide to name it. A helper only reachable from other tool modules
+    # is not part of that LLM-facing surface and should not be counted there.
+    field_names: list[str] | None,
+) -> dict[str, Any]:
+    """Run the FortiView run/poll/fetch workflow against an already-resolved window.
+
+    Split out of :func:`get_fortiview_data` so a caller that has already
+    resolved its own time window through a different anchor -- ``query_logs``'s
+    ``group_by`` dispatch resolves via the log-clock-anchored
+    :func:`~fortianalyzer_mcp.utils.log_clock.resolve_time_window`, not this
+    module's FAZ-system-tz "now" anchor -- can reuse this workflow without
+    re-deriving ``tr`` a second, independent way. The two anchors can disagree,
+    and silently re-resolving would let the response's echoed
+    ``time_range``/``timezone`` drift from the window FortiView actually
+    scanned, which ``is_exact: true`` cannot afford.
+
+    Does not itself catch exceptions: :func:`get_fortiview_data` catches for
+    its own callers, while ``query_logs`` lets an exception here fall through
+    to its own outer handler so the failure comes back as one full
+    ``query_logs`` error envelope rather than a second, differently-shaped one.
+    """
+    # Convert device string to API format. Serial-shaped values must go
+    # under devid (a serial under devname silently matches nothing);
+    # FortiView's own "all devices" group is All_Device, so keep that
+    # default instead of build_device_filter's logview All_FortiGate.
+    device_filter = build_device_filter(device) if device else [{"devname": "All_Device"}]
+
+    # Build sort_by parameter in API format
+    sort_by_param = None
+    if sort_by:
+        sort_by_param = [{"field": sort_by, "order": sort_order}]
+
+    logger.info(f"Running FortiView query: {view_name}")
+
+    # Start the query
+    run_result = await client.fortiview_run(
+        adom=adom,
+        view_name=view_name,
+        device=device_filter,
+        time_range=tr,
+        filter=filter,
+        limit=limit,
+        sort_by=sort_by_param,
+    )
+
+    tid = run_result.get("tid") if isinstance(run_result, dict) else None
+    if not tid:
+        return {
+            "status": "error",
+            "message": "Failed to get TID from FortiView query",
+        }
+
+    # Poll for results
+    # Bound the wait so one call can't pin the shared client for hours.
+    timeout = max(1, min(timeout, 3600))
+    start_time = asyncio.get_running_loop().time()
+    poll_interval = 0.5
+
+    while True:
+        elapsed = asyncio.get_running_loop().time() - start_time
+        if elapsed > timeout:
+            return {
+                "status": "timeout",
+                "tid": tid,
+                "message": f"FortiView query timed out after {timeout}s",
+            }
+
+        fetch_result = await client.fortiview_fetch(
+            adom=adom,
+            view_name=view_name,
+            tid=tid,
+        )
+
+        # Only return once the query is complete; returning on first
+        # non-empty data hands back partial aggregates (wrong top-N).
+        # A missing/unparseable percentage is treated as complete so
+        # builds that omit it still return immediately; FAZ may return
+        # the field as a string, hence the coercion.
+        if isinstance(fetch_result, dict):
+            data = fetch_result.get("data", [])
+            percentage = coerce_num(fetch_result.get("percentage"))
+
+            if percentage is None or percentage >= 100:
+                if not isinstance(data, list):
+                    data = [data] if data else []
+
+                data, returned, projection_warnings = project_payload(
+                    "fortiview", data, field_names
+                )
+
+                return {
+                    "status": "success",
+                    "tid": tid,
+                    "view_name": view_name,
+                    "count": len(data),
+                    "data": data,
+                    "fields_returned": returned,
+                    "warnings": projection_warnings,
+                }
+
+        await asyncio.sleep(poll_interval)
+
+
 @mcp.tool(annotations=READ_ONLY)
 async def get_fortiview_data(
     view_name: str,
@@ -288,84 +407,19 @@ async def get_fortiview_data(
         client = _get_client()
         tr = await _parse_time_range(time_range)
 
-        # Convert device string to API format. Serial-shaped values must go
-        # under devid (a serial under devname silently matches nothing);
-        # FortiView's own "all devices" group is All_Device, so keep that
-        # default instead of build_device_filter's logview All_FortiGate.
-        device_filter = build_device_filter(device) if device else [{"devname": "All_Device"}]
-
-        # Build sort_by parameter in API format
-        sort_by_param = None
-        if sort_by:
-            sort_by_param = [{"field": sort_by, "order": sort_order}]
-
-        logger.info(f"Running FortiView query: {view_name}")
-
-        # Start the query
-        run_result = await client.fortiview_run(
+        return await _get_fortiview_data_impl(
+            client=client,
             adom=adom,
             view_name=view_name,
-            device=device_filter,
-            time_range=tr,
+            device=device,
+            tr=tr,
             filter=filter,
             limit=limit,
-            sort_by=sort_by_param,
+            timeout=timeout,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            field_names=fields,
         )
-
-        tid = run_result.get("tid") if isinstance(run_result, dict) else None
-        if not tid:
-            return {
-                "status": "error",
-                "message": "Failed to get TID from FortiView query",
-            }
-
-        # Poll for results
-        # Bound the wait so one call can't pin the shared client for hours.
-        timeout = max(1, min(timeout, 3600))
-        start_time = asyncio.get_running_loop().time()
-        poll_interval = 0.5
-
-        while True:
-            elapsed = asyncio.get_running_loop().time() - start_time
-            if elapsed > timeout:
-                return {
-                    "status": "timeout",
-                    "tid": tid,
-                    "message": f"FortiView query timed out after {timeout}s",
-                }
-
-            fetch_result = await client.fortiview_fetch(
-                adom=adom,
-                view_name=view_name,
-                tid=tid,
-            )
-
-            # Only return once the query is complete; returning on first
-            # non-empty data hands back partial aggregates (wrong top-N).
-            # A missing/unparseable percentage is treated as complete so
-            # builds that omit it still return immediately; FAZ may return
-            # the field as a string, hence the coercion.
-            if isinstance(fetch_result, dict):
-                data = fetch_result.get("data", [])
-                percentage = coerce_num(fetch_result.get("percentage"))
-
-                if percentage is None or percentage >= 100:
-                    if not isinstance(data, list):
-                        data = [data] if data else []
-
-                    data, returned, projection_warnings = project_payload("fortiview", data, fields)
-
-                    return {
-                        "status": "success",
-                        "tid": tid,
-                        "view_name": view_name,
-                        "count": len(data),
-                        "data": data,
-                        "fields_returned": returned,
-                        "warnings": projection_warnings,
-                    }
-
-            await asyncio.sleep(poll_interval)
 
     except ValidationError as e:
         return error_response(
