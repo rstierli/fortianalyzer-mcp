@@ -270,16 +270,6 @@ class TestFetchMoreLogsContract:
         assert r["tid"] == 424242
 
 
-class TestSearchWrapperErrors:
-    async def test_search_traffic_logs_bad_ip_uses_envelope(self) -> None:
-        # Bad srcip fails during filter building, before any client call.
-        r = await log_tools.search_traffic_logs(srcip="not-an-ip")
-
-        assert r["status"] == "error"
-        assert r["error"] == "validation_error"
-        assert r["operation"] == "search_traffic_logs"
-
-
 class TestSevenAndThirtyDayFlows:
     """Prove the existing surface covers first-class 7/30-day investigations."""
 
@@ -320,12 +310,3 @@ class TestSevenAndThirtyDayFlows:
 
         assert r["status"] == "success"
         assert r["logtype"] == logtype
-
-    async def test_search_traffic_logs_7day_denied(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        fake = ContractFaz(page=_rows(2), total=2)
-        _install(monkeypatch, fake)
-
-        r = await log_tools.search_traffic_logs(adom="root", action="deny", time_range="7-day")
-
-        assert r["status"] == "success"
-        assert "action==deny" in (fake.start_calls[0]["filter"] or "")

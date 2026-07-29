@@ -239,11 +239,14 @@ def test_full_mode_registers_the_whole_surface(full_tools: dict[str, Any]) -> No
     wrappers (``get_top_sources``, ``get_top_destinations``,
     ``get_top_applications``, ``get_top_threats``, ``get_top_websites``,
     ``get_top_cloud_applications``, ``get_policy_hits``), each a fixed
-    ``view_name`` call to ``get_fortiview_data`` and nothing else. A tool
+    ``view_name`` call to ``get_fortiview_data`` and nothing else, minus the
+    three retired log-search wrappers (``search_traffic_logs``,
+    ``search_security_logs``, ``search_event_logs``), each a hand-built
+    filter string now expressed as ``filters`` on ``query_logs``. A tool
     added or removed is expected to update this number together with the
     lists above.
     """
-    assert len(full_tools) == 77, f"full mode registered {len(full_tools)} tools"
+    assert len(full_tools) == 74, f"full mode registered {len(full_tools)} tools"
     assert "faz_skill" in full_tools, "skills dispatcher did not register"
 
 

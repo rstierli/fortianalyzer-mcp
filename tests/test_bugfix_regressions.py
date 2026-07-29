@@ -4,8 +4,8 @@ Covers: MCP_ALLOWED_HOSTS env parsing, numeric task-state handling,
 device-filter serial-vs-hostname classification, report custom time windows
 and unknown presets, string progress-percentage coercion, tid-less launches
 returning errors, non-idempotent write retry suppression, negative timezone
-caching, IPS-search unknown totals, policy_id=0 filtering, and the
-search_devices connection-status map.
+caching, IPS-search unknown totals, and the search_devices connection-status
+map.
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ import pytest
 import fortianalyzer_mcp.tools.dvm_tools as dvm_tools
 import fortianalyzer_mcp.tools.fortiview_tools as fortiview_tools
 import fortianalyzer_mcp.tools.ioc_tools as ioc_tools
-import fortianalyzer_mcp.tools.log_tools as log_tools
 import fortianalyzer_mcp.tools.report_tools as report_tools
 import fortianalyzer_mcp.tools.system_tools as system_tools
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
@@ -504,22 +503,6 @@ class TestSearchIpsLogsUnknownTotal:
         assert "warning" in result
 
 
-class TestPolicyIdZero:
-    """policy_id=0 (implicit deny) must produce a policyid filter."""
-
-    async def test_policy_id_zero_included(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        captured: dict[str, Any] = {}
-
-        async def fake_query_logs(**kwargs: Any) -> dict[str, Any]:
-            captured.update(kwargs)
-            return {"status": "success", "logs": [], "count": 0}
-
-        monkeypatch.setattr(log_tools, "query_logs", fake_query_logs)
-        result = await log_tools.search_traffic_logs(policy_id=0)
-        assert result["status"] == "success"
-        assert "policyid==0" in (captured.get("filter") or "")
-
-
 class TestSearchDevicesConnectionStatus:
     """connection_status uses the DVMDB enum and rejects unknown values."""
 
@@ -550,65 +533,3 @@ class TestSearchDevicesConnectionStatus:
         result = await dvm_tools.search_devices(connection_status="online")
         assert result["status"] == "error"
         assert "Invalid connection_status" in result["message"]
-
-
-class TestSearchSecurityLogsSubstringOperator:
-    """``attack contain`` is inert, so attack_name silently matched nothing.
-
-    The logview parser accepts unknown operators and returns zero rows rather
-    than an error, so this tool answered "no such attack" with total
-    confidence. Measured on 7.6.6 over one fixed hour of traffic (289391 rows):
-    ``service contain DNS`` -> 0 rows, ``service like "%DNS%"`` -> 120671, and a
-    nonsense ``service zzqq DNS`` -> 0, which is what proves it inert rather
-    than merely strict.
-    """
-
-    async def test_attack_name_emits_like_with_wildcards(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        captured: dict[str, Any] = {}
-
-        async def fake_query_logs(**kwargs: Any) -> dict[str, Any]:
-            captured.update(kwargs)
-            return {"status": "success", "logs": [], "count": 0}
-
-        monkeypatch.setattr(log_tools, "query_logs", fake_query_logs)
-        result = await log_tools.search_security_logs(attack_name="Botnet")
-
-        assert result["status"] == "success"
-        assert captured["filter"] == 'attack like "%Botnet%"'
-        # The inert spelling must not survive anywhere in the expression.
-        assert "contain" not in captured["filter"]
-
-    async def test_the_wildcards_are_inside_the_escaped_literal(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The pattern is sanitised as one unit, so a quote in the attack name
-        cannot terminate the clause and leave the wildcards bare."""
-        captured: dict[str, Any] = {}
-
-        async def fake_query_logs(**kwargs: Any) -> dict[str, Any]:
-            captured.update(kwargs)
-            return {"status": "success", "logs": [], "count": 0}
-
-        monkeypatch.setattr(log_tools, "query_logs", fake_query_logs)
-        await log_tools.search_security_logs(attack_name='a" or 1==1 or "')
-
-        expression = captured["filter"]
-        assert expression == 'attack like "%a\\" or 1==1 or \\"%"'
-        # Exactly one quoted literal: every inner quote is escaped.
-        assert expression.count('"') - expression.count('\\"') == 2
-
-    async def test_attack_name_composes_with_the_other_narrow_filters(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        captured: dict[str, Any] = {}
-
-        async def fake_query_logs(**kwargs: Any) -> dict[str, Any]:
-            captured.update(kwargs)
-            return {"status": "success", "logs": [], "count": 0}
-
-        monkeypatch.setattr(log_tools, "query_logs", fake_query_logs)
-        await log_tools.search_security_logs(attack_name="Botnet", severity="critical")
-
-        assert captured["filter"] == 'attack like "%Botnet%" and severity==critical'
