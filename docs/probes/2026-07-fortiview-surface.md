@@ -1,4 +1,4 @@
-# FortiView surface, measured
+# FortiView surface — NOT measured (conservative assumptions)
 
 **Probe Status: NOT RUN**
 
@@ -87,6 +87,24 @@ policy-line
 ```
 
 Entries in the field map (such as any per-view sort defaults) must limit themselves to views in this set.
+
+### Which log population each view serves (Task 2, revised)
+
+Also not measured. Every FortiView view aggregates its own log source, so the *view* — not the caller's `logtype` — decides the population a `group_by` top-N describes. `LOG_GROUP_SURFACES` therefore records a `serves` set per entry and `resolve_group_plan` refuses a logtype the view is not known to serve, naming `sample_by` (which works for every logtype).
+
+The `serves` sets are the conservative reading of each view's documented purpose in this repo, **not** probe results:
+
+| view | serves | why, from this repo's own text |
+| --- | --- | --- |
+| top-sources, top-destinations | traffic | traffic volume per address |
+| top-applications | traffic | "top applications by bandwidth", and `get_fortiview_data`'s docstring records that app-ctrl logs carry no byte counts, so a bandwidth ranking cannot be reading them |
+| policy-hits | traffic | per-firewall-policy hit counts |
+| top-countries | traffic | destination geo of traffic |
+| top-websites | webfilter | visited sites |
+| top-threats | attack | detected threats |
+| top-cloud-applications | app-ctrl | Shadow IT; deliberately left unmapped — no dimension resolves to it unambiguously against top-applications |
+
+Where a view's real source is broader than this (FortiAnalyzer's threat views may well aggregate several security logtypes), the effect of being wrong here is a refusal, not a wrong answer. Widening a `serves` set is the change a probe would license; narrowing one needs no evidence.
 
 ### Per-view sort defaults (Task 2)
 

@@ -151,9 +151,17 @@ guarantee:
   sample_by=["port"]      bounded. A row scan, labelled as one.
   count_only=True         just the total.
 
-`group_by` only accepts dimensions FortiAnalyzer aggregates natively: srcip,
-dstip, app, hostname, attack, policyid, dstcountry. Anything else is an error
-that names sample_by -- there is no silent fallback, because a top-N over a
+`group_by` only accepts dimensions FortiAnalyzer aggregates natively, and each
+one is tied to the logtype whose logs its native surface reads:
+
+  logtype="traffic"     srcip, dstip, app, policyid, dstcountry
+  logtype="webfilter"   hostname, website
+  logtype="attack"      attack, threat
+
+Any other pairing is an error that names sample_by -- including a dimension
+that works under a *different* logtype, because each surface aggregates its own
+log source and answering across that boundary would describe a population the
+caller did not ask about. There is no silent fallback, because a top-N over a
 sample reads as fact.
 
 `sample_by` takes a list, because one scan yields several independent

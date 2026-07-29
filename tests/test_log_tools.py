@@ -571,6 +571,36 @@ class TestQueryLogsAggregationModes:
         assert result["error"] == "unsupported_group_dimension"
         assert "sample_by" in result["message"]
 
+    async def test_a_dimension_whose_view_reads_other_logs_is_refused(self) -> None:
+        """logtype="attack", group_by="srcip" dispatched to top-sources -- a
+        traffic-log view -- and returned is_exact: true beside an echoed
+        logtype: "attack". Exact counts, wrong population."""
+        result = await log_tools.query_logs(logtype="attack", group_by="srcip")
+
+        assert result["status"] == "error"
+        assert result["error"] == "group_dimension_logtype_mismatch"
+        assert "sample_by=['srcip']" in result["message"]
+        assert "sample_by=['srcip']" in result["recommendation"]
+        assert "top-sources" in result["message"]
+        # No group answer of any kind came back with the refusal.
+        assert "groups" not in result
+        assert "is_exact" not in result
+
+    async def test_the_two_group_refusals_carry_different_codes(self) -> None:
+        """'never groupable' and 'not groupable for this logtype' are
+        different facts; only the second is fixed by changing logtype."""
+        never = await log_tools.query_logs(logtype="attack", group_by="sentbyte")
+        wrong_logtype = await log_tools.query_logs(logtype="attack", group_by="srcip")
+
+        assert never["error"] == "unsupported_group_dimension"
+        assert wrong_logtype["error"] == "group_dimension_logtype_mismatch"
+
+    async def test_a_logtype_no_view_serves_is_refused_for_every_dimension(self) -> None:
+        for dimension in ("srcip", "dstip", "app", "hostname", "attack", "policyid"):
+            result = await log_tools.query_logs(logtype="event", group_by=dimension)
+            assert result["status"] == "error", dimension
+            assert "sample_by" in result["message"], dimension
+
     # Include this test ONLY if Task 0 put you on the refusal branch -- i.e. the
     # probe found filters silently ignored for the target view, or you had no
     # appliance and took the conservative fallback. If Task 0 proved the view
@@ -673,6 +703,29 @@ class TestQueryLogsGroupByDispatch:
         assert calls[0]["tr"] == result["time_range"]
         assert calls[0]["device"] == "All_Device"
         assert calls[0]["field_names"] == ["*"]
+
+    async def test_a_logtype_specific_dimension_dispatches_under_its_own_logtype(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The population boundary refuses pairings; it must not break the
+        pairings that are correct."""
+        self._install_client(monkeypatch)
+        calls: list[dict[str, object]] = []
+
+        async def fake_impl(**kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return {"status": "success", "data": [{"hostname": "example.test", "sessions": 2}]}
+
+        monkeypatch.setattr(fortiview_tools, "_get_fortiview_data_impl", fake_impl)
+
+        result = await log_tools.query_logs(
+            logtype="webfilter", time_range=self.CUSTOM_RANGE, group_by="hostname"
+        )
+
+        assert result["status"] == "success"
+        assert result["group_source"] == "fortiview:top-websites"
+        assert result["is_exact"] is True
+        assert calls[0]["view_name"] == "top-websites"
 
     async def test_group_by_dispatch_failure_gets_the_full_query_logs_envelope(
         self, monkeypatch: pytest.MonkeyPatch

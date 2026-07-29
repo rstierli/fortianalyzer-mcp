@@ -8,12 +8,29 @@ top-N over a 1000-row sample reads as fact and gets quoted as fact. The refusal
 names ``sample_by``, which makes exactly that trade-off explicitly and labels
 the result.
 
+A FortiView view aggregates *its own* log source. The view, not the caller's
+``logtype``, therefore decides the population the top-N describes: dispatching
+``logtype="attack", group_by="srcip"`` to ``top-sources`` would answer a
+question about traffic logs and label it exact under an echoed
+``logtype: "attack"``. So every entry in :data:`LOG_GROUP_SURFACES` records the
+log population its view serves, and a dimension whose view serves a different
+population is refused rather than answered. The populations encoded here are
+the ones defensible from each view's documented purpose in this repo (the
+traffic views serve traffic; ``top-threats`` attack; ``top-websites``
+webfilter) -- no live probe has confirmed a view's source, so where a view's
+source is genuinely uncertain it is treated as serving only its evident
+logtype. ``sample_by`` covers every other logtype/dimension pair, bounded and
+labelled as such, which is what each refusal names.
+
 Three translations the plan carries, each of which silently returns zero rows
 if missed:
 
 * FortiView's all-devices group is ``All_Device``; logview's is
   ``All_FortiGate``. Forwarding the logview default to a view yields an empty
-  top-N with no error.
+  top-N with no error. :func:`~fortianalyzer_mcp.tools.fortiview_tools.\
+build_fortiview_device_filter` performs that translation at the FortiView
+  boundary, so both the ``group_by`` dispatch and ``get_fortiview_data``
+  itself emit ``[{"devname": "All_Device"}]``.
 * The compiled filter has to be re-emitted against the view's own filterable
   vocabulary, which is not provably identical to logview's. Until that is
   verified live, the caller of this module is expected to refuse a filter on a
@@ -38,17 +55,51 @@ from fortianalyzer_mcp.utils.errors import ValidationError
 #: FortiView's spelling of "every device". Logview says All_FortiGate.
 FORTIVIEW_ALL_DEVICES = "All_Device"
 
-#: Log dimension -> the FortiView view that aggregates it natively.
-LOG_GROUP_SURFACES: Mapping[str, str] = {
-    "srcip": "top-sources",
-    "dstip": "top-destinations",
-    "app": "top-applications",
-    "hostname": "top-websites",
-    "website": "top-websites",
-    "attack": "top-threats",
-    "threat": "top-threats",
-    "policyid": "policy-hits",
-    "dstcountry": "top-countries",
+
+@dataclass(frozen=True)
+class LogGroupSurface:
+    """One FortiView view, and the log population it aggregates.
+
+    ``serves`` is the whole point: a view's top-N describes the logs that view
+    reads, so requesting it for a different ``logtype`` produces a confident
+    answer about the wrong population. It is a conservative claim, not a
+    measurement -- see the module docstring and
+    ``docs/probes/2026-07-fortiview-surface.md``.
+    """
+
+    #: The FortiView view name; must be in ``VALID_FORTIVIEW_VIEWS``.
+    view: str
+    #: The logtypes whose population this view is defensibly known to serve.
+    serves: frozenset[str]
+
+
+#: Log dimension -> the FortiView view that aggregates it natively, and the log
+#: population that view serves.
+#:
+#: Why each ``serves`` is what it is, from the views' documented purpose here:
+#:   top-sources / top-destinations  traffic volume per address -> traffic
+#:   top-applications                "top applications by bandwidth"; app-ctrl
+#:                                   logs carry no byte counts (see
+#:                                   get_fortiview_data's own docstring), so a
+#:                                   bandwidth ranking reads traffic logs
+#:   policy-hits                     per-firewall-policy hit counts -> traffic
+#:   top-countries                   destination geo of traffic -> traffic
+#:   top-websites                    visited sites -> webfilter
+#:   top-threats                     detected threats -> attack
+#: ``top-cloud-applications`` (app-ctrl, Shadow IT) is deliberately unmapped:
+#: no dimension resolves to it unambiguously, and guessing between it and
+#: top-applications for ``group_by="app"`` is exactly the confusion this table
+#: exists to prevent. Reach it through get_fortiview_data by name.
+LOG_GROUP_SURFACES: Mapping[str, LogGroupSurface] = {
+    "srcip": LogGroupSurface("top-sources", frozenset({"traffic"})),
+    "dstip": LogGroupSurface("top-destinations", frozenset({"traffic"})),
+    "app": LogGroupSurface("top-applications", frozenset({"traffic"})),
+    "hostname": LogGroupSurface("top-websites", frozenset({"webfilter"})),
+    "website": LogGroupSurface("top-websites", frozenset({"webfilter"})),
+    "attack": LogGroupSurface("top-threats", frozenset({"attack"})),
+    "threat": LogGroupSurface("top-threats", frozenset({"attack"})),
+    "policyid": LogGroupSurface("policy-hits", frozenset({"traffic"})),
+    "dstcountry": LogGroupSurface("top-countries", frozenset({"traffic"})),
 }
 
 #: Alert dimensions served by /eventmgmt/adom/{adom}/alert-incident/stats.
@@ -66,15 +117,72 @@ class UnsupportedGroupDimension(ValidationError):
     envelope without re-parsing the message.
     """
 
-    def __init__(self, dimension: str, supported: list[str], vocabulary: str) -> None:
+    def __init__(
+        self,
+        dimension: str,
+        supported: list[str],
+        vocabulary: str,
+        detail: str = "",
+    ) -> None:
         self.dimension = dimension
         self.supported = supported
-        valid = ", ".join(supported)
+        self.vocabulary = vocabulary
+        if supported:
+            works = (
+                f"Dimensions the appliance can group exactly for {vocabulary}: "
+                f"{', '.join(supported)}. "
+            )
+        else:
+            # An empty list is a real answer for logtypes no FortiView view
+            # serves (event, dns, dlp, ...). Saying "the ones that work: " and
+            # then nothing reads as a bug in the refusal.
+            works = f"No dimension can be grouped exactly for {vocabulary}. "
         super().__init__(
             f"group_by='{dimension}' has no exact surface for {vocabulary}. "
-            f"Dimensions the appliance can group exactly: {valid}. "
-            f"For any other dimension use sample_by=['{dimension}'], which scans a "
-            "bounded sample and labels the result as one."
+            + (f"{detail} " if detail else "")
+            + works
+            + f"Use sample_by=['{dimension}'] instead: it scans a bounded sample, "
+            "works for every logtype, and labels the result as one."
+        )
+
+
+class GroupSurfacePopulationMismatch(UnsupportedGroupDimension):
+    """The dimension has a native view, but that view reads other logs.
+
+    Every FortiView view aggregates its own log source, so dispatching
+    ``logtype="attack", group_by="srcip"`` to ``top-sources`` would return a
+    ranking of *traffic* sources under an echoed ``logtype: "attack"`` and
+    ``is_exact: true`` -- exact about a population nobody asked for. Refusing
+    is the only honest answer available without a live probe of each view's
+    source.
+
+    Subclasses :class:`UnsupportedGroupDimension` so one ``except`` still
+    catches both, while ``isinstance`` lets a tool emit a distinct machine
+    code: "not groupable at all" and "not groupable for *this* logtype" are
+    different facts, and only the second is fixed by changing ``logtype``.
+    """
+
+    def __init__(
+        self,
+        dimension: str,
+        canonical: str,
+        view: str,
+        serves: frozenset[str],
+        supported: list[str],
+        vocabulary: str,
+    ) -> None:
+        self.view = view
+        self.serves = serves
+        super().__init__(
+            dimension,
+            supported,
+            vocabulary,
+            detail=(
+                f"The only exact surface for '{canonical}' is the FortiView view "
+                f"'{view}', which aggregates {'/'.join(sorted(serves))} logs -- a "
+                f"different population than logtype='{vocabulary}', so its top-N "
+                "would not answer what was asked."
+            ),
         )
 
 
@@ -93,11 +201,21 @@ class GroupPlan:
 
 
 def _supported_for(vocabulary: str) -> list[str]:
+    """The dimensions groupable exactly for one vocabulary.
+
+    For a logtype this is not the whole dimension table: a view only answers
+    for the population it reads, so the list is filtered by ``serves`` and can
+    legitimately be empty.
+    """
     if vocabulary == "alert":
         return sorted(ALERT_GROUP_DIMENSIONS)
     if vocabulary == "incident":
         return sorted(INCIDENT_GROUP_DIMENSIONS)
-    return sorted(LOG_GROUP_SURFACES)
+    return sorted(
+        dimension
+        for dimension, surface in LOG_GROUP_SURFACES.items()
+        if vocabulary in surface.serves
+    )
 
 
 def resolve_group_plan(vocabulary: str, dimension: str) -> GroupPlan:
@@ -111,9 +229,12 @@ def resolve_group_plan(vocabulary: str, dimension: str) -> GroupPlan:
         The plan an executor can act on.
 
     Raises:
-        UnsupportedGroupDimension: when no native surface exists. The message
-            names ``sample_by`` as the way to ask the same question with an
-            honest label.
+        UnsupportedGroupDimension: when no native surface exists for this
+            vocabulary. The message names ``sample_by`` as the way to ask the
+            same question with an honest label.
+        GroupSurfacePopulationMismatch: a subclass of the above, raised when
+            the dimension *is* mapped but only to a view that aggregates a
+            different log population than ``vocabulary``.
     """
     # Resolve aliases first so source_ip and srcip are the same question. An
     # unknown name on an incomplete vocabulary passes through with a warning
@@ -133,10 +254,21 @@ def resolve_group_plan(vocabulary: str, dimension: str) -> GroupPlan:
             return GroupPlan(dimension=canonical, surface="incident_stats", target=canonical)
         raise UnsupportedGroupDimension(dimension, _supported_for("incident"), "incidents")
 
-    view = LOG_GROUP_SURFACES.get(canonical)
-    if view is None:
+    surface = LOG_GROUP_SURFACES.get(canonical)
+    if surface is None:
         raise UnsupportedGroupDimension(dimension, _supported_for(vocabulary), vocabulary)
-    return GroupPlan(dimension=canonical, surface="fortiview", target=view)
+    if vocabulary not in surface.serves:
+        # Mapped, but to a view that reads other logs. Answering would echo the
+        # caller's logtype over the wrong population under is_exact: true.
+        raise GroupSurfacePopulationMismatch(
+            dimension,
+            canonical,
+            surface.view,
+            surface.serves,
+            _supported_for(vocabulary),
+            vocabulary,
+        )
+    return GroupPlan(dimension=canonical, surface="fortiview", target=surface.view)
 
 
 def aggregate_breakdowns(

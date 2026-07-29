@@ -6,31 +6,36 @@ import pytest
 
 from fortianalyzer_mcp.query.groups import (
     LOG_GROUP_SURFACES,
+    GroupSurfacePopulationMismatch,
     UnsupportedGroupDimension,
     aggregate_breakdowns,
     resolve_group_plan,
 )
 
+#: The whole dimension table, as (logtype, dimension, view). A view aggregates
+#: one log source, so the logtype is part of the key, not decoration -- see
+#: TestPopulationBoundary for what the other pairings do.
+DIMENSION_TABLE = [
+    ("traffic", "srcip", "top-sources"),
+    ("traffic", "dstip", "top-destinations"),
+    ("traffic", "app", "top-applications"),
+    ("traffic", "policyid", "policy-hits"),
+    ("traffic", "dstcountry", "top-countries"),
+    ("webfilter", "hostname", "top-websites"),
+    ("webfilter", "website", "top-websites"),
+    ("attack", "attack", "top-threats"),
+    ("attack", "threat", "top-threats"),
+]
+
 
 class TestLogDimensions:
     """Every log group_by resolves to a FortiView view or refuses."""
 
-    @pytest.mark.parametrize(
-        "dimension,view",
-        [
-            ("srcip", "top-sources"),
-            ("dstip", "top-destinations"),
-            ("app", "top-applications"),
-            ("hostname", "top-websites"),
-            ("website", "top-websites"),
-            ("attack", "top-threats"),
-            ("threat", "top-threats"),
-            ("policyid", "policy-hits"),
-            ("dstcountry", "top-countries"),
-        ],
-    )
-    def test_dimension_maps_to_its_native_view(self, dimension: str, view: str) -> None:
-        plan = resolve_group_plan("traffic", dimension)
+    @pytest.mark.parametrize("logtype,dimension,view", DIMENSION_TABLE)
+    def test_dimension_maps_to_its_native_view(
+        self, logtype: str, dimension: str, view: str
+    ) -> None:
+        plan = resolve_group_plan(logtype, dimension)
         assert plan.surface == "fortiview"
         assert plan.target == view
 
@@ -49,8 +54,92 @@ class TestLogDimensions:
     def test_every_mapped_view_is_a_view_the_repo_accepts(self) -> None:
         from fortianalyzer_mcp.utils.validation import VALID_FORTIVIEW_VIEWS
 
-        for dimension, view in LOG_GROUP_SURFACES.items():
-            assert view in VALID_FORTIVIEW_VIEWS, f"{dimension} maps to unknown view {view}"
+        for dimension, surface in LOG_GROUP_SURFACES.items():
+            assert surface.view in VALID_FORTIVIEW_VIEWS, (
+                f"{dimension} maps to unknown view {surface.view}"
+            )
+
+    def test_every_mapped_surface_serves_a_real_logtype(self) -> None:
+        """A serves entry naming a logtype the server rejects is dead code:
+        the pairing could never be requested, so the dimension would look
+        supported and never resolve."""
+        from fortianalyzer_mcp.utils.validation import VALID_LOG_TYPES
+
+        for dimension, surface in LOG_GROUP_SURFACES.items():
+            assert surface.serves, f"{dimension} serves nothing"
+            unknown = surface.serves - VALID_LOG_TYPES
+            assert not unknown, f"{dimension} serves unknown logtypes {sorted(unknown)}"
+
+    def test_the_table_covers_every_mapped_dimension(self) -> None:
+        """DIMENSION_TABLE is the parametrisation above; a dimension added to
+        the map without a row here would be untested."""
+        assert {row[1] for row in DIMENSION_TABLE} == set(LOG_GROUP_SURFACES)
+
+
+class TestPopulationBoundary:
+    """A view aggregates its own log source, so logtype decides nothing.
+
+    ``logtype="attack", group_by="srcip"`` used to dispatch to
+    ``fortiview:top-sources`` -- a traffic-log view -- and return
+    ``is_exact: true`` beside an echoed ``logtype: "attack"``. The counts were
+    real; they just described a population nobody asked about, which is the
+    one failure ``group_by``'s exactness promise cannot survive.
+    """
+
+    def test_a_dimension_is_refused_for_a_logtype_its_view_does_not_serve(self) -> None:
+        with pytest.raises(GroupSurfacePopulationMismatch):
+            resolve_group_plan("attack", "srcip")
+
+    def test_that_refusal_names_sample_by(self) -> None:
+        with pytest.raises(GroupSurfacePopulationMismatch) as exc:
+            resolve_group_plan("attack", "srcip")
+        assert "sample_by=['srcip']" in str(exc.value)
+
+    def test_that_refusal_says_which_population_the_view_serves(self) -> None:
+        """Without this the caller cannot tell a typo from a boundary."""
+        with pytest.raises(GroupSurfacePopulationMismatch) as exc:
+            resolve_group_plan("attack", "srcip")
+        message = str(exc.value)
+        assert "top-sources" in message
+        assert "traffic" in message
+
+    def test_that_refusal_carries_the_view_and_its_population(self) -> None:
+        with pytest.raises(GroupSurfacePopulationMismatch) as exc:
+            resolve_group_plan("attack", "srcip")
+        assert exc.value.view == "top-sources"
+        assert exc.value.serves == frozenset({"traffic"})
+
+    def test_it_is_still_an_unsupported_group_dimension(self) -> None:
+        """One ``except`` in query_logs catches both refusals."""
+        with pytest.raises(UnsupportedGroupDimension):
+            resolve_group_plan("attack", "srcip")
+
+    @pytest.mark.parametrize("logtype,dimension,view", DIMENSION_TABLE)
+    def test_every_other_logtype_is_refused_for_every_dimension(
+        self, logtype: str, dimension: str, view: str
+    ) -> None:
+        """The whole table, per logtype: exactly the mapped logtype resolves."""
+        for other in ("traffic", "webfilter", "attack", "event", "app-ctrl", "dns"):
+            if other in LOG_GROUP_SURFACES[dimension].serves:
+                assert resolve_group_plan(other, dimension).target == view
+                continue
+            with pytest.raises(UnsupportedGroupDimension):
+                resolve_group_plan(other, dimension)
+
+    def test_a_logtype_no_view_serves_can_group_nothing_and_says_so(self) -> None:
+        """An empty supported set is an answer, not a broken message."""
+        with pytest.raises(UnsupportedGroupDimension) as exc:
+            resolve_group_plan("event", "srcip")
+        assert exc.value.supported == []
+        assert "No dimension can be grouped exactly for event" in str(exc.value)
+        assert "sample_by" in str(exc.value)
+
+    def test_the_supported_set_in_a_refusal_is_scoped_to_the_logtype(self) -> None:
+        """Listing traffic's dimensions in an attack refusal sends the caller
+        straight back into the same wall."""
+        with pytest.raises(UnsupportedGroupDimension) as exc:
+            resolve_group_plan("attack", "sentbyte")
+        assert sorted(exc.value.supported) == ["attack", "threat"]
 
 
 class TestAlertAndIncidentDimensions:

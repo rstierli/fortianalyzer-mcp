@@ -29,6 +29,8 @@ from fortianalyzer_mcp.query.filters import (
 from fortianalyzer_mcp.query.groups import (
     LOG_GROUP_SURFACES,
     GroupPlan,
+    GroupSurfacePopulationMismatch,
+    LogGroupSurface,
     UnsupportedGroupDimension,
     aggregate_breakdowns,
     resolve_group_plan,
@@ -48,6 +50,8 @@ __all__ = [
     "FilterCondition",
     "FilterOp",
     "GroupPlan",
+    "GroupSurfacePopulationMismatch",
+    "LogGroupSurface",
     "UnsupportedGroupDimension",
     "Vocabulary",
     "aggregate_breakdowns",

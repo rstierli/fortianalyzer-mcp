@@ -12,6 +12,7 @@ from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.query.filters import FilterCondition, compile_to_string
 from fortianalyzer_mcp.query.groups import (
     GroupPlan,
+    GroupSurfacePopulationMismatch,
     UnsupportedGroupDimension,
     aggregate_breakdowns,
     resolve_group_plan,
@@ -483,9 +484,16 @@ async def query_logs(
             Example: fields=["srcip", "dstip", "action", "sentbyte"]
         group_by: Return exact per-value counts for one dimension instead of
             rows. Only dimensions the appliance aggregates natively are
-            accepted (srcip, dstip, app, hostname, attack, policyid,
-            dstcountry); anything else is an error naming sample_by. The
-            answer is exact because the appliance counted it.
+            accepted, and each is tied to the logtype whose logs its native
+            surface actually reads:
+            - logtype="traffic": srcip, dstip, app, policyid, dstcountry
+            - logtype="webfilter": hostname, website
+            - logtype="attack": attack, threat
+            Any other pairing is an error naming sample_by, including a
+            dimension that works under a different logtype -- each surface
+            aggregates its own log source, so answering across that boundary
+            would describe a different population than the logtype asked for.
+            The answer is exact because the appliance counted it.
         sample_by: Return per-value counts for one or more dimensions from a
             bounded row scan. Unlike group_by this is a *sample*, and the
             response says so: check is_exact and analysis_mode before quoting
@@ -627,8 +635,16 @@ async def query_logs(
             try:
                 group_plan = resolve_group_plan(logtype, group_by)
             except UnsupportedGroupDimension as e:
+                # Two distinct facts, two codes: the dimension has no exact
+                # surface anywhere, or it has one that reads a different log
+                # population than this logtype. Only the second is fixed by
+                # changing logtype, and both are fixed by sample_by.
                 return error_response(
-                    error="unsupported_group_dimension",
+                    error=(
+                        "group_dimension_logtype_mismatch"
+                        if isinstance(e, GroupSurfacePopulationMismatch)
+                        else "unsupported_group_dimension"
+                    ),
                     message=str(e),
                     operation="query_logs",
                     adom=adom,
