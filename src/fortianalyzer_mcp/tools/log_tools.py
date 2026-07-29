@@ -494,6 +494,13 @@ async def query_logs(
             aggregates its own log source, so answering across that boundary
             would describe a different population than the logtype asked for.
             The answer is exact because the appliance counted it.
+            Cannot be combined with `filter`/`filters`: this server has not
+            verified that the underlying view applies a logview filter rather
+            than ignoring it, and a silently ignored filter would return an
+            unfiltered top-N under is_exact=true. Use sample_by for a filtered
+            breakdown.
+            `device` is honoured; any all-devices token ("All_FortiGate",
+            "All_Device", ...) is translated to the one the view understands.
         sample_by: Return per-value counts for one or more dimensions from a
             bounded row scan. Unlike group_by this is a *sample*, and the
             response says so: check is_exact and analysis_mode before quoting
@@ -502,12 +509,41 @@ async def query_logs(
         count_only: Return just the total row count for the query.
         top_n: Buckets per dimension for sample_by (default 10). 0 returns
             every bucket.
-        limit: Maximum logs to return (default: 100, max: 1000)
+        limit: Maximum logs to return (default: 100, max: 1000). With group_by
+            it caps the number of *groups* instead, since no rows are returned:
+            the response reports `group_limit` and `groups_truncated` so a cut
+            ranking is visible. With sample_by it caps the rows scanned (and so
+            drives is_exact); use top_n to cap the buckets reported.
         offset: Offset for pagination (default: 0)
         timeout: Search timeout in seconds (default: 60)
 
     Returns:
-        dict: Log query results with keys:
+        dict: The shape depends on which aggregation was asked for.
+
+        With group_by (exact, appliance-aggregated):
+            - status, adom, logtype, filter, time_range, timezone, warnings
+            - group_by: the canonical dimension actually grouped on
+            - groups: the appliance's own rows for that dimension
+            - group_source: "fortiview:<view>" — which surface counted it
+            - is_exact: always true here; group_by refuses anything it cannot
+              answer exactly rather than falling back to a sample
+            - group_limit, groups_truncated: the cap `limit` set, and whether
+              it bound (more groups may exist; the counts shown are still exact)
+
+        With sample_by (bounded, one row scan):
+            - status, adom, logtype, filter, time_range, timezone, warnings
+            - sample_by: the dimensions requested
+            - breakdowns: {dimension: [{"value", "hits"}, ...]}, top_n each
+            - is_exact / analysis_mode ("exact" | "bounded_sample"): read these
+              before quoting any number
+            - total_hits, total_hits_is_known, total_hit_source, observed_hits
+            - log_limit_per_slice, slices_scanned, truncated_slices, recommendation
+
+        With count_only:
+            - status, adom, logtype, filter, time_range, timezone, warnings
+            - total, total_is_known, count_source
+
+        With no aggregation, the rows shape:
             - status: "success" or "error"
             - count: Number of logs returned in this page
             - total: The handle's first-page Baseline total (int), or None if unknown.
@@ -761,20 +797,42 @@ async def query_logs(
                     timezone=tz_name,
                 )
 
+            groups = view.get("data", [])
+            if not isinstance(groups, list):
+                groups = [groups] if groups else []
+
+            # `limit` is the row limit on the rows path; here it is the view's
+            # top-N cap, so a full-length list means the ranking was cut off.
+            # This does NOT weaken is_exact: every count returned is the
+            # appliance's own exact count for that group. What may be missing
+            # is *groups*, not accuracy -- so it gets its own flag rather than
+            # a downgrade of the exactness claim.
+            groups_truncated = len(groups) >= limit
+            group_warnings = list(filter_warnings)
+            if groups_truncated:
+                group_warnings.append(
+                    f"Returned the top {limit} groups, which is the cap `limit` set; "
+                    "further groups may exist below them. Raise limit (max 1000) for a "
+                    "longer ranking. Each count shown is still exact."
+                )
+
             return {
                 "status": "success",
                 "adom": adom,
                 "logtype": logtype,
                 "group_by": group_plan.dimension,
-                "groups": view.get("data", []),
+                "groups": groups,
                 "group_source": f"fortiview:{group_plan.target}",
                 # The appliance aggregated this. That is the whole reason
                 # group_by refuses dimensions with no native surface.
                 "is_exact": True,
+                # How many groups were asked for, and whether that cap bound.
+                "group_limit": limit,
+                "groups_truncated": groups_truncated,
                 "time_range": time_range_dict,
                 "timezone": tz_name,
                 "filter": filter,
-                "warnings": filter_warnings,
+                "warnings": group_warnings,
             }
 
         # Run this page as a self-contained search (FAZ tids are single-use).

@@ -404,7 +404,20 @@ async def get_fortiview_data(
         filter: Filter expression (optional). Examples:
             - "srcintf!=wan1" - Exclude specific interface
             - "bandwidth>0" - Only entries with bandwidth
-        limit: Maximum results (default: 20)
+            CAVEAT: an unfiltered view is exact, a filtered one is not
+            verified. This server has not probed whether each view applies a
+            filter or silently ignores it, and FortiAnalyzer does not reject
+            filter fields it does not know
+            (docs/probes/2026-07-fortiview-surface.md). A silently ignored
+            filter returns an unfiltered top-N that looks exact. When the
+            answer must be filtered, prefer
+            query_logs(sample_by=[...], filters=[...]), which applies the
+            filter and labels its result as a bounded sample. This is also why
+            query_logs(group_by=...) refuses a filter outright rather than
+            forwarding it here.
+        limit: Maximum results (default: 20). This caps the *groups* the view
+            ranks; a full-length list means the ranking was cut off, not that
+            the counts are wrong.
         timeout: Maximum wait time in seconds (default: 30)
         sort_by: Sort field (optional). Common fields:
             - "bandwidth": Sort by total bytes

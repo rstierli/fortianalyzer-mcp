@@ -731,6 +731,49 @@ class TestQueryLogsGroupByDispatch:
         assert result["is_exact"] is True
         assert calls[0]["view_name"] == "top-websites"
 
+    async def test_a_full_length_ranking_is_flagged_rather_than_silently_capped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`limit` doubles as the top-N cap here, so a full list may be cut."""
+        self._install_client(monkeypatch)
+
+        async def fake_impl(**kwargs: object) -> dict[str, object]:
+            return {
+                "status": "success",
+                "data": [{"srcip": f"10.0.0.{n}", "sessions": 10 - n} for n in range(3)],
+            }
+
+        monkeypatch.setattr(fortiview_tools, "_get_fortiview_data_impl", fake_impl)
+
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, group_by="srcip", limit=3
+        )
+
+        assert result["group_limit"] == 3
+        assert result["groups_truncated"] is True
+        assert any("top 3 groups" in w for w in result["warnings"])
+        # The cap hides groups, not accuracy: every count returned is still
+        # the appliance's own.
+        assert result["is_exact"] is True
+
+    async def test_a_short_ranking_is_not_flagged_as_truncated(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._install_client(monkeypatch)
+
+        async def fake_impl(**kwargs: object) -> dict[str, object]:
+            return {"status": "success", "data": [{"srcip": "10.0.0.1", "sessions": 4}]}
+
+        monkeypatch.setattr(fortiview_tools, "_get_fortiview_data_impl", fake_impl)
+
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, group_by="srcip", limit=50
+        )
+
+        assert result["groups_truncated"] is False
+        assert result["group_limit"] == 50
+        assert not any("groups" in w for w in result["warnings"])
+
     async def test_group_by_dispatch_failure_gets_the_full_query_logs_envelope(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -125,7 +125,7 @@ Which vocabularies are curated is not uniform, and the response says which
 case you got:
 
 - Curated today: the traffic/event/attack/virus/webfilter/app-ctrl/dns
-  logtypes, alerts, incidents, UEBA endpoints and end-users, devices, tasks.
+  logtypes, alerts, incidents, UEBA endpoints and end-users, devices.
   Omitting `fields` trims.
 - NOT curated: uncommon logtypes (voip, icap, dlp, ...), every FortiView view,
   and report history -- there is no verified catalogue of what those emit, so
@@ -164,6 +164,11 @@ log source and answering across that boundary would describe a population the
 caller did not ask about. There is no silent fallback, because a top-N over a
 sample reads as fact.
 
+`group_by` also cannot be combined with `filter`/`filters`: whether its
+underlying view applies a logview filter or silently ignores it is unverified,
+and an ignored filter would return an unfiltered top-N labelled exact. Use
+sample_by for a filtered breakdown.
+
 `sample_by` takes a list, because one scan yields several independent
 breakdowns (not a cross-tab). It accepts derived dimensions too: "port" is
 proto/dstport, and "icmp_type_code" decodes the ICMP type and code that
@@ -181,10 +186,13 @@ query budget.
 
 - Raw log rows, any logtype, any filter -> query_logs.
 - "How much / top N", where the dimension is one FortiAnalyzer aggregates
-  natively -> query_logs(group_by="srcip"), or get_fortiview_data(view_name=...)
-  when you want the view's own columns. Both are exact.
-- "How much / top N" for any other dimension -> query_logs(sample_by=["..."]).
-  Bounded, and the response says so.
+  natively for that logtype -> query_logs(group_by="srcip"), or
+  get_fortiview_data(view_name=...) when you want the view's own columns. Both
+  are exact *unfiltered*; a filtered get_fortiview_data is not -- the view may
+  ignore the filter without erroring and return an unfiltered top-N, which is
+  why group_by refuses a filter rather than forwarding one.
+- "How much / top N" for any other dimension, for any logtype, or with a filter
+  -> query_logs(sample_by=["..."]). Bounded, and the response says so.
 - Per-policy breakdowns across several policies -> analyze_policy_traffic.
 - IPS/attack events, especially with PCAP -> search_ips_logs.
 - Unsure what is filterable -> get_log_fields(name_filter="...").

@@ -106,11 +106,14 @@ def build_warnings(
         and total is not None
         and total >= max(10 * limit, _HIGH_VOLUME_FLOOR)
     ):
+        # Names the tool call explicitly rather than "this query's own
+        # group_by/sample_by": fetch_more_logs emits this same warning and has
+        # neither parameter, so the shorthand pointed its readers at nothing.
         warnings.append(
-            f"Large result set ({total} matches); only this page is returned. Use "
-            "this query's own group_by/sample_by, or analyze_policy_traffic for a "
-            "per-policy volume question, for aggregation instead of paging rows, "
-            "or narrow the time window."
+            f"Large result set ({total} matches); only this page is returned. Aggregate "
+            "instead of paging rows: query_logs(group_by=...) or "
+            "query_logs(sample_by=[...]), or analyze_policy_traffic for a per-policy "
+            "volume question. Otherwise narrow the time window."
         )
     return warnings
 
