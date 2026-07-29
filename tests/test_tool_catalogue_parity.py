@@ -31,6 +31,14 @@ anything this file controls. The three tests below are skipped under
 is broken, but because "does the full-mode catalogue equal what's
 registered" is not a meaningful question to ask while the *entire test
 session* (not just this file) is forced into dynamic mode.
+
+**``FAZ_SKILLS_ENABLED=true`` needs no such skip.** Unlike dynamic mode's
+76-tool mess, skills only ever adds exactly one extra, known name --
+``faz_skill`` -- to the registered set, deterministically, whether it got
+there via the flag or via a test file importing the dispatcher directly.
+``_registered_tool_names()`` below simply subtracts it before comparing, so
+these tests stay meaningful (and still catch anything *else* unexpectedly
+registered) under ``FAZ_SKILLS_ENABLED=true`` rather than being skipped.
 """
 
 from __future__ import annotations
@@ -53,17 +61,32 @@ skip_if_dynamic_mode = pytest.mark.skipif(
 
 
 def _registered_tool_names() -> set[str]:
-    """Every tool name registered in full mode.
+    """Every tool name registered in full mode, minus the one deliberate exception.
 
     Read from FastMCP, not from `tools.__all__`: that list holds the ten tool
     *modules*, never the tool functions, so using it here would compare the
     catalogue against the wrong thing and pass while saying nothing.
+
+    ``faz_skill`` is subtracted unconditionally, not compared. It registers
+    on this same singleton whenever ``FAZ_SKILLS_ENABLED=true`` -- and, more
+    perilously, whenever *anything* imports
+    ``fortianalyzer_mcp.skills.dispatcher`` at all, which is how the eleven
+    ``test_skills*.py`` files exercise it directly (see
+    ``tests.conftest.import_dispatcher_isolated``, which de-registers it
+    again for exactly this reason, though a stray future import elsewhere
+    could still leave it registered). Dynamic mode never supports skills and
+    ``TOOL_CATALOGUE`` deliberately never lists ``faz_skill``, so it is the
+    one name this comparison is always defined to disregard rather than an
+    unexplained extra -- whether or not it happens to be present makes no
+    difference to whether the *rest* of the registered set matches the
+    catalogue, which is the thing actually worth asserting.
     """
     import asyncio
 
     import fortianalyzer_mcp.server as server
 
-    return {tool.name for tool in asyncio.run(server.mcp.list_tools())}
+    names = {tool.name for tool in asyncio.run(server.mcp.list_tools())}
+    return names - {"faz_skill"}
 
 
 def _catalogue_names() -> set[str]:
