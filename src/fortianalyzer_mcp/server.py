@@ -194,13 +194,6 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
                 ("run_fortiview", "Start FortiView query (returns TID)"),
                 ("fetch_fortiview", "Fetch FortiView results by TID"),
                 ("get_fortiview_data", "Get FortiView data with auto TID"),
-                ("get_top_sources", "Get top traffic sources"),
-                ("get_top_destinations", "Get top traffic destinations"),
-                ("get_top_applications", "Get top applications"),
-                ("get_top_threats", "Get top security threats"),
-                ("get_top_websites", "Get top websites"),
-                ("get_top_cloud_applications", "Get top cloud apps"),
-                ("get_policy_hits", "Get policy hit statistics"),
             ],
             "reports": [
                 ("list_report_layouts", "List runnable report layouts"),
@@ -345,13 +338,6 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
             "run_fortiview": fortiview_tools.run_fortiview,
             "fetch_fortiview": fortiview_tools.fetch_fortiview,
             "get_fortiview_data": fortiview_tools.get_fortiview_data,
-            "get_top_sources": fortiview_tools.get_top_sources,
-            "get_top_destinations": fortiview_tools.get_top_destinations,
-            "get_top_applications": fortiview_tools.get_top_applications,
-            "get_top_threats": fortiview_tools.get_top_threats,
-            "get_top_websites": fortiview_tools.get_top_websites,
-            "get_top_cloud_applications": fortiview_tools.get_top_cloud_applications,
-            "get_policy_hits": fortiview_tools.get_policy_hits,
             # Report tools
             "list_report_layouts": report_tools.list_report_layouts,
             "list_report_templates": report_tools.list_report_templates,
@@ -435,7 +421,7 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
                 },
                 "fortiview": {
                     "description": "FortiView analytics with TID workflow",
-                    "tool_count": 10,
+                    "tool_count": 3,
                 },
                 "reports": {
                     "description": "Report templates and execution with TID workflow",
