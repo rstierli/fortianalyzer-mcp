@@ -3,7 +3,7 @@
 import hashlib
 import hmac
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -128,6 +128,136 @@ def _coerce_structured_filters(raw: object) -> list[FilterCondition]:
     return coerced
 
 
+#: Category -> tool names, for dynamic mode's search surface.
+#:
+#: Static on purpose. find_fortianalyzer_tool must not import the tool modules
+#: to build this, because importing them registers every tool and destroys the
+#: minimal surface dynamic mode exists for. The cost is that it can drift from
+#: what is registered -- and it had, badly -- so
+#: tests/test_tool_catalogue_parity.py asserts the two match exactly.
+TOOL_CATALOGUE: Mapping[str, tuple[str, ...]] = {
+    "system": (
+        "get_system_status",
+        "get_ha_status",
+        "list_adoms",
+        "get_adom",
+        "list_devices",
+        "get_device",
+        "list_tasks",
+        "get_task",
+        "wait_for_task",
+        "get_api_ratelimit",
+        "update_api_ratelimit",
+    ),
+    "logs": (
+        "query_logs",
+        "get_log_search_progress",
+        "fetch_more_logs",
+        "cancel_log_search",
+        "get_log_stats",
+        "get_log_fields",
+        "get_logfiles_state",
+        "get_pcap_file",
+    ),
+    "dvm": (
+        "add_device",
+        "delete_device",
+        "add_devices_bulk",
+        "delete_devices_bulk",
+        "get_device_info",
+        "search_devices",
+        "list_device_groups",
+        "list_device_vdoms",
+    ),
+    "events": (
+        "get_alerts",
+        "get_alert_count",
+        "acknowledge_alerts",
+        "unacknowledge_alerts",
+        "get_alert_logs",
+        "get_alert_details",
+        "add_alert_comment",
+        "get_alert_incident_stats",
+        "get_alert_handlers",
+    ),
+    "fortiview": (
+        "run_fortiview",
+        "fetch_fortiview",
+        "get_fortiview_data",
+    ),
+    "reports": (
+        "list_report_layouts",
+        "list_report_templates",
+        "run_report",
+        "fetch_report",
+        "get_report_data",
+        "get_running_reports",
+        "get_report_history",
+        "run_and_wait_report",
+        "save_report",
+    ),
+    "incidents": (
+        "get_incidents",
+        "get_incident",
+        "get_incident_count",
+        "create_incident",
+        "update_incident",
+        "get_incident_stats",
+    ),
+    "ioc": (
+        "get_ioc_license_state",
+        "acknowledge_ioc_events",
+        "run_ioc_rescan",
+        "get_ioc_rescan_status",
+        "get_ioc_rescan_history",
+        "run_and_wait_ioc_rescan",
+    ),
+    "pcap": (
+        "search_ips_logs",
+        "get_pcap_by_session",
+        "download_pcap_by_url",
+        "search_and_download_pcaps",
+        "list_available_pcaps",
+    ),
+    "soar": (
+        "get_linked_indicators",
+        "get_indicator_enrichment",
+    ),
+    "ueba": (
+        "get_endpoints",
+        "get_endpoint_vulnerabilities",
+        "get_endusers",
+        "get_endpoint_stats",
+        "get_enduser_stats",
+    ),
+    "traffic": ("analyze_policy_traffic",),
+}
+
+#: All registered tool names, flattened. Used both to build ``tool_map`` in
+#: ``execute_advanced_tool`` and by the parity test.
+TOOL_CATALOGUE_NAMES: frozenset[str] = frozenset(
+    name for names in TOOL_CATALOGUE.values() for name in names
+)
+
+#: Human-readable blurb per category, for ``list_fortianalyzer_categories`` and
+#: search results. Purely descriptive text -- unlike ``TOOL_CATALOGUE`` this
+#: cannot drift into a wrong *count*, so it stays hand-written.
+_CATEGORY_DESCRIPTIONS: Mapping[str, str] = {
+    "system": "System status, HA, ADOMs, devices, and tasks",
+    "logs": "Log search with TID workflow, analytics",
+    "dvm": "Device management, add/delete, groups",
+    "events": "Alert management and SOC operations",
+    "fortiview": "FortiView analytics with TID workflow",
+    "reports": "Report templates and execution with TID workflow",
+    "incidents": "Incident management and tracking",
+    "ioc": "IOC detection and rescan operations",
+    "pcap": "IPS log search and PCAP download for forensics",
+    "soar": "Threat-intel indicator lookups (SOAR)",
+    "ueba": "Endpoint and end-user behavior analytics (UEBA)",
+    "traffic": "Policy traffic analysis (profile, ports, protocols)",
+}
+
+
 # Dynamic mode: lightweight discovery tools
 def register_dynamic_tools(mcp_server: FastMCP) -> None:
     """Register discovery tools for dynamic mode only."""
@@ -144,88 +274,10 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
         """
         op = operation.lower().strip()
 
-        # Define available tools and their categories
-        tool_catalog = {
-            "system": [
-                ("get_system_status", "Get FortiAnalyzer system status"),
-                ("get_ha_status", "Get HA cluster status"),
-                ("list_adoms", "List administrative domains"),
-                ("get_adom", "Get ADOM details"),
-                ("list_devices", "List devices in ADOM"),
-                ("get_device", "Get device details"),
-                ("list_tasks", "List background tasks"),
-                ("get_task", "Get task status"),
-                ("wait_for_task", "Wait for task to complete"),
-            ],
-            "logs": [
-                ("query_logs", "Query logs with two-step TID workflow"),
-                ("get_log_search_progress", "Get search progress by TID"),
-                ("fetch_more_logs", "Fetch more logs using TID"),
-                ("cancel_log_search", "Cancel a running search"),
-                ("get_log_stats", "Get log statistics"),
-                ("get_log_fields", "Get available log fields"),
-                ("get_logfiles_state", "Get log file state info"),
-                ("get_pcap_file", "Get PCAP file from log"),
-            ],
-            "dvm": [
-                ("add_device", "Add device to FortiAnalyzer"),
-                ("delete_device", "Delete device from FortiAnalyzer"),
-                ("add_devices_bulk", "Add multiple devices"),
-                ("delete_devices_bulk", "Delete multiple devices"),
-                ("get_device_info", "Get detailed device info"),
-                ("search_devices", "Search devices with filters"),
-                ("list_device_groups", "List device groups"),
-                ("list_device_vdoms", "List device VDOMs"),
-            ],
-            "events": [
-                ("get_alerts", "Get alert events"),
-                ("get_alert_count", "Get alert count"),
-                ("acknowledge_alerts", "Acknowledge alerts"),
-                ("unacknowledge_alerts", "Unacknowledge alerts"),
-                ("get_alert_logs", "Get logs for alerts"),
-                ("get_alert_details", "Get alert details"),
-                ("add_alert_comment", "Add comment to alert"),
-                ("get_alert_incident_stats", "Get alert-incident statistics"),
-            ],
-            "fortiview": [
-                ("run_fortiview", "Start FortiView query (returns TID)"),
-                ("fetch_fortiview", "Fetch FortiView results by TID"),
-                ("get_fortiview_data", "Get FortiView data with auto TID"),
-            ],
-            "reports": [
-                ("list_report_layouts", "List runnable report layouts"),
-                ("list_report_templates", "List read-only report templates (blueprints)"),
-                ("run_report", "Run a report"),
-                ("fetch_report", "Fetch report status"),
-                ("get_report_data", "Download report data"),
-                ("get_report_history", "Get report history"),
-                ("run_and_wait_report", "Run report and wait"),
-            ],
-            "incidents": [
-                ("get_incidents", "Get security incidents"),
-                ("get_incident", "Get incident by ID"),
-                ("get_incident_count", "Get incident count"),
-                ("create_incident", "Create new incident"),
-                ("update_incident", "Update incident"),
-                ("get_incident_stats", "Get incident statistics"),
-            ],
-            "ioc": [
-                ("get_ioc_license_state", "Get IOC license state"),
-                ("acknowledge_ioc_events", "Acknowledge IOC events"),
-                ("run_ioc_rescan", "Start IOC rescan"),
-                ("get_ioc_rescan_status", "Get IOC rescan status"),
-                ("get_ioc_rescan_history", "Get IOC rescan history"),
-                ("run_and_wait_ioc_rescan", "Run IOC rescan and wait"),
-            ],
-            # "traffic" category removed: its three tools (get_policy_traffic_profile,
-            # get_policy_port_analysis, get_policy_protocol_summary) were folded into
-            # analyze_policy_traffic. Not re-added here -- deriving this catalogue from
-            # the registered tool set rather than hand-listing entries is Task 9's job.
-        }
-
         results = []
-        for category, tools in tool_catalog.items():
-            for tool_name, description in tools:
+        for category, tool_names in TOOL_CATALOGUE.items():
+            description = _CATEGORY_DESCRIPTIONS.get(category, "")
+            for tool_name in tool_names:
                 search_text = f"{tool_name} {category} {description}".lower()
                 if all(tok in search_text for tok in op.split()):
                     results.append(
@@ -264,7 +316,9 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
         # Copied so the coercion below never mutates the caller's dict.
         params = dict(parameters) if parameters else {}
 
-        # Import tools dynamically and execute
+        # Import tools dynamically and execute. This already imports every tool
+        # module, so -- unlike TOOL_CATALOGUE, which must stay static to avoid
+        # exactly this import -- tool_map below can be derived from it for free.
         from fortianalyzer_mcp.tools import (
             dvm_tools,
             event_tools,
@@ -276,95 +330,31 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
             report_tools,
             soar_tools,
             system_tools,
+            traffic_tools,
             ueba_tools,
         )
 
-        # Map tool names to functions
-        tool_map = {
-            # System tools
-            "get_system_status": system_tools.get_system_status,
-            "get_ha_status": system_tools.get_ha_status,
-            "list_adoms": system_tools.list_adoms,
-            "get_adom": system_tools.get_adom,
-            "list_devices": system_tools.list_devices,
-            "get_device": system_tools.get_device,
-            "list_tasks": system_tools.list_tasks,
-            "get_task": system_tools.get_task,
-            "wait_for_task": system_tools.wait_for_task,
-            # Log tools
-            "query_logs": log_tools.query_logs,
-            "get_log_search_progress": log_tools.get_log_search_progress,
-            "fetch_more_logs": log_tools.fetch_more_logs,
-            "cancel_log_search": log_tools.cancel_log_search,
-            "get_log_stats": log_tools.get_log_stats,
-            "get_log_fields": log_tools.get_log_fields,
-            "get_logfiles_state": log_tools.get_logfiles_state,
-            "get_pcap_file": log_tools.get_pcap_file,
-            # DVM tools
-            "add_device": dvm_tools.add_device,
-            "delete_device": dvm_tools.delete_device,
-            "add_devices_bulk": dvm_tools.add_devices_bulk,
-            "delete_devices_bulk": dvm_tools.delete_devices_bulk,
-            "get_device_info": dvm_tools.get_device_info,
-            "search_devices": dvm_tools.search_devices,
-            "list_device_groups": dvm_tools.list_device_groups,
-            "list_device_vdoms": dvm_tools.list_device_vdoms,
-            # Event tools
-            "get_alerts": event_tools.get_alerts,
-            "get_alert_count": event_tools.get_alert_count,
-            "acknowledge_alerts": event_tools.acknowledge_alerts,
-            "unacknowledge_alerts": event_tools.unacknowledge_alerts,
-            "get_alert_logs": event_tools.get_alert_logs,
-            "get_alert_details": event_tools.get_alert_details,
-            "add_alert_comment": event_tools.add_alert_comment,
-            "get_alert_incident_stats": event_tools.get_alert_incident_stats,
-            "get_alert_handlers": event_tools.get_alert_handlers,
-            # UEBA tools (Wave-2 skills readers)
-            "get_endpoints": ueba_tools.get_endpoints,
-            "get_endpoint_vulnerabilities": ueba_tools.get_endpoint_vulnerabilities,
-            "get_endusers": ueba_tools.get_endusers,
-            "get_endpoint_stats": ueba_tools.get_endpoint_stats,
-            "get_enduser_stats": ueba_tools.get_enduser_stats,
-            # SOAR tools (Wave-2 threat-intel readers)
-            "get_linked_indicators": soar_tools.get_linked_indicators,
-            "get_indicator_enrichment": soar_tools.get_indicator_enrichment,
-            # FortiView tools
-            "run_fortiview": fortiview_tools.run_fortiview,
-            "fetch_fortiview": fortiview_tools.fetch_fortiview,
-            "get_fortiview_data": fortiview_tools.get_fortiview_data,
-            # Report tools
-            "list_report_layouts": report_tools.list_report_layouts,
-            "list_report_templates": report_tools.list_report_templates,
-            "run_report": report_tools.run_report,
-            "fetch_report": report_tools.fetch_report,
-            "get_report_data": report_tools.get_report_data,
-            "get_report_history": report_tools.get_report_history,
-            "run_and_wait_report": report_tools.run_and_wait_report,
-            # Incident tools
-            "get_incidents": incident_tools.get_incidents,
-            "get_incident": incident_tools.get_incident,
-            "get_incident_count": incident_tools.get_incident_count,
-            "create_incident": incident_tools.create_incident,
-            "update_incident": incident_tools.update_incident,
-            "get_incident_stats": incident_tools.get_incident_stats,
-            # IOC tools
-            "get_ioc_license_state": ioc_tools.get_ioc_license_state,
-            "acknowledge_ioc_events": ioc_tools.acknowledge_ioc_events,
-            "run_ioc_rescan": ioc_tools.run_ioc_rescan,
-            "get_ioc_rescan_status": ioc_tools.get_ioc_rescan_status,
-            "get_ioc_rescan_history": ioc_tools.get_ioc_rescan_history,
-            "run_and_wait_ioc_rescan": ioc_tools.run_and_wait_ioc_rescan,
-            # PCAP tools
-            "search_ips_logs": pcap_tools.search_ips_logs,
-            "get_pcap_by_session": pcap_tools.get_pcap_by_session,
-            "download_pcap_by_url": pcap_tools.download_pcap_by_url,
-            "search_and_download_pcaps": pcap_tools.search_and_download_pcaps,
-            "list_available_pcaps": pcap_tools.list_available_pcaps,
-            # Traffic analysis tools: get_policy_traffic_profile, get_policy_port_analysis
-            # and get_policy_protocol_summary were removed (folded into
-            # analyze_policy_traffic). Not added here -- deriving this map from the
-            # registered tool set rather than hand-listing entries is Task 9's job.
-        }
+        tool_modules = (
+            system_tools,
+            log_tools,
+            dvm_tools,
+            event_tools,
+            fortiview_tools,
+            report_tools,
+            incident_tools,
+            ioc_tools,
+            pcap_tools,
+            soar_tools,
+            ueba_tools,
+            traffic_tools,
+        )
+        tool_map: dict[str, Any] = {}
+        for module in tool_modules:
+            tool_map.update(
+                (name, getattr(module, name))
+                for name in TOOL_CATALOGUE_NAMES
+                if name not in tool_map and hasattr(module, name)
+            )
 
         if tool_name not in tool_map:
             return {
@@ -397,49 +387,13 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
         return {
             "status": "success",
             "categories": {
-                "system": {
-                    "description": "System status, HA, ADOMs, devices, and tasks",
-                    "tool_count": 9,
-                },
-                "logs": {
-                    "description": "Log search with TID workflow, analytics",
-                    "tool_count": 8,
-                },
-                "dvm": {
-                    "description": "Device management, add/delete, groups",
-                    "tool_count": 8,
-                },
-                "events": {
-                    "description": "Alert management and SOC operations",
-                    "tool_count": 8,
-                },
-                "fortiview": {
-                    "description": "FortiView analytics with TID workflow",
-                    "tool_count": 3,
-                },
-                "reports": {
-                    "description": "Report templates and execution with TID workflow",
-                    "tool_count": 6,
-                },
-                "incidents": {
-                    "description": "Incident management and tracking",
-                    "tool_count": 6,
-                },
-                "ioc": {
-                    "description": "IOC detection and rescan operations",
-                    "tool_count": 6,
-                },
-                "pcap": {
-                    "description": "IPS log search and PCAP download for forensics",
-                    "tool_count": 5,
-                },
-                # "traffic" category removed: its three tools were folded into
-                # analyze_policy_traffic (see tool_catalog above). Re-adding an entry
-                # for it, and recomputing total_tools below, is Task 9's job -- this
-                # mirror already drifts pre-existing (total_tools undercounts, pcap/
-                # soar/ueba are omitted from tool_catalog); not fixing that here.
+                category: {
+                    "description": _CATEGORY_DESCRIPTIONS.get(category, ""),
+                    "tool_count": len(tool_names),
+                }
+                for category, tool_names in TOOL_CATALOGUE.items()
             },
-            "total_tools": 72,
+            "total_tools": sum(len(names) for names in TOOL_CATALOGUE.values()),
             "note": "Use find_fortianalyzer_tool() to search, execute_advanced_tool() to run",
         }
 
