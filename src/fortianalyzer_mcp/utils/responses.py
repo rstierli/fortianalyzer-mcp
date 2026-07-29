@@ -108,7 +108,8 @@ def build_warnings(
     ):
         warnings.append(
             f"Large result set ({total} matches); only this page is returned. Use "
-            "get_policy_port_analysis or get_policy_protocol_summary for aggregation, "
+            "this query's own group_by/sample_by, or analyze_policy_traffic for a "
+            "per-policy volume question, for aggregation instead of paging rows, "
             "or narrow the time window."
         )
     return warnings

@@ -434,10 +434,12 @@ async def query_logs(
     Prefer a narrower tool where one fits:
         - Filtering only on srcip/dstip/srcport/dstport/action/policy_id ->
           search_traffic_logs builds the filter string for you.
-        - "How much traffic did policy N carry" -> get_policy_traffic_profile,
-          get_policy_port_analysis or get_policy_protocol_summary. They
-          aggregate on the appliance and report their own exactness; paging
-          raw rows to answer a volume question wastes the context it costs.
+        - "How much traffic did policy N carry" -> analyze_policy_traffic. It
+          fans out per policy under its own bounded-scan budget and reports
+          its own exactness; paging raw rows to answer a volume question
+          wastes the context it costs. For one aggregate over a single query
+          with no policy fan-out, group_by/sample_by right here do the same
+          job.
         - IPS/attack events, especially with PCAP -> search_ips_logs.
         - Unsure what is filterable -> get_log_fields(name_filter="...").
 
@@ -1501,7 +1503,7 @@ async def search_traffic_logs(
     network-based filters. Wraps query_logs, so the returned `tid` is the same
     reusable pagination handle and works with fetch_more_logs.
 
-    Prefer get_policy_traffic_profile over this when the question is how much
+    Prefer analyze_policy_traffic over this when the question is how much
     a policy carried rather than which rows matched -- it aggregates on the
     appliance instead of returning rows to be counted here.
 

@@ -207,7 +207,7 @@ class TestWarningsTriggers:
         r = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE)
 
         assert r["has_more"] is True
-        assert any("get_policy" in w for w in r["warnings"])
+        assert any("analyze_policy_traffic" in w or "sample_by" in w for w in r["warnings"])
 
 
 class TestErrorEnvelope:
