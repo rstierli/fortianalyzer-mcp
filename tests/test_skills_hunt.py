@@ -33,7 +33,7 @@ from fortianalyzer_mcp.skills.models import (
 from fortianalyzer_mcp.tools import ueba_tools
 
 GET_ALERTS = "fortianalyzer_mcp.tools.event_tools.get_alerts"
-GET_TOP_THREATS = "fortianalyzer_mcp.tools.fortiview_tools.get_top_threats"
+GET_FORTIVIEW_DATA = "fortianalyzer_mcp.tools.fortiview_tools.get_fortiview_data"
 GET_LINKED = "fortianalyzer_mcp.tools.soar_tools.get_linked_indicators"
 GET_ENRICH = "fortianalyzer_mcp.tools.soar_tools.get_indicator_enrichment"
 GET_ENDPOINTS = "fortianalyzer_mcp.tools.ueba_tools.get_endpoints"
@@ -120,7 +120,7 @@ class TestHuntSweep:
                     data=[{"value": "198.21.33.3", "enrichment-reputation": "Malicious"}]
                 ),
             ),
-            t(GET_TOP_THREATS, return_value=ok(data=THREATS)),
+            t(GET_FORTIVIEW_DATA, return_value=ok(data=THREATS)) as threats_mock,
         ):
             result = await handlers.run_hunt(
                 HuntParams(
@@ -135,6 +135,7 @@ class TestHuntSweep:
         assert result.sweep.total_matches == 2  # one row per logtype
         # Every sweep search ran on the indicator pivot.
         assert all(c.kwargs["filter"] == "srcip==198.21.33.3" for c in ql.call_args_list)
+        assert threats_mock.call_args.kwargs["view_name"] == "top-threats"
         # An IP indicator gets SOAR reputation; behaviour half is a gap.
         assert not isinstance(result.sweep.threat_intel, FeatureGap)
         assert isinstance(result.behavior, FeatureGap)

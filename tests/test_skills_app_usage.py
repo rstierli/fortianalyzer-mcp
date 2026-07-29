@@ -3,7 +3,10 @@
 Same conventions as ``test_skills_wave2.py``: handlers are tested by
 patching the underlying tool functions at their defining modules with
 ``autospec=True`` (the handler imports them lazily per call), and the
-dispatcher path is exercised end-to-end through ``faz_skill``.
+dispatcher path is exercised end-to-end through ``faz_skill``. The three
+FortiView sections all route through the single ``get_fortiview_data``
+reader, so tests patch that one function and dispatch responses on its
+``view_name`` kwarg.
 """
 
 from typing import Any
@@ -17,9 +20,7 @@ from fortianalyzer_mcp.skills.catalog import SKILLS
 from fortianalyzer_mcp.skills.dispatcher import faz_skill
 from fortianalyzer_mcp.skills.models import SCHEMA_VERSION, AppUsageParams, FeatureGap
 
-GET_TOP_APPS = "fortianalyzer_mcp.tools.fortiview_tools.get_top_applications"
-GET_TOP_WEBSITES = "fortianalyzer_mcp.tools.fortiview_tools.get_top_websites"
-GET_TOP_CLOUD = "fortianalyzer_mcp.tools.fortiview_tools.get_top_cloud_applications"
+GET_FORTIVIEW_DATA = "fortianalyzer_mcp.tools.fortiview_tools.get_fortiview_data"
 QUERY_LOGS = "fortianalyzer_mcp.tools.log_tools.query_logs"
 
 
@@ -33,6 +34,19 @@ def ok(**fields: Any) -> dict[str, Any]:
     return {"status": "success", **fields}
 
 
+def by_view(**responses: dict[str, Any]) -> Any:
+    """Side effect for ``get_fortiview_data``, dispatching on view_name.
+
+    Keys use underscores (python identifiers); view names use hyphens.
+    """
+    mapping = {key.replace("_", "-"): value for key, value in responses.items()}
+
+    def _route(**kwargs: Any) -> dict[str, Any]:
+        return mapping[kwargs["view_name"]]
+
+    return _route
+
+
 ERR = {"status": "error", "message": "fortiview backend down"}
 
 APPS = [
@@ -42,6 +56,13 @@ APPS = [
 WEBSITES = [{"domain": "youtube.com", "bandwidth": 800_000}]
 CLOUD_APPS = [{"app": "Dropbox", "bandwidth": 123_456}]
 DLP_LOGS = [{"filename": "payroll.xlsx", "action": "block", "srcip": "192.0.2.10"}]
+
+ALL_FORTIVIEW_OK = by_view(
+    top_applications=ok(data=APPS),
+    top_websites=ok(data=WEBSITES),
+    top_cloud_applications=ok(data=CLOUD_APPS),
+)
+ALL_FORTIVIEW_ERR = by_view(top_applications=ERR, top_websites=ERR, top_cloud_applications=ERR)
 
 
 class TestAppUsageCatalog:
@@ -57,17 +78,17 @@ class TestAppUsageCatalog:
 class TestAppUsage:
     async def test_all_sections_verbatim(self):
         with (
-            t(GET_TOP_APPS, return_value=ok(data=APPS)) as apps,
-            t(GET_TOP_WEBSITES, return_value=ok(data=WEBSITES)),
-            t(GET_TOP_CLOUD, return_value=ok(data=CLOUD_APPS)),
+            t(GET_FORTIVIEW_DATA, side_effect=ALL_FORTIVIEW_OK) as fortiview,
             t(QUERY_LOGS, return_value=ok(logs=DLP_LOGS, tid=7)) as logs,
         ):
             result = await handlers.run_app_usage(
                 AppUsageParams(device="FGT60F0000000000", top_limit=25, dlp_limit=50)
             )
-        assert apps.call_args.kwargs["limit"] == 25
-        assert apps.call_args.kwargs["device"] == "FGT60F0000000000"
-        assert apps.call_args.kwargs["time_range"] == "24-hour"
+        fv = {c.kwargs["view_name"]: c.kwargs for c in fortiview.call_args_list}
+        assert set(fv) == {"top-applications", "top-websites", "top-cloud-applications"}
+        assert fv["top-applications"]["limit"] == 25
+        assert fv["top-applications"]["device"] == "FGT60F0000000000"
+        assert fv["top-applications"]["time_range"] == "24-hour"
         assert logs.call_args.kwargs["logtype"] == "dlp"
         assert logs.call_args.kwargs["limit"] == 50
         assert result.applications == APPS
@@ -85,9 +106,14 @@ class TestAppUsage:
 
     async def test_one_section_failure_degrades_to_gap(self):
         with (
-            t(GET_TOP_APPS, return_value=ok(data=APPS)),
-            t(GET_TOP_WEBSITES, return_value=ok(data=WEBSITES)),
-            t(GET_TOP_CLOUD, return_value=ERR),
+            t(
+                GET_FORTIVIEW_DATA,
+                side_effect=by_view(
+                    top_applications=ok(data=APPS),
+                    top_websites=ok(data=WEBSITES),
+                    top_cloud_applications=ERR,
+                ),
+            ),
             t(QUERY_LOGS, return_value=ok(logs=DLP_LOGS)),
         ):
             result = await handlers.run_app_usage(AppUsageParams())
@@ -99,9 +125,7 @@ class TestAppUsage:
 
     async def test_dlp_failure_degrades_to_gap(self):
         with (
-            t(GET_TOP_APPS, return_value=ok(data=APPS)),
-            t(GET_TOP_WEBSITES, return_value=ok(data=WEBSITES)),
-            t(GET_TOP_CLOUD, return_value=ok(data=CLOUD_APPS)),
+            t(GET_FORTIVIEW_DATA, side_effect=ALL_FORTIVIEW_OK),
             t(QUERY_LOGS, return_value={"status": "error", "message": "no slots"}),
         ):
             result = await handlers.run_app_usage(AppUsageParams())
@@ -110,9 +134,7 @@ class TestAppUsage:
 
     async def test_include_dlp_false_skips_search(self):
         with (
-            t(GET_TOP_APPS, return_value=ok(data=APPS)),
-            t(GET_TOP_WEBSITES, return_value=ok(data=WEBSITES)),
-            t(GET_TOP_CLOUD, return_value=ok(data=CLOUD_APPS)),
+            t(GET_FORTIVIEW_DATA, side_effect=ALL_FORTIVIEW_OK),
             t(QUERY_LOGS) as logs,
         ):
             result = await handlers.run_app_usage(AppUsageParams(include_dlp=False))
@@ -123,9 +145,7 @@ class TestAppUsage:
 
     async def test_dlp_truncation_warns(self):
         with (
-            t(GET_TOP_APPS, return_value=ok(data=APPS)),
-            t(GET_TOP_WEBSITES, return_value=ok(data=WEBSITES)),
-            t(GET_TOP_CLOUD, return_value=ok(data=CLOUD_APPS)),
+            t(GET_FORTIVIEW_DATA, side_effect=ALL_FORTIVIEW_OK),
             t(QUERY_LOGS, return_value=ok(logs=DLP_LOGS, has_more=True)),
         ):
             result = await handlers.run_app_usage(AppUsageParams(dlp_limit=1))
@@ -133,9 +153,7 @@ class TestAppUsage:
 
     async def test_dlp_only_partial_result_still_succeeds(self):
         with (
-            t(GET_TOP_APPS, return_value=ERR),
-            t(GET_TOP_WEBSITES, return_value=ERR),
-            t(GET_TOP_CLOUD, return_value=ERR),
+            t(GET_FORTIVIEW_DATA, side_effect=ALL_FORTIVIEW_ERR),
             t(QUERY_LOGS, return_value=ok(logs=DLP_LOGS)),
         ):
             result = await handlers.run_app_usage(AppUsageParams())
@@ -145,9 +163,7 @@ class TestAppUsage:
 
     async def test_all_sections_failing_raises(self):
         with (
-            t(GET_TOP_APPS, return_value=ERR),
-            t(GET_TOP_WEBSITES, return_value=ERR),
-            t(GET_TOP_CLOUD, return_value=ERR),
+            t(GET_FORTIVIEW_DATA, side_effect=ALL_FORTIVIEW_ERR),
             t(QUERY_LOGS, return_value={"status": "error", "message": "no slots"}),
         ):
             with pytest.raises(handlers.SkillExecutionError, match="every app_usage section"):
@@ -155,9 +171,7 @@ class TestAppUsage:
 
     async def test_all_fortiview_failing_with_dlp_disabled_raises(self):
         with (
-            t(GET_TOP_APPS, return_value=ERR),
-            t(GET_TOP_WEBSITES, return_value=ERR),
-            t(GET_TOP_CLOUD, return_value=ERR),
+            t(GET_FORTIVIEW_DATA, side_effect=ALL_FORTIVIEW_ERR),
             t(QUERY_LOGS) as logs,
         ):
             with pytest.raises(handlers.SkillExecutionError, match="every app_usage section"):
@@ -168,9 +182,14 @@ class TestAppUsage:
 class TestAppUsageDispatch:
     async def test_success_envelope(self):
         with (
-            t(GET_TOP_APPS, return_value=ok(data=APPS)),
-            t(GET_TOP_WEBSITES, return_value=ok(data=WEBSITES)),
-            t(GET_TOP_CLOUD, return_value=ERR),
+            t(
+                GET_FORTIVIEW_DATA,
+                side_effect=by_view(
+                    top_applications=ok(data=APPS),
+                    top_websites=ok(data=WEBSITES),
+                    top_cloud_applications=ERR,
+                ),
+            ),
             t(QUERY_LOGS, return_value=ok(logs=DLP_LOGS)),
         ):
             result = await faz_skill(skill="app_usage", params={"time_range": "7-day"})
@@ -184,9 +203,7 @@ class TestAppUsageDispatch:
 
     async def test_total_failure_maps_to_skill_failed(self):
         with (
-            t(GET_TOP_APPS, return_value=ERR),
-            t(GET_TOP_WEBSITES, return_value=ERR),
-            t(GET_TOP_CLOUD, return_value=ERR),
+            t(GET_FORTIVIEW_DATA, side_effect=ALL_FORTIVIEW_ERR),
             t(QUERY_LOGS, return_value=ERR),
         ):
             result = await faz_skill(skill="app_usage", params={})

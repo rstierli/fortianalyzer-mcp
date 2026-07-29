@@ -60,7 +60,7 @@ GET_ALERT_INCIDENT_STATS = "fortianalyzer_mcp.tools.event_tools.get_alert_incide
 GET_REPORT_HISTORY = "fortianalyzer_mcp.tools.report_tools.get_report_history"
 GET_REPORT_DATA = "fortianalyzer_mcp.tools.report_tools.get_report_data"
 QUERY_LOGS = "fortianalyzer_mcp.tools.log_tools.query_logs"
-GET_TOP_THREATS = "fortianalyzer_mcp.tools.fortiview_tools.get_top_threats"
+GET_FORTIVIEW_DATA = "fortianalyzer_mcp.tools.fortiview_tools.get_fortiview_data"
 
 
 def t(target: str, **kwargs: Any) -> Any:
@@ -664,7 +664,7 @@ class TestIncidentSummarySkill:
             t(
                 GET_ALERT_LOGS, return_value=ok(data=[{"logid": "l-1"}, {"logid": "l-2"}])
             ) as logs_mock,
-            t(GET_TOP_THREATS, return_value=ok(data=threats)),
+            t(GET_FORTIVIEW_DATA, return_value=ok(data=threats)) as threats_mock,
         ):
             result = await handlers.run_incident_summary(
                 IncidentSummaryParams(incident_id="inc-001")
@@ -672,6 +672,7 @@ class TestIncidentSummarySkill:
         logs_mock.assert_awaited_once_with(
             alert_ids=["alert-001"], adom=None, limit=20, fields=["*"]
         )
+        assert threats_mock.call_args.kwargs["view_name"] == "top-threats"
         assert result.incident == INCIDENT
         assert len(result.alerts) == 1
         assert result.alerts[0].alert == ALERT_LINKED
@@ -685,7 +686,7 @@ class TestIncidentSummarySkill:
         with (
             t(GET_INCIDENT, return_value=ok(data=INCIDENT)),
             t(GET_ALERTS, return_value=ok(data=[])),
-            t(GET_TOP_THREATS, side_effect=RuntimeError("fortiview down")),
+            t(GET_FORTIVIEW_DATA, side_effect=RuntimeError("fortiview down")),
         ):
             result = await handlers.run_incident_summary(
                 IncidentSummaryParams(incident_id="inc-001")

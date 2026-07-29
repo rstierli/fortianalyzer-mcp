@@ -3,9 +3,10 @@
 Same conventions as ``test_skills_wave2.py``: the underlying FortiView
 tool functions are patched at their defining module with ``autospec=True``
 (the handler imports them lazily per call), and the dispatcher path is
-exercised end-to-end through ``faz_skill``. The geo and VPN sections both
-route through ``get_fortiview_data``, so that mock dispatches on the
-``view_name`` kwarg.
+exercised end-to-end through ``faz_skill``. All four sections (top
+destinations/sources, geo, VPN) route through the single
+``get_fortiview_data`` reader, so every test patches that one function and
+dispatches responses on its ``view_name`` kwarg.
 """
 
 from typing import Any
@@ -23,8 +24,6 @@ from fortianalyzer_mcp.skills.models import (
     NetworkContextParams,
 )
 
-GET_TOP_DESTINATIONS = "fortianalyzer_mcp.tools.fortiview_tools.get_top_destinations"
-GET_TOP_SOURCES = "fortianalyzer_mcp.tools.fortiview_tools.get_top_sources"
 GET_FORTIVIEW_DATA = "fortianalyzer_mcp.tools.fortiview_tools.get_fortiview_data"
 
 
@@ -73,24 +72,28 @@ class TestNetworkContextCatalog:
 
 class TestNetworkContext:
     async def test_happy_path_all_sections(self):
-        with (
-            t(GET_TOP_DESTINATIONS, return_value=ok(data=DEST_ROWS)) as dest,
-            t(GET_TOP_SOURCES, return_value=ok(data=SRC_ROWS)),
-            t(
-                GET_FORTIVIEW_DATA,
-                side_effect=by_view(
-                    top_countries=ok(data=GEO_ROWS), site_to_site_ipsec=ok(data=VPN_ROWS)
-                ),
-            ) as fortiview,
-        ):
+        with t(
+            GET_FORTIVIEW_DATA,
+            side_effect=by_view(
+                top_destinations=ok(data=DEST_ROWS),
+                top_sources=ok(data=SRC_ROWS),
+                top_countries=ok(data=GEO_ROWS),
+                site_to_site_ipsec=ok(data=VPN_ROWS),
+            ),
+        ) as fortiview:
             result = await handlers.run_network_context(
                 NetworkContextParams(time_range="7-day", device="FGT100F", top_limit=5)
             )
-        assert dest.call_args.kwargs["time_range"] == "7-day"
-        assert dest.call_args.kwargs["device"] == "FGT100F"
-        assert dest.call_args.kwargs["limit"] == 5
         fv = {c.kwargs["view_name"]: c.kwargs for c in fortiview.call_args_list}
-        assert set(fv) == {"top-countries", "site-to-site-ipsec"}
+        assert set(fv) == {
+            "top-destinations",
+            "top-sources",
+            "top-countries",
+            "site-to-site-ipsec",
+        }
+        assert fv["top-destinations"]["time_range"] == "7-day"
+        assert fv["top-destinations"]["device"] == "FGT100F"
+        assert fv["top-destinations"]["limit"] == 5
         # geo uses the requested window; the session-bucketed VPN view is
         # floored to 90-day so long-lived tunnels are not silently dropped.
         assert fv["top-countries"]["time_range"] == "7-day"
@@ -111,16 +114,15 @@ class TestNetworkContext:
         assert not any("no site-to-site" in w for w in result.warnings)
 
     async def test_vpn_window_floored_and_override(self):
-        with (
-            t(GET_TOP_DESTINATIONS, return_value=ok(data=DEST_ROWS)),
-            t(GET_TOP_SOURCES, return_value=ok(data=SRC_ROWS)),
-            t(
-                GET_FORTIVIEW_DATA,
-                side_effect=by_view(
-                    top_countries=ok(data=GEO_ROWS), site_to_site_ipsec=ok(data=VPN_ROWS)
-                ),
-            ) as fortiview,
-        ):
+        with t(
+            GET_FORTIVIEW_DATA,
+            side_effect=by_view(
+                top_destinations=ok(data=DEST_ROWS),
+                top_sources=ok(data=SRC_ROWS),
+                top_countries=ok(data=GEO_ROWS),
+                site_to_site_ipsec=ok(data=VPN_ROWS),
+            ),
+        ) as fortiview:
             result = await handlers.run_network_context(
                 NetworkContextParams(time_range="24-hour", vpn_time_range="30-day")
             )
@@ -131,30 +133,28 @@ class TestNetworkContext:
         assert any("queried over 30-day" in w for w in result.warnings)
 
     async def test_wide_window_not_widened_no_note(self):
-        with (
-            t(GET_TOP_DESTINATIONS, return_value=ok(data=DEST_ROWS)),
-            t(GET_TOP_SOURCES, return_value=ok(data=SRC_ROWS)),
-            t(
-                GET_FORTIVIEW_DATA,
-                side_effect=by_view(
-                    top_countries=ok(data=GEO_ROWS), site_to_site_ipsec=ok(data=VPN_ROWS)
-                ),
-            ) as fortiview,
-        ):
+        with t(
+            GET_FORTIVIEW_DATA,
+            side_effect=by_view(
+                top_destinations=ok(data=DEST_ROWS),
+                top_sources=ok(data=SRC_ROWS),
+                top_countries=ok(data=GEO_ROWS),
+                site_to_site_ipsec=ok(data=VPN_ROWS),
+            ),
+        ) as fortiview:
             result = await handlers.run_network_context(NetworkContextParams(time_range="90-day"))
         fv = {c.kwargs["view_name"]: c.kwargs for c in fortiview.call_args_list}
         assert fv["site-to-site-ipsec"]["time_range"] == "90-day"
         assert not any("queried over" in w for w in result.warnings)
 
     async def test_empty_vpn_section_warns(self):
-        with (
-            t(GET_TOP_DESTINATIONS, return_value=ok(data=DEST_ROWS)),
-            t(GET_TOP_SOURCES, return_value=ok(data=SRC_ROWS)),
-            t(
-                GET_FORTIVIEW_DATA,
-                side_effect=by_view(
-                    top_countries=ok(data=GEO_ROWS), site_to_site_ipsec=ok(data=[])
-                ),
+        with t(
+            GET_FORTIVIEW_DATA,
+            side_effect=by_view(
+                top_destinations=ok(data=DEST_ROWS),
+                top_sources=ok(data=SRC_ROWS),
+                top_countries=ok(data=GEO_ROWS),
+                site_to_site_ipsec=ok(data=[]),
             ),
         ):
             result = await handlers.run_network_context(NetworkContextParams(time_range="90-day"))
@@ -176,12 +176,13 @@ class TestNetworkContext:
 
     async def test_failed_section_degrades_to_warning_and_gap(self):
         geo_err = {"status": "error", "message": "Validation error: Invalid FortiView view"}
-        with (
-            t(GET_TOP_DESTINATIONS, return_value=ok(data=DEST_ROWS)),
-            t(GET_TOP_SOURCES, return_value=ok(data=SRC_ROWS)),
-            t(
-                GET_FORTIVIEW_DATA,
-                side_effect=by_view(top_countries=geo_err, site_to_site_ipsec=ok(data=VPN_ROWS)),
+        with t(
+            GET_FORTIVIEW_DATA,
+            side_effect=by_view(
+                top_destinations=ok(data=DEST_ROWS),
+                top_sources=ok(data=SRC_ROWS),
+                top_countries=geo_err,
+                site_to_site_ipsec=ok(data=VPN_ROWS),
             ),
         ):
             result = await handlers.run_network_context(NetworkContextParams())
@@ -193,15 +194,17 @@ class TestNetworkContext:
         assert result.counts["top_countries"] == 0
 
     async def test_disabled_sections_skip_reads_and_report_gaps(self):
-        with (
-            t(GET_TOP_DESTINATIONS, return_value=ok(data=DEST_ROWS)),
-            t(GET_TOP_SOURCES, return_value=ok(data=SRC_ROWS)),
-            t(GET_FORTIVIEW_DATA) as fortiview,
-        ):
+        with t(
+            GET_FORTIVIEW_DATA,
+            side_effect=by_view(top_destinations=ok(data=DEST_ROWS), top_sources=ok(data=SRC_ROWS)),
+        ) as fortiview:
             result = await handlers.run_network_context(
                 NetworkContextParams(include_geo=False, include_vpn=False)
             )
-        fortiview.assert_not_called()
+        assert {c.kwargs["view_name"] for c in fortiview.call_args_list} == {
+            "top-destinations",
+            "top-sources",
+        }
         assert isinstance(result.top_countries, FeatureGap)
         assert result.top_countries.reason == "disabled by include_geo=false"
         assert isinstance(result.vpn_tunnels, FeatureGap)
@@ -209,37 +212,33 @@ class TestNetworkContext:
         assert result.warnings == []
 
     async def test_all_sections_failing_raises(self):
-        with (
-            t(GET_TOP_DESTINATIONS, return_value=ERR),
-            t(GET_TOP_SOURCES, return_value=ERR),
-            t(GET_FORTIVIEW_DATA, return_value=ERR),
-        ):
+        with t(GET_FORTIVIEW_DATA, return_value=ERR):
             with pytest.raises(
                 handlers.SkillExecutionError, match="all network-context sections failed"
             ):
                 await handlers.run_network_context(NetworkContextParams())
 
     async def test_all_attempted_failing_raises_even_with_sections_disabled(self):
-        with (
-            t(GET_TOP_DESTINATIONS, return_value=ERR),
-            t(GET_TOP_SOURCES, return_value=ERR),
-            t(GET_FORTIVIEW_DATA) as fortiview,
-        ):
+        with t(GET_FORTIVIEW_DATA, return_value=ERR) as fortiview:
             with pytest.raises(handlers.SkillExecutionError):
                 await handlers.run_network_context(
                     NetworkContextParams(include_geo=False, include_vpn=False)
                 )
-        fortiview.assert_not_called()
+        assert {c.kwargs["view_name"] for c in fortiview.call_args_list} == {
+            "top-destinations",
+            "top-sources",
+        }
 
 
 class TestNetworkContextDispatch:
     async def test_success_envelope_with_serialized_gap(self):
-        with (
-            t(GET_TOP_DESTINATIONS, return_value=ok(data=DEST_ROWS)),
-            t(GET_TOP_SOURCES, return_value=ok(data=SRC_ROWS)),
-            t(
-                GET_FORTIVIEW_DATA,
-                side_effect=by_view(top_countries=ERR, site_to_site_ipsec=ok(data=VPN_ROWS)),
+        with t(
+            GET_FORTIVIEW_DATA,
+            side_effect=by_view(
+                top_destinations=ok(data=DEST_ROWS),
+                top_sources=ok(data=SRC_ROWS),
+                top_countries=ERR,
+                site_to_site_ipsec=ok(data=VPN_ROWS),
             ),
         ):
             result = await faz_skill(skill="network_context", params={"top_limit": 10})

@@ -35,7 +35,7 @@ GET_ALERTS = "fortianalyzer_mcp.tools.event_tools.get_alerts"
 GET_ALERT_DETAILS = "fortianalyzer_mcp.tools.event_tools.get_alert_details"
 GET_ALERT_LOGS = "fortianalyzer_mcp.tools.event_tools.get_alert_logs"
 GET_ALERT_INCIDENT_STATS = "fortianalyzer_mcp.tools.event_tools.get_alert_incident_stats"
-GET_TOP_THREATS = "fortianalyzer_mcp.tools.fortiview_tools.get_top_threats"
+GET_FORTIVIEW_DATA = "fortianalyzer_mcp.tools.fortiview_tools.get_fortiview_data"
 GET_LINKED = "fortianalyzer_mcp.tools.soar_tools.get_linked_indicators"
 GET_ENRICH = "fortianalyzer_mcp.tools.soar_tools.get_indicator_enrichment"
 GET_ENDPOINTS = "fortianalyzer_mcp.tools.ueba_tools.get_endpoints"
@@ -113,7 +113,7 @@ class TestInvestigate:
             t(GET_ALERT_INCIDENT_STATS, return_value=ok(data={"alerts": 5})),
             t(GET_LINKED, return_value=ok(data=LINKED_INDICATORS)) as linked_mock,
             t(GET_ENRICH, return_value=ok(data=[ENRICHED_IP])),
-            t(GET_TOP_THREATS, return_value=ok(data=THREATS)),
+            t(GET_FORTIVIEW_DATA, return_value=ok(data=THREATS)),
             t(GET_ENDPOINTS, return_value=ok(data=[ENDPOINT])) as endpoints_mock,
             t(GET_VULNS, return_value=ok(data=[])),
             t(GET_ENDUSERS, return_value=ok(data=[ENDUSER])) as endusers_mock,
@@ -152,7 +152,7 @@ class TestInvestigate:
             t(GET_ALERT_INCIDENT_STATS, return_value=ok(data={})),
             t(GET_LINKED, return_value=ok(data=LINKED_INDICATORS)) as linked_mock,
             t(GET_ENRICH, return_value=ok(data=[ENRICHED_IP])),
-            t(GET_TOP_THREATS, return_value=ok(data=THREATS)),
+            t(GET_FORTIVIEW_DATA, return_value=ok(data=THREATS)),
             t(GET_ENDPOINTS, return_value=ok(data=[ENDPOINT])) as endpoints_mock,
             t(GET_VULNS, return_value=ok(data=[])),
             t(GET_ENDUSERS, return_value=ok(data=[ENDUSER])),
@@ -196,7 +196,7 @@ class TestInvestigate:
             t(GET_ALERTS, return_value=ok(data=[])),
             t(GET_ALERT_INCIDENT_STATS, return_value=ok(data={})),
             t(GET_LINKED, return_value=ok(data=[])),
-            t(GET_TOP_THREATS, return_value=ok(data=THREATS)),
+            t(GET_FORTIVIEW_DATA, return_value=ok(data=THREATS)),
             t(GET_ENDPOINTS) as endpoints_mock,
             t(GET_ENDUSERS) as endusers_mock,
         ):
@@ -214,7 +214,7 @@ class TestInvestigate:
             t(GET_ALERTS, return_value=ok(data=[])),
             t(GET_ALERT_INCIDENT_STATS, return_value=ok(data={})),
             t(GET_LINKED, return_value=ok(data=[])),
-            t(GET_TOP_THREATS, return_value=ok(data=THREATS)),
+            t(GET_FORTIVIEW_DATA, return_value=ok(data=THREATS)),
             t(GET_ENDPOINTS) as endpoints_mock,
             t(GET_ENDUSERS) as endusers_mock,
         ):
@@ -232,7 +232,7 @@ class TestInvestigate:
             t(GET_ALERTS, return_value=ok(data=[])),
             t(GET_ALERT_INCIDENT_STATS, return_value=ok(data={})),
             t(GET_LINKED, return_value=ok(data=[])),
-            t(GET_TOP_THREATS, return_value=ok(data=THREATS)),
+            t(GET_FORTIVIEW_DATA, return_value=ok(data=THREATS)),
         ):
             result = await handlers.run_investigate(InvestigateParams(incident_id="inc-001"))
         # threat_intel's own "no indicators linked" warning surfaces prefixed.
@@ -249,7 +249,7 @@ class TestInvestigateDispatch:
             t(GET_ALERTS, return_value=ok(data=[])),
             t(GET_ALERT_INCIDENT_STATS, return_value=ok(data={})),
             t(GET_LINKED, return_value=ok(data=[])),
-            t(GET_TOP_THREATS, return_value=ok(data=THREATS)),
+            t(GET_FORTIVIEW_DATA, return_value=ok(data=THREATS)),
         ):
             result = await faz_skill(skill="investigate", params={"incident_id": "inc-001"})
         assert result["status"] == "success"

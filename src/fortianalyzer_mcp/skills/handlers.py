@@ -785,11 +785,7 @@ def _timeline(incident: dict[str, Any], evidence: list[AlertEvidence]) -> list[T
 async def run_incident_summary(params: IncidentSummaryParams) -> IncidentSummary:
     """Structured investigation summary for one incident."""
     from fortianalyzer_mcp.tools.event_tools import get_alert_logs, get_alerts
-
-    # get_top_threats retired (Task 6); this call site is migrated in Task 8.
-    from fortianalyzer_mcp.tools.fortiview_tools import (  # type: ignore[attr-defined]
-        get_top_threats,
-    )
+    from fortianalyzer_mcp.tools.fortiview_tools import get_fortiview_data
     from fortianalyzer_mcp.tools.incident_tools import get_incident
 
     warnings: list[str] = []
@@ -859,7 +855,12 @@ async def run_incident_summary(params: IncidentSummaryParams) -> IncidentSummary
     threat_landscape: list[dict[str, Any]] | FeatureGap
     if params.include_top_threats:
         threats_res, err = await _call(
-            get_top_threats, adom=params.adom, time_range=params.time_range, limit=10
+            get_fortiview_data,
+            view_name="top-threats",
+            adom=params.adom,
+            time_range=params.time_range,
+            limit=10,
+            fields=["*"],
         )
         if threats_res is None:
             threat_landscape = FeatureGap(reason=f"top threats unavailable: {err}")
@@ -1300,10 +1301,7 @@ async def run_threat_intel(params: ThreatIntelParams) -> ThreatIntelResult:
     unenriched. The FortiView threat landscape is context and degrades to
     a gap marker. All reads are plain GETs — no logview search slots.
     """
-    # get_top_threats retired (Task 6); this call site is migrated in Task 8.
-    from fortianalyzer_mcp.tools.fortiview_tools import (  # type: ignore[attr-defined]
-        get_top_threats,
-    )
+    from fortianalyzer_mcp.tools.fortiview_tools import get_fortiview_data
     from fortianalyzer_mcp.tools.soar_tools import get_indicator_enrichment, get_linked_indicators
 
     warnings: list[str] = []
@@ -1394,10 +1392,12 @@ async def run_threat_intel(params: ThreatIntelParams) -> ThreatIntelResult:
     threat_landscape: list[dict[str, Any]] | FeatureGap
     if params.include_threat_landscape:
         threats_res, err = await _call(
-            get_top_threats,
+            get_fortiview_data,
+            view_name="top-threats",
             adom=params.adom,
             time_range=params.time_range or "24-hour",
             limit=10,
+            fields=["*"],
         )
         if threats_res is None:
             warnings.append(f"threat landscape unavailable: {err}")
@@ -1536,13 +1536,7 @@ async def run_app_usage(params: AppUsageParams) -> AppUsageResult:
     independently to a warning plus a ``FeatureGap``; the skill fails only
     when every attempted section fails.
     """
-    # get_top_applications/get_top_cloud_applications/get_top_websites retired
-    # (Task 6); this call site is migrated in Task 8.
-    from fortianalyzer_mcp.tools.fortiview_tools import (  # type: ignore[attr-defined]
-        get_top_applications,
-        get_top_cloud_applications,
-        get_top_websites,
-    )
+    from fortianalyzer_mcp.tools.fortiview_tools import get_fortiview_data
     from fortianalyzer_mcp.tools.log_tools import query_logs
 
     warnings: list[str] = []
@@ -1552,25 +1546,31 @@ async def run_app_usage(params: AppUsageParams) -> AppUsageResult:
     top_results = await _gather_bounded(
         [
             _call(
-                get_top_applications,
+                get_fortiview_data,
+                view_name="top-applications",
                 adom=params.adom,
                 device=params.device,
                 time_range=params.time_range,
                 limit=params.top_limit,
+                fields=["*"],
             ),
             _call(
-                get_top_websites,
+                get_fortiview_data,
+                view_name="top-websites",
                 adom=params.adom,
                 device=params.device,
                 time_range=params.time_range,
                 limit=params.top_limit,
+                fields=["*"],
             ),
             _call(
-                get_top_cloud_applications,
+                get_fortiview_data,
+                view_name="top-cloud-applications",
                 adom=params.adom,
                 device=params.device,
                 time_range=params.time_range,
                 limit=params.top_limit,
+                fields=["*"],
             ),
         ],
         limit=3,
@@ -1699,13 +1699,7 @@ async def run_network_context(params: NetworkContextParams) -> NetworkContextRes
     section becomes a warning plus a ``FeatureGap``. The skill fails only
     when every attempted section fails. Rows pass through verbatim.
     """
-    # get_top_destinations/get_top_sources retired (Task 6); this call site is
-    # migrated in Task 8.
-    from fortianalyzer_mcp.tools.fortiview_tools import (  # type: ignore[attr-defined]
-        get_fortiview_data,
-        get_top_destinations,
-        get_top_sources,
-    )
+    from fortianalyzer_mcp.tools.fortiview_tools import get_fortiview_data
 
     warnings: list[str] = []
     common: dict[str, Any] = {
@@ -1717,8 +1711,8 @@ async def run_network_context(params: NetworkContextParams) -> NetworkContextRes
 
     attempted = ["top_destinations", "top_sources"]
     coros = [
-        _call(get_top_destinations, **common),
-        _call(get_top_sources, **common),
+        _call(get_fortiview_data, view_name="top-destinations", fields=["*"], **common),
+        _call(get_fortiview_data, view_name="top-sources", fields=["*"], **common),
     ]
     if params.include_geo:
         attempted.append("top_countries")

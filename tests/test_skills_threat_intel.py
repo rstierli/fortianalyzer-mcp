@@ -19,7 +19,7 @@ from fortianalyzer_mcp.skills.models import SCHEMA_VERSION, FeatureGap, ThreatIn
 
 GET_LINKED = "fortianalyzer_mcp.tools.soar_tools.get_linked_indicators"
 GET_ENRICH = "fortianalyzer_mcp.tools.soar_tools.get_indicator_enrichment"
-GET_TOP_THREATS = "fortianalyzer_mcp.tools.fortiview_tools.get_top_threats"
+GET_FORTIVIEW_DATA = "fortianalyzer_mcp.tools.fortiview_tools.get_fortiview_data"
 
 
 def t(target: str, **kwargs: Any) -> Any:
@@ -138,7 +138,7 @@ class TestThreatIntel:
         mapping = {"203.0.113.7": [ENRICHED_IP], "good.example.com": [ENRICHED_DOMAIN]}
         with (
             t(GET_ENRICH, side_effect=enrich_map(mapping)) as enrich,
-            t(GET_TOP_THREATS, return_value=ok(data=THREATS)) as threats,
+            t(GET_FORTIVIEW_DATA, return_value=ok(data=THREATS)) as threats,
         ):
             result = await handlers.run_threat_intel(
                 ThreatIntelParams(indicators=EXPLICIT_TWO, detail_level="extended")
@@ -150,6 +150,7 @@ class TestThreatIntel:
         assert domain.reputation == "Good"
         assert enrich.call_args.kwargs["detail_level"] == "extended"
         assert enrich.call_args.kwargs["time_range"] is None
+        assert threats.call_args.kwargs["view_name"] == "top-threats"
         assert threats.call_args.kwargs["time_range"] == "24-hour"
         assert result.threat_landscape == THREATS
         assert result.warnings == []
@@ -157,7 +158,7 @@ class TestThreatIntel:
     async def test_extended_summarizes_per_source_verdicts(self):
         with (
             t(GET_ENRICH, return_value=ok(data=[EXTENDED_URL])),
-            t(GET_TOP_THREATS, return_value=ok(data=THREATS)),
+            t(GET_FORTIVIEW_DATA, return_value=ok(data=THREATS)),
         ):
             result = await handlers.run_threat_intel(
                 ThreatIntelParams(
@@ -186,7 +187,7 @@ class TestThreatIntel:
     async def test_standard_detail_has_no_source_breakdown(self):
         with (
             t(GET_ENRICH, return_value=ok(data=[ENRICHED_IP])),
-            t(GET_TOP_THREATS, return_value=ok(data=THREATS)),
+            t(GET_FORTIVIEW_DATA, return_value=ok(data=THREATS)),
         ):
             result = await handlers.run_threat_intel(
                 ThreatIntelParams(indicators=[{"value": "203.0.113.7", "type": "IP"}])
@@ -203,7 +204,7 @@ class TestThreatIntel:
         with (
             t(GET_LINKED, return_value=ok(data=linked)) as linked_mock,
             t(GET_ENRICH, side_effect=enrich_map(mapping)) as enrich,
-            t(GET_TOP_THREATS, return_value=ok(data=THREATS)),
+            t(GET_FORTIVIEW_DATA, return_value=ok(data=THREATS)),
         ):
             result = await handlers.run_threat_intel(
                 ThreatIntelParams(alert_id="AL0001", time_range="7-day")
@@ -224,7 +225,7 @@ class TestThreatIntel:
         with (
             t(GET_LINKED, return_value=ok(data=linked)),
             t(GET_ENRICH, side_effect=enrich_map({"203.0.113.7": [ENRICHED_IP]})) as enrich,
-            t(GET_TOP_THREATS, return_value=ok(data=THREATS)),
+            t(GET_FORTIVIEW_DATA, return_value=ok(data=THREATS)),
         ):
             result = await handlers.run_threat_intel(
                 ThreatIntelParams(
@@ -247,7 +248,7 @@ class TestThreatIntel:
 
         with (
             t(GET_ENRICH, side_effect=flaky),
-            t(GET_TOP_THREATS, return_value=ok(data=THREATS)),
+            t(GET_FORTIVIEW_DATA, return_value=ok(data=THREATS)),
         ):
             result = await handlers.run_threat_intel(ThreatIntelParams(indicators=EXPLICIT_TWO))
         assert result.indicator_count == 2
@@ -259,7 +260,7 @@ class TestThreatIntel:
     async def test_empty_enrichment_row_is_marked_not_fatal(self):
         with (
             t(GET_ENRICH, return_value=ok(data=[])),
-            t(GET_TOP_THREATS, return_value=ok(data=THREATS)),
+            t(GET_FORTIVIEW_DATA, return_value=ok(data=THREATS)),
         ):
             result = await handlers.run_threat_intel(
                 ThreatIntelParams(indicators=[{"value": "203.0.113.7", "type": "IP"}])
@@ -271,7 +272,7 @@ class TestThreatIntel:
     async def test_threat_landscape_failure_degrades_to_gap(self):
         with (
             t(GET_ENRICH, return_value=ok(data=[ENRICHED_IP])),
-            t(GET_TOP_THREATS, return_value={"status": "error", "message": "fortiview off"}),
+            t(GET_FORTIVIEW_DATA, return_value={"status": "error", "message": "fortiview off"}),
         ):
             result = await handlers.run_threat_intel(
                 ThreatIntelParams(indicators=[{"value": "203.0.113.7", "type": "IP"}])
@@ -283,7 +284,7 @@ class TestThreatIntel:
     async def test_landscape_disabled_skips_reader(self):
         with (
             t(GET_ENRICH, return_value=ok(data=[ENRICHED_IP])),
-            t(GET_TOP_THREATS) as threats,
+            t(GET_FORTIVIEW_DATA) as threats,
         ):
             result = await handlers.run_threat_intel(
                 ThreatIntelParams(
@@ -300,7 +301,7 @@ class TestThreatIntelDispatch:
     async def test_success_envelope(self):
         with (
             t(GET_ENRICH, return_value=ok(data=[ENRICHED_IP])),
-            t(GET_TOP_THREATS, return_value=ok(data=THREATS)),
+            t(GET_FORTIVIEW_DATA, return_value=ok(data=THREATS)),
         ):
             result = await faz_skill(
                 skill="threat_intel",
