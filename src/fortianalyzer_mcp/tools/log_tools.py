@@ -10,6 +10,12 @@ from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.query.filters import FilterCondition, compile_to_string
+from fortianalyzer_mcp.query.groups import (
+    GroupPlan,
+    UnsupportedGroupDimension,
+    aggregate_breakdowns,
+    resolve_group_plan,
+)
 from fortianalyzer_mcp.query.shape import fields_returned, project_rows, resolve_projection
 from fortianalyzer_mcp.server import get_faz_client, mcp
 from fortianalyzer_mcp.tool_annotations import DESTRUCTIVE, READ_ONLY
@@ -411,6 +417,10 @@ async def query_logs(
     filter: str | None = None,
     filters: list[FilterCondition] | None = None,
     fields: list[str] | None = None,
+    group_by: str | None = None,
+    sample_by: list[str] | None = None,
+    count_only: bool = False,
+    top_n: int = 10,
     limit: int = 100,
     offset: int = 0,
     timeout: int = DEFAULT_SEARCH_TIMEOUT,
@@ -475,6 +485,19 @@ async def query_logs(
             full row as before; or name the fields you want. English aliases
             work here exactly as they do in `filters`.
             Example: fields=["srcip", "dstip", "action", "sentbyte"]
+        group_by: Return exact per-value counts for one dimension instead of
+            rows. Only dimensions the appliance aggregates natively are
+            accepted (srcip, dstip, app, hostname, attack, policyid,
+            dstcountry); anything else is an error naming sample_by. The
+            answer is exact because the appliance counted it.
+        sample_by: Return per-value counts for one or more dimensions from a
+            bounded row scan. Unlike group_by this is a *sample*, and the
+            response says so: check is_exact and analysis_mode before quoting
+            any number. Derived dimensions work here: "port" is proto/dstport,
+            "icmp_type_code" decodes the ICMP pair FAZ hides in `service`.
+        count_only: Return just the total row count for the query.
+        top_n: Buckets per dimension for sample_by (default 10). 0 returns
+            every bucket.
         limit: Maximum logs to return (default: 100, max: 1000)
         offset: Offset for pagination (default: 0)
         timeout: Search timeout in seconds (default: 60)
@@ -556,7 +579,88 @@ async def query_logs(
         if filters:
             filter, filter_warnings = compile_to_string(filters, logtype)
 
-        projection, projection_warnings = resolve_projection(logtype, fields)
+        # Exactly one aggregation mode, or none. Two would each describe a
+        # different response shape and there is no sensible merge.
+        chosen = [
+            name
+            for name, active in (
+                ("group_by", group_by is not None),
+                ("sample_by", bool(sample_by)),
+                ("count_only", count_only),
+            )
+            if active
+        ]
+        if len(chosen) > 1:
+            return error_response(
+                error="conflicting_aggregation",
+                message=(
+                    f"Pass at most one of group_by, sample_by or count_only; got "
+                    f"{', '.join(chosen)}. Each returns a different response shape."
+                ),
+                operation="query_logs",
+                adom=adom,
+                logtype=logtype,
+                recommendation=(
+                    "Use group_by for an exact grouping the appliance computes, "
+                    "sample_by for a bounded breakdown over a row scan, or count_only "
+                    "for just the total."
+                ),
+            )
+
+        aggregating = bool(chosen)
+        if aggregating and fields is not None:
+            # Inert rather than fatal: it describes a row shape that no rows
+            # will be returned in, which is a harmless mistake, not a wrong
+            # query.
+            filter_warnings.append(
+                f"'fields' is ignored with {chosen[0]}: no raw rows are returned."
+            )
+
+        projection: frozenset[str] | None
+        projection_warnings: list[str]
+        if aggregating:
+            projection, projection_warnings = None, []
+        else:
+            projection, projection_warnings = resolve_projection(logtype, fields)
+
+        # Validate group_by before touching the client: an unsupported dimension
+        # or an unverified filter combination is a pure input error and should
+        # be refused without ever starting a session.
+        group_plan: GroupPlan | None = None
+        if group_by is not None:
+            try:
+                group_plan = resolve_group_plan(logtype, group_by)
+            except UnsupportedGroupDimension as e:
+                return error_response(
+                    error="unsupported_group_dimension",
+                    message=str(e),
+                    operation="query_logs",
+                    adom=adom,
+                    logtype=logtype,
+                    recommendation=f"Use sample_by=['{group_by}'] for a bounded breakdown.",
+                )
+
+            # Task 0 could not prove this view honours a logview filter. Forwarding
+            # it would return an unfiltered top-N under is_exact: true -- a
+            # confident answer about a population nobody asked for.
+            if filter:
+                return error_response(
+                    error="unsupported_view_filter",
+                    message=(
+                        f"group_by='{group_by}' dispatches to the FortiView view "
+                        f"'{group_plan.target}', and this server has not verified that the "
+                        "view applies a logview filter rather than ignoring it. Refusing "
+                        "rather than returning a top-N that may cover unfiltered traffic."
+                    ),
+                    operation="query_logs",
+                    adom=adom,
+                    logtype=logtype,
+                    recommendation=(
+                        f"Drop the filter to group the whole window, or use "
+                        f"sample_by=['{group_by}'] which applies the filter and labels the "
+                        "result as a bounded sample."
+                    ),
+                )
 
         client = _get_client()
         await client.ensure_connected()
@@ -590,6 +694,39 @@ async def query_logs(
         offset = max(0, offset)
         timeout = _clamp_timeout(timeout)
 
+        if group_plan is not None:
+            from fortianalyzer_mcp.tools.fortiview_tools import get_fortiview_data
+
+            view: dict[str, Any] = await get_fortiview_data(
+                view_name=group_plan.target,
+                adom=adom,
+                # The plan carries FortiView's own all-devices token; passing
+                # logview's All_FortiGate here returns an empty top-N silently.
+                device=device or group_plan.all_devices_group,
+                time_range=time_range,
+                filter=filter,
+                limit=limit,
+                fields=["*"],
+            )
+            if view.get("status") != "success":
+                return view
+
+            return {
+                "status": "success",
+                "adom": adom,
+                "logtype": logtype,
+                "group_by": group_plan.dimension,
+                "groups": view.get("data", []),
+                "group_source": f"fortiview:{group_plan.target}",
+                # The appliance aggregated this. That is the whole reason
+                # group_by refuses dimensions with no native surface.
+                "is_exact": True,
+                "time_range": time_range_dict,
+                "timezone": tz_name,
+                "filter": filter,
+                "warnings": filter_warnings,
+            }
+
         # Run this page as a self-contained search (FAZ tids are single-use).
         logger.info(
             f"Starting log search: adom={adom}, logtype={logtype}, "
@@ -617,6 +754,57 @@ async def query_logs(
                 time_range=time_range_dict,
                 timezone=tz_name,
             )
+
+        if count_only:
+            total = page["total"]
+            return {
+                "status": "success",
+                "adom": adom,
+                "logtype": logtype,
+                "total": total,
+                "total_is_known": total is not None,
+                "count_source": "logsearch_total_count",
+                "time_range": time_range_dict,
+                "timezone": tz_name,
+                "filter": filter,
+                "warnings": filter_warnings,
+            }
+
+        if sample_by:
+            rows = page["logs"]
+            observed = len(rows)
+            total = page["total"]
+            total_known = total is not None
+            # One page, one window: exact only when the appliance's own total
+            # equals what we actually scanned. A full page means rows were
+            # left behind, so nothing here may claim exactness.
+            truncated = observed >= limit
+            is_exact = total_known and not truncated and total == observed
+            return {
+                "status": "success",
+                "adom": adom,
+                "logtype": logtype,
+                "sample_by": list(sample_by),
+                "breakdowns": aggregate_breakdowns(rows, list(sample_by), top_n=top_n),
+                "is_exact": is_exact,
+                "analysis_mode": "exact" if is_exact else "bounded_sample",
+                "total_hits": total if total_known else observed,
+                "total_hits_is_known": total_known,
+                "total_hit_source": "logsearch_total_count" if total_known else "observed_rows",
+                "observed_hits": observed,
+                "log_limit_per_slice": limit,
+                "slices_scanned": 1,
+                "truncated_slices": 1 if truncated else 0,
+                "recommendation": (
+                    "Narrow the time window or raise limit for a closer count."
+                    if not is_exact
+                    else ""
+                ),
+                "time_range": time_range_dict,
+                "timezone": tz_name,
+                "filter": filter,
+                "warnings": filter_warnings,
+            }
 
         logs = project_rows(page["logs"], projection)
         count = len(logs)

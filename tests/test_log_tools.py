@@ -565,3 +565,154 @@ class TestSearchWrappersForwardFields:
         assert "sessionid" in traffic["logs"][0], "traffic join key must survive"
         assert "srcintf" not in events["logs"][0], "srcintf is not an event field"
         assert "subtype" in events["logs"][0], "event discriminator must survive"
+
+
+class TestQueryLogsAggregationModes:
+    """Four modes, mutually exclusive, each labelled for what it is."""
+
+    CUSTOM_RANGE = "2024-01-01 00:00:00|2024-01-02 00:00:00"
+    ROWS = [
+        {"app": "HTTPS", "proto": "6", "dstport": "443"},
+        {"app": "HTTPS", "proto": "6", "dstport": "443"},
+        {"app": "HTTP", "proto": "6", "dstport": "80"},
+    ]
+
+    class _Faz:
+        async def ensure_connected(self) -> None:
+            return None
+
+        async def get_system_timezone(self) -> None:
+            return None
+
+    def _install(self, monkeypatch: pytest.MonkeyPatch, total: int | None = 3) -> None:
+        async def fake_page(client: object, **kwargs: object) -> dict[str, object]:
+            return {
+                "timed_out": False,
+                "tid": 11,
+                "logs": [dict(r) for r in TestQueryLogsAggregationModes.ROWS],
+                "total": total,
+            }
+
+        monkeypatch.setattr(log_tools, "get_faz_client", lambda: self._Faz())
+        monkeypatch.setattr(log_tools, "_run_logsearch_page", fake_page)
+
+    async def test_sample_by_returns_labelled_breakdowns_and_no_rows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._install(monkeypatch)
+
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, sample_by=["app"]
+        )
+
+        assert "logs" not in result, "aggregation modes suppress raw rows"
+        assert result["breakdowns"]["app"][0] == {"value": "HTTPS", "hits": 2}
+        assert result["analysis_mode"] in ("bounded_sample", "exact")
+        assert "is_exact" in result
+        assert "total_hits_is_known" in result
+
+    async def test_sample_by_accepts_several_dimensions(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._install(monkeypatch)
+
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, sample_by=["app", "port"]
+        )
+
+        assert set(result["breakdowns"]) == {"app", "port"}
+
+    async def test_sample_by_top_n_zero_keeps_every_bucket(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._install(monkeypatch)
+
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, sample_by=["app"], top_n=0
+        )
+
+        assert len(result["breakdowns"]["app"]) == 2
+
+    async def test_count_only_returns_a_total_and_no_rows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._install(monkeypatch)
+
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, count_only=True
+        )
+
+        assert "logs" not in result
+        assert result["total"] == 3
+        assert result["total_is_known"] is True
+        assert result["count_source"]
+
+    async def test_count_only_is_honest_when_the_appliance_gave_no_total(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._install(monkeypatch, total=None)
+
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, count_only=True
+        )
+
+        assert result["total_is_known"] is False
+
+    async def test_group_by_and_sample_by_together_conflict(self) -> None:
+        result = await log_tools.query_logs(logtype="traffic", group_by="srcip", sample_by=["app"])
+
+        assert result["status"] == "error"
+        assert result["error"] == "conflicting_aggregation"
+
+    async def test_count_only_with_sample_by_conflicts(self) -> None:
+        result = await log_tools.query_logs(logtype="traffic", sample_by=["app"], count_only=True)
+
+        assert result["error"] == "conflicting_aggregation"
+
+    async def test_an_unsupported_group_dimension_names_sample_by(self) -> None:
+        result = await log_tools.query_logs(logtype="traffic", group_by="sentbyte")
+
+        assert result["status"] == "error"
+        assert result["error"] == "unsupported_group_dimension"
+        assert "sample_by" in result["message"]
+
+    # Include this test ONLY if Task 0 put you on the refusal branch -- i.e. the
+    # probe found filters silently ignored for the target view, or you had no
+    # appliance and took the conservative fallback. If Task 0 proved the view
+    # honours filters, delete this test and assert the forwarding instead:
+    # that the fake's fortiview_run received the compiled filter string.
+    async def test_group_by_with_a_filter_is_refused_when_unverified(self) -> None:
+        """An ignored filter would return an unfiltered top-N under is_exact."""
+        result = await log_tools.query_logs(
+            logtype="traffic", group_by="srcip", filter="dstport==443"
+        )
+
+        assert result["status"] == "error"
+        assert result["error"] == "unsupported_view_filter"
+        assert "sample_by" in result["recommendation"]
+
+    async def test_fields_with_an_aggregation_warns_rather_than_erroring(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """fields describes a row shape no rows will be returned in."""
+        self._install(monkeypatch)
+
+        result = await log_tools.query_logs(
+            logtype="traffic",
+            time_range=self.CUSTOM_RANGE,
+            sample_by=["app"],
+            fields=["srcip"],
+        )
+
+        assert result["status"] == "success"
+        assert any("fields" in w for w in result["warnings"])
+
+    async def test_rows_mode_is_unchanged_when_no_aggregation_is_asked_for(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._install(monkeypatch)
+
+        result = await log_tools.query_logs(logtype="traffic", time_range=self.CUSTOM_RANGE)
+
+        assert "logs" in result
+        assert "breakdowns" not in result
