@@ -785,7 +785,11 @@ def _timeline(incident: dict[str, Any], evidence: list[AlertEvidence]) -> list[T
 async def run_incident_summary(params: IncidentSummaryParams) -> IncidentSummary:
     """Structured investigation summary for one incident."""
     from fortianalyzer_mcp.tools.event_tools import get_alert_logs, get_alerts
-    from fortianalyzer_mcp.tools.fortiview_tools import get_top_threats
+
+    # get_top_threats retired (Task 6); this call site is migrated in Task 8.
+    from fortianalyzer_mcp.tools.fortiview_tools import (  # type: ignore[attr-defined]
+        get_top_threats,
+    )
     from fortianalyzer_mcp.tools.incident_tools import get_incident
 
     warnings: list[str] = []
@@ -1296,7 +1300,10 @@ async def run_threat_intel(params: ThreatIntelParams) -> ThreatIntelResult:
     unenriched. The FortiView threat landscape is context and degrades to
     a gap marker. All reads are plain GETs — no logview search slots.
     """
-    from fortianalyzer_mcp.tools.fortiview_tools import get_top_threats
+    # get_top_threats retired (Task 6); this call site is migrated in Task 8.
+    from fortianalyzer_mcp.tools.fortiview_tools import (  # type: ignore[attr-defined]
+        get_top_threats,
+    )
     from fortianalyzer_mcp.tools.soar_tools import get_indicator_enrichment, get_linked_indicators
 
     warnings: list[str] = []
@@ -1529,7 +1536,9 @@ async def run_app_usage(params: AppUsageParams) -> AppUsageResult:
     independently to a warning plus a ``FeatureGap``; the skill fails only
     when every attempted section fails.
     """
-    from fortianalyzer_mcp.tools.fortiview_tools import (
+    # get_top_applications/get_top_cloud_applications/get_top_websites retired
+    # (Task 6); this call site is migrated in Task 8.
+    from fortianalyzer_mcp.tools.fortiview_tools import (  # type: ignore[attr-defined]
         get_top_applications,
         get_top_cloud_applications,
         get_top_websites,
@@ -1690,7 +1699,9 @@ async def run_network_context(params: NetworkContextParams) -> NetworkContextRes
     section becomes a warning plus a ``FeatureGap``. The skill fails only
     when every attempted section fails. Rows pass through verbatim.
     """
-    from fortianalyzer_mcp.tools.fortiview_tools import (
+    # get_top_destinations/get_top_sources retired (Task 6); this call site is
+    # migrated in Task 8.
+    from fortianalyzer_mcp.tools.fortiview_tools import (  # type: ignore[attr-defined]
         get_fortiview_data,
         get_top_destinations,
         get_top_sources,
