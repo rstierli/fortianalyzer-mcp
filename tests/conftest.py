@@ -12,6 +12,74 @@ import pytest
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 
 # =============================================================================
+# Isolated skills-dispatcher import
+# =============================================================================
+
+
+def import_dispatcher_isolated(*names: str) -> tuple[Any, ...]:
+    """Import names from ``fortianalyzer_mcp.skills.dispatcher`` without
+    leaving ``faz_skill`` registered on the shared, process-global
+    ``fortianalyzer_mcp.server.mcp`` singleton.
+
+    Eleven test modules (``test_skills.py`` and ten ``test_skills_*.py``
+    siblings) need ``faz_skill`` as a plain callable to invoke directly --
+    not through MCP protocol dispatch -- which is naturally done with a
+    module-level ``from fortianalyzer_mcp.skills.dispatcher import
+    faz_skill``. But ``dispatcher.py`` has no gate of its own on
+    ``FAZ_SKILLS_ENABLED`` (that gate is ``server.py``'s conditional import
+    of the module); it just does ``from fortianalyzer_mcp.server import
+    mcp`` and ``@mcp.tool()``-decorates ``faz_skill`` unconditionally at
+    import time. So a plain import registers ``faz_skill`` onto the real,
+    shared singleton regardless of settings, and every one of the eleven
+    files doing so previously left it there permanently -- visible to any
+    other test in the same session that enumerates
+    ``fortianalyzer_mcp.server.mcp``'s registered tools (e.g.
+    ``test_tool_catalogue_parity.py``), and doing so in a way that depended
+    on which of the eleven files happened to collect first.
+
+    A throwaway ``FastMCP`` substitute for the duration of the import would
+    also stop the registration leak, but changes ``faz_skill``'s own
+    *behavior*: ``install_masking()`` (``masking/wrapper.py``) patches
+    ``mcp.tool`` on the real, process-global singleton to wrap every
+    registered tool's result in masking -- so decorating against a
+    substitute instead means ``faz_skill`` never gets that wrap under
+    ``MASKING_ENABLED=true``, silently testing a differently-behaved
+    function than a real deployment (or ``FAZ_SKILLS_ENABLED=true``) would
+    have. (This is exactly what the first version of this fix, isolating via
+    a substitute ``FastMCP``, got wrong: it made a masked-suite failure that
+    predates this plan -- ``test_skills_network_context.py``'s
+    ``test_success_envelope_with_serialized_gap`` -- disappear depending on
+    which test file happened to import the dispatcher first, rather than
+    failing consistently.)
+
+    So instead: let the import run against the real ``mcp`` untouched,
+    preserving whatever ``mcp.tool`` currently does (masking-patched or
+    not), then immediately de-register just the ``faz_skill`` entry -- but
+    only if *this* call is the one that just added it. ``dispatcher.py``
+    only executes its top-level code (including the ``@mcp.tool()`` line)
+    on the first-ever import of the module in the whole process; every
+    import after that -- by one of the other ten files, or by a real
+    ``FAZ_SKILLS_ENABLED=true`` deployment that imports it first -- is a
+    cache hit that neither re-runs the decorator nor re-registers anything,
+    so it must not attempt a removal either (``faz_skill`` would already be
+    gone by then, and ``ToolManager.remove_tool`` raises on an unknown
+    name). Whether *this* call is the first-ever import is exactly what
+    ``sys.modules`` containment answers -- checked *before* the import,
+    since the import is what would add the entry.
+    """
+    import sys
+
+    import fortianalyzer_mcp.server as server_module
+
+    first_ever_import = "fortianalyzer_mcp.skills.dispatcher" not in sys.modules
+    import fortianalyzer_mcp.skills.dispatcher as dispatcher_module
+
+    if first_ever_import:
+        server_module.mcp._tool_manager.remove_tool("faz_skill")
+    return tuple(getattr(dispatcher_module, name) for name in names)
+
+
+# =============================================================================
 # Mock Response Data
 # =============================================================================
 

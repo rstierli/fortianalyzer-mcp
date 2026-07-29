@@ -18,7 +18,6 @@ from pydantic import ValidationError
 
 from fortianalyzer_mcp.skills import handlers
 from fortianalyzer_mcp.skills.catalog import SKILLS
-from fortianalyzer_mcp.skills.dispatcher import faz_skill
 from fortianalyzer_mcp.skills.models import (
     SCHEMA_VERSION,
     AssetLookupResult,
@@ -28,6 +27,9 @@ from fortianalyzer_mcp.skills.models import (
     InvestigateParams,
     ThreatIntelResult,
 )
+from tests.conftest import import_dispatcher_isolated
+
+(faz_skill,) = import_dispatcher_isolated("faz_skill")
 
 GET_INCIDENT = "fortianalyzer_mcp.tools.incident_tools.get_incident"
 GET_INCIDENTS = "fortianalyzer_mcp.tools.incident_tools.get_incidents"

@@ -14,13 +14,15 @@ from pydantic import ValidationError
 
 from fortianalyzer_mcp.skills import handlers
 from fortianalyzer_mcp.skills.catalog import SKILLS
-from fortianalyzer_mcp.skills.dispatcher import faz_skill
 from fortianalyzer_mcp.skills.models import (
     SCHEMA_VERSION,
     AlertRulesParams,
     AssetLookupParams,
     IdentityLookupParams,
 )
+from tests.conftest import import_dispatcher_isolated
+
+(faz_skill,) = import_dispatcher_isolated("faz_skill")
 
 WAVE2_DATA_ACCESS_IDS = {"asset_lookup", "identity_lookup", "alert_rules"}
 

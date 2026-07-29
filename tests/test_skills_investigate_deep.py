@@ -17,7 +17,6 @@ from pydantic import ValidationError
 
 from fortianalyzer_mcp.skills import handlers
 from fortianalyzer_mcp.skills.catalog import SKILLS
-from fortianalyzer_mcp.skills.dispatcher import faz_skill
 from fortianalyzer_mcp.skills.models import (
     SCHEMA_VERSION,
     DeepInvestigateParams,
@@ -26,6 +25,9 @@ from fortianalyzer_mcp.skills.models import (
     Investigation,
     RootCause,
 )
+from tests.conftest import import_dispatcher_isolated
+
+(faz_skill,) = import_dispatcher_isolated("faz_skill")
 
 GET_INCIDENT = "fortianalyzer_mcp.tools.incident_tools.get_incident"
 GET_ALERTS = "fortianalyzer_mcp.tools.event_tools.get_alerts"

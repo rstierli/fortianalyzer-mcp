@@ -16,8 +16,10 @@ import pytest
 
 from fortianalyzer_mcp.skills import handlers
 from fortianalyzer_mcp.skills.catalog import SKILLS
-from fortianalyzer_mcp.skills.dispatcher import faz_skill
 from fortianalyzer_mcp.skills.models import LogSearchResult, TriageParams
+from tests.conftest import import_dispatcher_isolated
+
+(faz_skill,) = import_dispatcher_isolated("faz_skill")
 
 # A secret shaped exactly like what redact() scrubs (key=value + long hex run).
 SECRET_KV = "session=0123456789abcdef0123456789abcdef"

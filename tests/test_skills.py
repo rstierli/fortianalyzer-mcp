@@ -17,7 +17,6 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
 
 from fortianalyzer_mcp.skills import handlers
@@ -31,41 +30,9 @@ from fortianalyzer_mcp.skills.models import (
     ReportsParams,
     TriageParams,
 )
+from tests.conftest import import_dispatcher_isolated
 
-
-def _import_dispatcher_without_polluting_the_shared_mcp() -> tuple[Any, Any]:
-    """Import ``faz_skill``/``_redact_warnings`` without registering them onto
-    the real, process-shared ``fortianalyzer_mcp.server.mcp``.
-
-    ``dispatcher.py`` does ``from fortianalyzer_mcp.server import mcp`` and
-    then ``@mcp.tool()``-decorates ``faz_skill`` at *import* time, with no
-    gate of its own on ``FAZ_SKILLS_ENABLED`` -- that gate lives in
-    ``server.py``'s conditional import of this module, not here. A plain,
-    module-level ``from fortianalyzer_mcp.skills.dispatcher import faz_skill``
-    (the natural way to unit-test it directly) therefore permanently
-    registers ``faz_skill`` on the shared singleton the moment this test file
-    is collected, regardless of settings -- and every other test module
-    collected afterward that enumerates ``fortianalyzer_mcp.server.mcp``'s
-    registered tools (e.g. anything checking the full tool surface) sees it
-    too, even in a plain ``FAZ_TOOL_MODE=full`` run with skills off.
-
-    Swap in a throwaway ``FastMCP`` instance for the (one-time) duration of
-    the import so the decorator has somewhere harmless to land instead. The
-    functions returned are the same objects dispatcher.py defines either way;
-    only where the decorator registered them changes.
-    """
-    import fortianalyzer_mcp.server as server_module
-
-    original_mcp = server_module.mcp
-    server_module.mcp = FastMCP("test-skills-isolated")
-    try:
-        from fortianalyzer_mcp.skills.dispatcher import _redact_warnings, faz_skill
-    finally:
-        server_module.mcp = original_mcp
-    return _redact_warnings, faz_skill
-
-
-_redact_warnings, faz_skill = _import_dispatcher_without_polluting_the_shared_mcp()
+_redact_warnings, faz_skill = import_dispatcher_isolated("_redact_warnings", "faz_skill")
 
 WAVE1_SKILL_IDS = {"incidents", "reports", "log_search", "triage", "incident_summary"}
 WAVE2_DATA_ACCESS_IDS = {"asset_lookup", "identity_lookup", "alert_rules"}
