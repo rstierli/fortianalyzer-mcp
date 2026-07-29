@@ -5,6 +5,7 @@ without triggering server initialization.
 """
 
 import logging
+from typing import Any
 
 import pytest
 
@@ -15,9 +16,6 @@ from fortianalyzer_mcp.tools.traffic_tools import (
     ANALYSIS_QUERY_BUDGET,
     LOG_FETCH_LIMIT,
     VALID_ACTIONS,
-    _aggregate_port_analysis,
-    _aggregate_protocol_summary,
-    _aggregate_traffic_profile,
     _bounded_metadata,
     _build_bounded_time_slices,
     _build_policy_filter,
@@ -293,180 +291,6 @@ class TestBuildPolicyFilter:
 
 
 # =============================================================================
-# Aggregation: traffic profile
-# =============================================================================
-
-
-class TestAggregateTrafficProfile:
-    """Tests for traffic profile aggregation."""
-
-    def test_empty_logs(self) -> None:
-        """Empty log list should return zero counts."""
-        result = _aggregate_traffic_profile([], 10)
-        assert result["total_hits"] == 0
-        assert result["top_ports"] == []
-        assert result["top_services"] == []
-        assert result["top_applications"] == []
-
-    def test_basic_aggregation(self) -> None:
-        """Basic aggregation of ports, services, apps."""
-        logs = [
-            {"dstport": 443, "proto": "6", "service": "HTTPS", "app": "SSL"},
-            {"dstport": 443, "proto": "6", "service": "HTTPS", "app": "SSL"},
-            {"dstport": 80, "proto": "6", "service": "HTTP", "app": "HTTP"},
-        ]
-        result = _aggregate_traffic_profile(logs, 10)
-        assert result["total_hits"] == 3
-        assert len(result["top_ports"]) == 2
-        # Port 443 should be first (2 hits)
-        assert result["top_ports"][0]["port"] == "6/443"
-        assert result["top_ports"][0]["hits"] == 2
-
-    def test_top_n_limiting(self) -> None:
-        """top_n should limit the number of returned items."""
-        logs = [{"dstport": i, "proto": "6", "service": f"svc-{i}"} for i in range(20)]
-        result = _aggregate_traffic_profile(logs, 5)
-        assert len(result["top_ports"]) == 5
-        assert len(result["top_services"]) == 5
-
-    def test_residual_calculation(self) -> None:
-        """Residual should be total minus top hits."""
-        logs = [
-            {"dstport": 443, "proto": "6"},
-            {"dstport": 443, "proto": "6"},
-            {"dstport": 80, "proto": "6"},
-            {"dstport": 22, "proto": "6"},
-        ]
-        result = _aggregate_traffic_profile(logs, 1)
-        # top_n=1 should return port 443 with 2 hits
-        assert result["top_ports"][0]["hits"] == 2
-        assert result["top_ports_residual"] == 2  # 4 total - 2 top hits
-
-    def test_missing_fields(self) -> None:
-        """Logs with missing fields should not crash."""
-        logs = [
-            {"srcip": "10.0.0.1"},  # No dstport, service, app
-            {"dstport": 443, "proto": "6"},  # No service, app
-        ]
-        result = _aggregate_traffic_profile(logs, 10)
-        assert result["total_hits"] == 2
-        assert len(result["top_ports"]) == 1
-        assert result["top_services"] == []
-        assert result["top_applications"] == []
-
-
-# =============================================================================
-# Aggregation: port analysis
-# =============================================================================
-
-
-class TestAggregatePortAnalysis:
-    """Tests for port analysis aggregation."""
-
-    def test_empty_logs(self) -> None:
-        """Empty logs should return zero counts."""
-        result = _aggregate_port_analysis([])
-        assert result["total_hits"] == 0
-        assert "is_exact" not in result  # Exactness set by _bounded_metadata
-        assert result["ports"] == []
-        assert result["protocols"] == []
-        assert result["uncovered_port_hits"] == 0
-
-    def test_aggregation_does_not_include_is_exact(self) -> None:
-        """_aggregate_port_analysis should not set is_exact (caller's responsibility)."""
-        logs = [{"dstport": 80, "proto": "6"} for _ in range(100)]
-        result = _aggregate_port_analysis(logs)
-        assert "is_exact" not in result
-        assert result["total_hits"] == 100
-
-    def test_basic_port_enumeration(self) -> None:
-        """Basic port/protocol enumeration."""
-        logs = [
-            {"dstport": 443, "proto": "6"},
-            {"dstport": 80, "proto": "6"},
-            {"dstport": 53, "proto": "17"},
-        ]
-        result = _aggregate_port_analysis(logs)
-        assert result["total_hits"] == 3
-        assert len(result["ports"]) == 3
-        assert result["uncovered_port_hits"] == 0
-
-    def test_icmp_handling(self) -> None:
-        """ICMP logs should be tracked via service field (FAZ format)."""
-        logs = [
-            # FAZ encodes ICMP echo as service=PING
-            {"proto": "1", "dstport": 0, "service": "PING"},
-            {"proto": "1", "dstport": 0, "service": "PING"},
-            # FAZ encodes ICMP type/code as service=icmp/T/C
-            {"proto": "1", "dstport": 0, "service": "icmp/3/3"},
-        ]
-        result = _aggregate_port_analysis(logs)
-        assert result["total_hits"] == 3
-        assert "1" in result["portless_protocols"]
-        assert len(result["icmp"]) == 2
-        # PING (type=8/code=0) should be most common
-        assert result["icmp"][0]["type_code"] == "type=8/code=0"
-        assert result["icmp"][0]["hits"] == 2
-        # icmp/3/3 → type=3/code=3
-        assert result["icmp"][1]["type_code"] == "type=3/code=3"
-        assert result["icmp"][1]["hits"] == 1
-
-    def test_icmp_unrecognized_service_not_leaked(self) -> None:
-        """ICMP whose service field is an application name (not an ICMP
-        encoding) must be recorded as type=unknown, never leaked as
-        service=<name> into type_code.
-
-        Real case: a FortiGate SD-WAN SLA health-check pings a DNS server, so
-        the ICMP (proto=1) packet is logged with service="DNS".
-        """
-        logs = [
-            {"proto": "1", "dstport": 0, "service": "DNS"},
-            {"proto": "1", "dstport": 0, "service": "DNS"},
-            # Malformed icmp/ value falls back to unknown too.
-            {"proto": "1", "dstport": 0, "service": "icmp/bogus"},
-        ]
-        result = _aggregate_port_analysis(logs)
-        assert result["icmp"] == [{"type_code": "type=unknown", "hits": 3}]
-        # The raw service name is never leaked into type_code.
-        assert all("service=" not in e["type_code"] for e in result["icmp"])
-
-    def test_icmp_empty_service_counted_as_unknown(self) -> None:
-        """ICMP rows with an empty or missing service field must still appear
-        in the icmp breakdown (as type=unknown), so the icmp hit sum always
-        matches the proto=1 count in the protocols breakdown."""
-        logs = [
-            {"proto": "1", "dstport": 0, "service": ""},
-            {"proto": "1", "dstport": 0},  # service key absent entirely
-            {"proto": "1", "dstport": 0, "service": "PING"},
-        ]
-        result = _aggregate_port_analysis(logs)
-        icmp_total = sum(e["hits"] for e in result["icmp"])
-        proto1_hits = next(p["hits"] for p in result["protocols"] if p["protocol"] == "1")
-        assert icmp_total == proto1_hits == 3
-        assert {"type_code": "type=unknown", "hits": 2} in result["icmp"]
-
-    def test_portless_protocols(self) -> None:
-        """Protocols without ports (GRE, ESP) should be tracked."""
-        logs = [
-            {"proto": "47", "dstport": 0},  # GRE
-            {"proto": "50"},  # ESP, no dstport at all
-        ]
-        result = _aggregate_port_analysis(logs)
-        assert "47" in result["portless_protocols"]
-        assert "50" in result["portless_protocols"]
-        assert result["uncovered_port_hits"] == 2
-
-    def test_uncovered_port_hits(self) -> None:
-        """Logs without destination ports count as uncovered."""
-        logs = [
-            {"dstport": 443, "proto": "6"},  # Has port
-            {"proto": "1"},  # No port
-        ]
-        result = _aggregate_port_analysis(logs)
-        assert result["uncovered_port_hits"] == 1
-
-
-# =============================================================================
 # Tool behavior: bounded policy analysis
 # =============================================================================
 
@@ -532,7 +356,7 @@ class TestPolicyPortAnalysisToolBounded:
 
         monkeypatch.setattr(traffic_tools, "_query_policy_log_slice", fake_slice)
 
-        result = await traffic_tools.get_policy_port_analysis(
+        result = await traffic_tools.analyze_policy_traffic(
             adom="root",
             device="FGT60FTK00000001",
             policy_ids=[2],
@@ -575,12 +399,13 @@ class TestPolicyPortAnalysisToolBounded:
 
         monkeypatch.setattr(traffic_tools, "_query_policy_log_slice", fake_slice)
 
-        result = await traffic_tools.get_policy_port_analysis(
+        result = await traffic_tools.analyze_policy_traffic(
             adom="root",
             device="FGT60FTK00000001",
             policy_ids=[29],
             time_range="2024-01-01 00:00:00|2024-01-31 00:00:00",
             action="accept",
+            sample_by=["port"],
         )
 
         assert result["status"] == "success"
@@ -590,7 +415,7 @@ class TestPolicyPortAnalysisToolBounded:
         assert analysis["total_hits"] == 10
         assert analysis["total_hits_is_known"] is True
         assert analysis["total_hit_source"] == "logsearch_total-count"
-        assert analysis["ports"] == [{"port": "17/161", "hits": 10}]
+        assert analysis["breakdowns"]["port"] == [{"value": "17/161", "hits": 10}]
         # Every slice fully scanned (total == rows, none truncated) -> complete.
         assert analysis["is_exact"] is True
         assert analysis["analysis_mode"] == "complete"
@@ -611,7 +436,7 @@ class TestPolicyPortAnalysisToolBounded:
 
         monkeypatch.setattr(traffic_tools, "_query_policy_log_slice", fake_slice)
 
-        result = await traffic_tools.get_policy_port_analysis(
+        result = await traffic_tools.analyze_policy_traffic(
             adom="root",
             device="FGT60FTK00000001",
             policy_ids=[2],
@@ -653,7 +478,7 @@ class TestPolicyPortAnalysisToolBounded:
 
         monkeypatch.setattr(traffic_tools, "_query_policy_log_slice", fake_slice)
 
-        result = await traffic_tools.get_policy_port_analysis(
+        result = await traffic_tools.analyze_policy_traffic(
             adom="root",
             device="FGT60FTK00000001",
             policy_ids=[1, 2],
@@ -685,7 +510,7 @@ class TestPolicyToolAuditMetadata:
 
         monkeypatch.setattr(traffic_tools, "_query_policy_log_slice", fake_slice)
 
-        result = await traffic_tools.get_policy_port_analysis(
+        result = await traffic_tools.analyze_policy_traffic(
             adom="root",
             device="FGT60FTK00000001",
             policy_ids=[2],
@@ -704,63 +529,6 @@ class TestPolicyToolAuditMetadata:
         assert result["time_basis_source"] == "custom"
         assert result["clock_skew_seconds"] is None
         assert result["results"][0]["filter"] == "policyid==2 and action==accept"
-
-
-# =============================================================================
-# Aggregation: protocol summary
-# =============================================================================
-
-
-class TestAggregateProtocolSummary:
-    """Tests for protocol summary aggregation."""
-
-    def test_empty_logs(self) -> None:
-        """Empty logs should return zero hits."""
-        result = _aggregate_protocol_summary([])
-        assert result["total_hits"] == 0
-        assert result["protocols"] == []
-
-    def test_protocol_name_mapping(self) -> None:
-        """Protocol numbers should be mapped to names."""
-        logs = [
-            {"proto": "6"},
-            {"proto": "6"},
-            {"proto": "17"},
-            {"proto": "1"},
-        ]
-        result = _aggregate_protocol_summary(logs)
-        assert result["total_hits"] == 4
-        proto_map = {p["protocol"]: p["hits"] for p in result["protocols"]}
-        assert proto_map["TCP"] == 2
-        assert proto_map["UDP"] == 1
-        assert proto_map["ICMP"] == 1
-
-    def test_unknown_protocol(self) -> None:
-        """Unknown protocol numbers should be labeled as other(N)."""
-        logs = [{"proto": "99"}]
-        result = _aggregate_protocol_summary(logs)
-        assert result["protocols"][0]["protocol"] == "other(99)"
-
-    def test_missing_proto_field(self) -> None:
-        """Logs without proto field should use 'unknown'."""
-        logs = [{"srcip": "10.0.0.1"}]
-        result = _aggregate_protocol_summary(logs)
-        assert result["protocols"][0]["protocol"] == "other(unknown)"
-
-    def test_protocol_ordering(self) -> None:
-        """Protocols should be ordered by hit count descending."""
-        logs = [
-            {"proto": "17"},
-            {"proto": "6"},
-            {"proto": "6"},
-            {"proto": "6"},
-            {"proto": "17"},
-        ]
-        result = _aggregate_protocol_summary(logs)
-        assert result["protocols"][0]["protocol"] == "TCP"
-        assert result["protocols"][0]["hits"] == 3
-        assert result["protocols"][1]["protocol"] == "UDP"
-        assert result["protocols"][1]["hits"] == 2
 
 
 # =============================================================================
@@ -786,7 +554,7 @@ class TestPolicyTrafficProfileToolBounded:
 
         monkeypatch.setattr(traffic_tools, "_query_policy_log_slice", fake_slice)
 
-        result = await traffic_tools.get_policy_traffic_profile(
+        result = await traffic_tools.analyze_policy_traffic(
             adom="root",
             device="FGT60FTK00000001",
             policy_ids=[2],
@@ -803,7 +571,9 @@ class TestPolicyTrafficProfileToolBounded:
         assert profile["total_hits_is_known"] is True
         assert profile["total_hit_source"] == "logsearch_total-count"
         assert "estimated_total_hits" not in profile
-        assert len(profile["top_ports"]) == 1
+        # Default sample_by is ["port", "service", "app"] -- the three
+        # get_policy_traffic_profile used to produce.
+        assert len(profile["breakdowns"]["port"]) == 1
 
 
 # =============================================================================
@@ -838,7 +608,7 @@ class TestPolicyProtocolSummaryToolBounded:
 
         monkeypatch.setattr(traffic_tools, "_query_policy_log_slice", fake_slice)
 
-        result = await traffic_tools.get_policy_protocol_summary(
+        result = await traffic_tools.analyze_policy_traffic(
             adom="root",
             device="FGT60FTK00000001",
             policy_ids=[5],
@@ -1287,7 +1057,7 @@ class TestPerSliceTotalSum:
             }
 
         monkeypatch.setattr(traffic_tools, "_query_policy_log_slice", fake_slice)
-        result = await traffic_tools.get_policy_port_analysis(
+        result = await traffic_tools.analyze_policy_traffic(
             adom="root",
             device="FGT60FTK00000001",
             policy_ids=[2],
@@ -1346,7 +1116,7 @@ class TestPolicyPathEnsuresConnection:
         monkeypatch.setattr(log_tools, "_INITIAL_POLL_DELAY", 0)
         monkeypatch.setattr(log_tools, "POLL_INTERVAL", 0)
 
-        result = await traffic_tools.get_policy_port_analysis(
+        result = await traffic_tools.analyze_policy_traffic(
             adom="root",
             device="FGT60FTK00000001",
             policy_ids=[2],
@@ -1374,3 +1144,121 @@ class TestSanitiserIsShared:
         from fortianalyzer_mcp.tools import traffic_tools
 
         assert traffic_tools.sanitize_filter_value("2001:db8::1") == "2001:db8::1"
+
+
+class TestAnalyzePolicyTraffic:
+    """One tool replaces three, and keeps the bounded-honesty contract."""
+
+    async def test_default_sample_by_reproduces_the_profile_breakdowns(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rows = [
+            {"proto": "6", "dstport": "443", "service": "HTTPS", "app": "HTTPS"},
+            {"proto": "6", "dstport": "80", "service": "HTTP", "app": "HTTP"},
+        ]
+
+        async def fake_analysis(**kwargs: Any) -> dict[str, Any]:
+            return {
+                "logs": rows,
+                "total_hits": 2,
+                "total_hits_is_known": True,
+                "all_slices_exact": True,
+                "slices_scanned": 1,
+                "truncated_slices": 0,
+            }
+
+        monkeypatch.setattr(traffic_tools, "_run_bounded_policy_analysis", fake_analysis)
+
+        result = await traffic_tools.analyze_policy_traffic(policy_ids=[7])
+
+        breakdowns = result["results"][0]["breakdowns"]
+        assert set(breakdowns) == {"port", "service", "app"}
+        assert {"value": "6/443", "hits": 1} in breakdowns["port"]
+
+    async def test_explicit_sample_by_selects_dimensions(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rows = [{"proto": "1", "dstport": "0", "service": "PING"}]
+
+        async def fake_analysis(**kwargs: Any) -> dict[str, Any]:
+            return {
+                "logs": rows,
+                "total_hits": 1,
+                "total_hits_is_known": True,
+                "all_slices_exact": True,
+                "slices_scanned": 1,
+                "truncated_slices": 0,
+            }
+
+        monkeypatch.setattr(traffic_tools, "_run_bounded_policy_analysis", fake_analysis)
+
+        result = await traffic_tools.analyze_policy_traffic(
+            policy_ids=[7], sample_by=["icmp_type_code"]
+        )
+
+        assert result["results"][0]["breakdowns"]["icmp_type_code"] == [
+            {"value": "type=8/code=0", "hits": 1}
+        ]
+
+    async def test_the_bounded_contract_is_reported_per_policy(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def fake_analysis(**kwargs: Any) -> dict[str, Any]:
+            return {
+                "logs": [{"proto": "6", "dstport": "443"}],
+                "total_hits": 5000,
+                "total_hits_is_known": True,
+                "all_slices_exact": False,
+                "slices_scanned": 4,
+                "truncated_slices": 4,
+            }
+
+        monkeypatch.setattr(traffic_tools, "_run_bounded_policy_analysis", fake_analysis)
+
+        result = await traffic_tools.analyze_policy_traffic(policy_ids=[7])
+
+        entry = result["results"][0]
+        assert entry["is_exact"] is False
+        assert entry["analysis_mode"] == "bounded_sample"
+        assert entry["total_hits_is_known"] is True
+        assert entry["truncated_slices"] == 4
+        assert entry["recommendation"]
+
+    async def test_top_n_zero_keeps_the_complete_port_list(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """get_policy_port_analysis returned every port; that must survive."""
+        rows = [{"proto": "6", "dstport": str(p)} for p in range(1000, 1030)]
+
+        async def fake_analysis(**kwargs: Any) -> dict[str, Any]:
+            return {
+                "logs": rows,
+                "total_hits": len(rows),
+                "total_hits_is_known": True,
+                "all_slices_exact": True,
+                "slices_scanned": 1,
+                "truncated_slices": 0,
+            }
+
+        monkeypatch.setattr(traffic_tools, "_run_bounded_policy_analysis", fake_analysis)
+
+        result = await traffic_tools.analyze_policy_traffic(
+            policy_ids=[7], sample_by=["port"], top_n=0
+        )
+
+        assert len(result["results"][0]["breakdowns"]["port"]) == 30
+
+    async def test_an_unknown_dimension_is_rejected_before_the_scan(self) -> None:
+        result = await traffic_tools.analyze_policy_traffic(
+            policy_ids=[7], sample_by=["not_a_dimension_at_all"]
+        )
+
+        assert result["status"] == "error"
+        assert result["error"] == "unknown_field"
+
+    async def test_too_many_policies_is_still_refused(self) -> None:
+        result = await traffic_tools.analyze_policy_traffic(
+            policy_ids=list(range(1, traffic_tools.MAX_POLICY_IDS + 5))
+        )
+
+        assert result["status"] == "error"

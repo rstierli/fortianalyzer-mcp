@@ -235,11 +235,12 @@ def test_full_mode_registers_the_whole_surface(full_tools: dict[str, Any]) -> No
     """Guard the premise of the frozen-set tests below.
 
     Every assertion about the write surface is vacuous if the tools never
-    registered, so pin the count: 85 raw tools plus the ``faz_skill``
-    dispatcher. A tool added or removed is expected to update this number
-    together with the lists above.
+    registered, so pin the count: 83 raw tools plus the ``faz_skill``
+    dispatcher (85 minus the three ``get_policy_*`` tools ``analyze_policy_traffic``
+    replaced, plus that one). A tool added or removed is expected to update
+    this number together with the lists above.
     """
-    assert len(full_tools) == 86, f"full mode registered {len(full_tools)} tools"
+    assert len(full_tools) == 84, f"full mode registered {len(full_tools)} tools"
     assert "faz_skill" in full_tools, "skills dispatcher did not register"
 
 

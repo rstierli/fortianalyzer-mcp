@@ -1,22 +1,27 @@
 """Policy traffic analysis tools for FortiAnalyzer.
 
-Provides tools for analyzing traffic patterns per firewall policy:
-- Traffic profiling (top ports, services, applications)
-- Exact port/protocol enumeration
-- Protocol breakdown summaries
+Provides `analyze_policy_traffic`: fans out over up to MAX_POLICY_IDS firewall
+policies under a shared bounded-scan budget and reports independent
+per-dimension breakdowns (port, service, app, ...) for each. It replaces three
+tools that differed only in which breakdowns they produced
+(`get_policy_traffic_profile`, `get_policy_port_analysis`,
+`get_policy_protocol_summary`); that difference is now the `sample_by`
+parameter, and the aggregation itself is `query.groups.aggregate_breakdowns`
+over `query.derive.dimension_value` rather than a bespoke Counter per tool.
 
-These tools query FortiAnalyzer traffic logs filtered by policy ID and
-aggregate results for policy hardening workflows.
+It queries FortiAnalyzer traffic logs filtered by policy ID and aggregates
+results for policy hardening workflows.
 """
 
 import asyncio
 import logging
 import time
-from collections import Counter
-from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any, cast
 
+from fortianalyzer_mcp.query.derive import is_derived
+from fortianalyzer_mcp.query.fields import resolve_field
+from fortianalyzer_mcp.query.groups import aggregate_breakdowns
 from fortianalyzer_mcp.server import get_faz_client, mcp
 from fortianalyzer_mcp.tool_annotations import READ_ONLY
 from fortianalyzer_mcp.tools.log_tools import (
@@ -371,6 +376,14 @@ async def _query_policy_logs_bounded(
         }
 
 
+# analyze_policy_traffic's per-policy fan-out target. Collapsing the three
+# get_policy_* tools into one retired the generic aggregate-callback driver
+# that used to own this name -- it only ever had those three tools as
+# callers -- so the name now labels the per-policy bounded-query runner it
+# fans out over instead.
+_run_bounded_policy_analysis = _query_policy_logs_bounded
+
+
 def _bounded_metadata(
     observed_hits: int,
     slices_scanned: int,
@@ -426,185 +439,103 @@ def _bounded_metadata(
 
 
 # =============================================================================
-# Aggregation helpers
+# MCP Tool Functions
 # =============================================================================
 
 
-def _aggregate_traffic_profile(logs: list[dict[str, Any]], top_n: int) -> dict[str, Any]:
-    """Aggregate log entries into a traffic profile.
-
-    Returns top ports, services, and applications with hit counts.
-    """
-    port_counter: Counter[str] = Counter()
-    service_counter: Counter[str] = Counter()
-    app_counter: Counter[str] = Counter()
-
-    for log in logs:
-        dstport = log.get("dstport")
-        proto = log.get("proto", "")
-        if dstport is not None:
-            port_counter[f"{proto}/{dstport}"] += 1
-
-        service = log.get("service")
-        if service:
-            service_counter[str(service)] += 1
-
-        app = log.get("app") or log.get("appcat")
-        if app:
-            app_counter[str(app)] += 1
-
-    total = len(logs)
-    top_ports = port_counter.most_common(top_n)
-    top_services = service_counter.most_common(top_n)
-    top_apps = app_counter.most_common(top_n)
-
-    top_port_hits = sum(c for _, c in top_ports)
-    top_service_hits = sum(c for _, c in top_services)
-    top_app_hits = sum(c for _, c in top_apps)
-
-    return {
-        "total_hits": total,
-        "top_ports": [{"port": p, "hits": c} for p, c in top_ports],
-        "top_ports_residual": total - top_port_hits,
-        "top_services": [{"service": s, "hits": c} for s, c in top_services],
-        "top_services_residual": total - top_service_hits,
-        "top_applications": [{"application": a, "hits": c} for a, c in top_apps],
-        "top_applications_residual": total - top_app_hits,
-    }
-
-
-def _aggregate_port_analysis(logs: list[dict[str, Any]]) -> dict[str, Any]:
-    """Aggregate logs into port/protocol enumeration.
-
-    Returns complete port list, protocol breakdown, and ICMP summary.
-    Exactness metadata is added by the caller via _bounded_metadata().
-    """
-    port_counter: Counter[str] = Counter()
-    protocol_counter: Counter[str] = Counter()
-    portless_protocols: set[str] = set()
-    icmp_types: Counter[str] = Counter()
-    total = len(logs)
-    port_hits = 0
-
-    for log in logs:
-        proto_num = log.get("proto", "")
-        proto_str = str(proto_num)
-        protocol_counter[proto_str] += 1
-
-        dstport = log.get("dstport")
-        if dstport is not None and str(dstport) != "0":
-            port_key = f"{proto_str}/{dstport}"
-            port_counter[port_key] += 1
-            port_hits += 1
-        else:
-            # Portless protocol (ICMP, GRE, ESP, etc.)
-            portless_protocols.add(proto_str)
-
-        # Track ICMP types from service field
-        # FAZ logs encode ICMP info in service field, not icmptype/icmpcode:
-        #   "PING" = echo request (type=8/code=0)
-        #   "icmp/3/3" = type=3/code=3
-        # Anything else (e.g. an ICMP packet a FortiGate SD-WAN SLA probe tagged
-        # with the probed application service, "DNS") is not an ICMP encoding, so
-        # it is recorded as type=unknown rather than leaked into type_code.
-        if proto_str == "1":
-            service = str(log.get("service", ""))
-            if service.upper() == "PING":
-                icmp_types["type=8/code=0"] += 1
-            elif service.startswith("icmp/"):
-                parts = service.split("/")
-                if len(parts) == 3:
-                    icmp_types[f"type={parts[1]}/code={parts[2]}"] += 1
-                else:
-                    # Malformed "icmp/..." value: don't leak the raw string.
-                    icmp_types["type=unknown"] += 1
-            else:
-                # Service field holds an application name (e.g. "DNS") or is
-                # empty; neither encodes ICMP type/code, so record as unknown.
-                # This keeps the icmp hit sum equal to the proto=1 count in
-                # the protocols breakdown.
-                icmp_types["type=unknown"] += 1
-
-    uncovered = total - port_hits
-
-    return {
-        "total_hits": total,
-        "ports": [{"port": p, "hits": c} for p, c in port_counter.most_common()],
-        "protocols": [{"protocol": p, "hits": c} for p, c in protocol_counter.most_common()],
-        "portless_protocols": sorted(portless_protocols),
-        "uncovered_port_hits": uncovered,
-        "icmp": (
-            [{"type_code": tc, "hits": c} for tc, c in icmp_types.most_common()]
-            if icmp_types
-            else []
-        ),
-    }
-
-
-def _aggregate_protocol_summary(logs: list[dict[str, Any]]) -> dict[str, Any]:
-    """Aggregate logs into a lightweight protocol breakdown.
-
-    Maps protocol numbers to names for common protocols.
-    """
-    PROTO_NAMES = {
-        "6": "TCP",
-        "17": "UDP",
-        "1": "ICMP",
-        "58": "ICMPv6",
-        "47": "GRE",
-        "50": "ESP",
-        "51": "AH",
-        "89": "OSPF",
-        "132": "SCTP",
-    }
-
-    protocol_counter: Counter[str] = Counter()
-    total = len(logs)
-
-    for log in logs:
-        proto_num = str(log.get("proto", "unknown"))
-        proto_name = PROTO_NAMES.get(proto_num, f"other({proto_num})")
-        protocol_counter[proto_name] += 1
-
-    return {
-        "total_hits": total,
-        "protocols": [{"protocol": p, "hits": c} for p, c in protocol_counter.most_common()],
-    }
-
-
-async def _run_bounded_policy_analysis(
-    *,
-    operation: str,
-    adom: str | None,
-    device: str | None,
-    policy_ids: list[int] | None,
-    time_range: str,
-    action: str | None,
-    aggregate: Callable[[list[dict[str, Any]]], dict[str, Any]],
+@mcp.tool(annotations=READ_ONLY)
+async def analyze_policy_traffic(
+    adom: str | None = None,
+    device: str | None = None,
+    policy_ids: list[int] | None = None,
+    time_range: str = "24-hour",
+    action: str | None = None,
+    sample_by: list[str] | None = None,
+    top_n: int = DEFAULT_TOP_N,
 ) -> dict[str, Any]:
-    """Shared driver for the bounded per-policy analysis tools.
+    """Break down what traffic each firewall policy actually carried.
 
-    Resolves the time window once so the reported time_range and bounded slices
-    share one window, then assembles top-level audit metadata plus per-policy
-    results. ``aggregate`` turns one policy's log rows into the tool-specific
-    summary dict.
+    Replaces get_policy_traffic_profile, get_policy_port_analysis and
+    get_policy_protocol_summary: the three differed only in which breakdowns
+    they produced, which is now the sample_by parameter.
+
+    This is a *bounded sample*, not a census. It scans a fixed number of time
+    slices per policy and stops at a row cap, so check `is_exact` before
+    quoting any number. When it is False, `analysis_mode` is "bounded_sample"
+    and `total_hits` is a floor, not a total.
+
+    Use query_logs(sample_by=[...]) instead when you want one aggregate set for
+    one query; this tool fans out across up to MAX_POLICY_IDS policies under a
+    shared query budget and reports each separately.
+
+    Args:
+        adom: ADOM name (default: from config DEFAULT_ADOM)
+        device: Device filter (serial, name, or an All_* group)
+        policy_ids: Firewall policy IDs to analyse (1-24 IDs, each > 0).
+        time_range: Preset token or "start|end"
+        action: Optional traffic action filter (accept, deny, ...)
+        sample_by: Dimensions to break down. Defaults to
+            ["port", "service", "app"] -- what get_policy_traffic_profile
+            returned. "port" is proto/dstport; "icmp_type_code" decodes the
+            ICMP type/code FortiAnalyzer hides in the service field.
+        top_n: Buckets per dimension (default 10). 0 returns every bucket,
+            which is what get_policy_port_analysis's complete port list needed.
+
+    Returns:
+        dict with per-policy entries under `results`, each carrying
+        `breakdowns` plus the bounded metadata block (`is_exact`,
+        `analysis_mode`, `total_hits`, `total_hits_is_known`,
+        `total_hit_source`, `observed_hits`, `slices_scanned`,
+        `truncated_slices`, `log_limit_per_slice`, `recommendation`), the
+        echoed `filter`, and `query_time_seconds` / `adom` / `time_range` /
+        `timezone` audit metadata at the top level. A policy whose query
+        failed reports `error`/`message` instead of `breakdowns`.
+
+    Example:
+        >>> result = await analyze_policy_traffic(
+        ...     policy_ids=[1, 5, 10],
+        ...     time_range="7-day",
+        ...     action="accept",
+        ... )
     """
+    operation = "analyze_policy_traffic"
+    dimensions = list(sample_by) if sample_by else ["port", "service", "app"]
     adom_value: str | None = adom
+
     try:
         adom_value = validate_adom(adom or get_default_adom())
-        if policy_ids is None:
-            return error_response(
-                error="validation_error",
-                message="policy_ids is required",
-                operation=operation,
-                adom=adom_value,
-            )
-        policy_ids = validate_policy_ids(policy_ids)
         action = validate_action(action)
+        policy_ids = validate_policy_ids(policy_ids or [])
 
-        # Revive an idle-closed streamable-HTTP session before any FAZ call, like
-        # query_logs; otherwise the first policy query after the session drops
-        # fails with a raw "Not connected" error.
+        # Validate dimensions before any appliance work: a typo should cost
+        # nothing. Derived dimensions bypass the field registry, which only
+        # knows stored fields. The traffic vocabulary is not "complete"
+        # (arbitrary FAZ fields can be requested), so resolve_field never
+        # raises for an unknown-but-shaped name -- it returns a passthrough
+        # warning instead. That is the right call for a filter field but the
+        # wrong one for a breakdown key that would just always come back
+        # empty, so a non-None warning here is treated as a hard rejection.
+        for dimension in dimensions:
+            if is_derived(dimension):
+                continue
+            _, warning = resolve_field("traffic", dimension)
+            if warning is not None:
+                raise ValidationError(
+                    f"Unknown sample_by dimension '{dimension}': not a known traffic "
+                    "field and not a derived dimension (port, icmp_type_code)."
+                )
+    except ValidationError as e:
+        return error_response(
+            error="unknown_field" if "field" in str(e).lower() else "validation_error",
+            message=str(e),
+            operation=operation,
+            adom=adom_value,
+        )
+
+    try:
+        # Revive an idle-closed streamable-HTTP session before any FAZ call,
+        # like query_logs; otherwise the first policy query after the session
+        # drops fails with a raw "Not connected" error.
         await _get_client().ensure_connected()
 
         try:
@@ -623,14 +554,19 @@ async def _run_bounded_policy_analysis(
 
         start = time.monotonic()
         query_tasks = [
-            _query_policy_logs_bounded(
-                adom_value, device, pid, window, action, policy_count=len(policy_ids)
+            _run_bounded_policy_analysis(
+                adom=adom_value,
+                device=device,
+                policy_id=pid,
+                time_range=window,
+                action=action,
+                policy_count=len(policy_ids),
             )
             for pid in policy_ids
         ]
         results_list = await asyncio.gather(*query_tasks, return_exceptions=True)
 
-        per_policy = []
+        per_policy: list[dict[str, Any]] = []
         for pid, result in zip(policy_ids, results_list, strict=True):
             policy_filter = _build_policy_filter(pid, action)
             if isinstance(result, Exception):
@@ -642,24 +578,27 @@ async def _run_bounded_policy_analysis(
                         "filter": policy_filter,
                     }
                 )
-            else:
-                policy_result = cast(dict[str, Any], result)
-                logs = policy_result["logs"]
-                entry = aggregate(logs)
-                entry.update(
-                    _bounded_metadata(
-                        observed_hits=len(logs),
-                        slices_scanned=policy_result["slices_scanned"],
-                        truncated_slices=policy_result["truncated_slices"],
-                        total_hits=policy_result.get("total_hits"),
-                        total_hits_is_known=policy_result.get("total_hits_is_known") is True,
-                        all_slices_exact=policy_result.get("all_slices_exact") is True,
-                        policy_id=pid,
-                    )
+                continue
+
+            policy_result = cast(dict[str, Any], result)
+            logs = policy_result["logs"]
+            entry: dict[str, Any] = {
+                "policy_id": pid,
+                "breakdowns": aggregate_breakdowns(logs, dimensions, top_n=top_n),
+            }
+            entry.update(
+                _bounded_metadata(
+                    observed_hits=len(logs),
+                    slices_scanned=policy_result["slices_scanned"],
+                    truncated_slices=policy_result["truncated_slices"],
+                    total_hits=policy_result.get("total_hits"),
+                    total_hits_is_known=policy_result.get("total_hits_is_known") is True,
+                    all_slices_exact=policy_result.get("all_slices_exact") is True,
+                    policy_id=pid,
                 )
-                entry["policy_id"] = pid
-                entry["filter"] = policy_filter
-                per_policy.append(entry)
+            )
+            entry["filter"] = policy_filter
+            per_policy.append(entry)
 
         elapsed = time.monotonic() - start
         return {
@@ -673,13 +612,6 @@ async def _run_bounded_policy_analysis(
             "query_time_seconds": round(elapsed, 2),
         }
 
-    except ValidationError as e:
-        return error_response(
-            error="validation_error",
-            message=f"Validation error: {e}",
-            operation=operation,
-            adom=adom_value,
-        )
     except (OSError, TimeoutError) as e:
         logger.error(f"Network error in {operation}: {e}")
         return error_response(
@@ -698,210 +630,3 @@ async def _run_bounded_policy_analysis(
             adom=adom_value,
             retry_count=getattr(e, "retries_attempted", 0),
         )
-
-
-# =============================================================================
-# MCP Tool Functions
-# =============================================================================
-
-
-@mcp.tool(annotations=READ_ONLY)
-async def get_policy_traffic_profile(
-    adom: str | None = None,
-    device: str | None = None,
-    policy_ids: list[int] | None = None,
-    time_range: str = "24-hour",
-    action: str | None = None,
-    top_n: int = DEFAULT_TOP_N,
-) -> dict[str, Any]:
-    """Get sampled traffic summary per firewall policy.
-
-    Queries traffic logs filtered by policy ID and aggregates top destination
-    ports, services, and applications. Useful for understanding what traffic
-    a policy is actually handling.
-
-    Prefer this over query_logs/search_traffic_logs for any per-policy volume
-    question: aggregation happens during the scan, so the answer costs a
-    summary rather than thousands of rows. Siblings: get_policy_port_analysis
-    (port detail only) and get_policy_protocol_summary (protocol mix). Drop to
-    search_traffic_logs only when you need the individual rows.
-
-    Check `is_exact` before quoting numbers. When it is False the scan hit a
-    row cap, `analysis_mode` is "bounded_sample", and `total_hits` is a floor
-    rather than a count -- see `total_hits_is_known`/`total_hit_source`.
-
-    Args:
-        adom: ADOM name (default: from config DEFAULT_ADOM)
-        device: Device filter (serial number like "FG100FTK19001333" or name).
-            Default: All FortiGate devices.
-        policy_ids: List of firewall policy IDs to analyze (1-24 IDs, each > 0).
-        time_range: Time range for log query. Options:
-            - "1-hour", "6-hour", "12-hour", "24-hour" (default)
-            - "7-day", "30-day"
-            - Custom: "start_time|end_time"
-        action: Filter by action (optional). Valid values:
-            "accept", "deny", "close", "drop", "ip-conn", "timeout"
-        top_n: Number of top items to return per category (default: 10)
-
-    Returns:
-        dict with keys:
-            - status: "success" or "error"
-            - adom, time_range, timezone: resolved query-window audit metadata
-            - results: Per-policy traffic profiles with top ports, services, apps,
-              plus per-policy total accounting:
-                - total_hits: sum of per-slice total-counts when
-                  total_hits_is_known, else the observed row count. A floor that is
-                  always at least observed_hits, not the true total on heavy
-                  (bounded) policies
-                - total_hits_is_known / total_hit_source: True with
-                  "logsearch_total-count" when every slice reported a total; False
-                  with "observed_rows" when any slice did not
-                - observed_hits: rows actually fetched and aggregated
-                Top ports/services/applications and their residuals describe the
-                observed rows only, not total_hits.
-            - query_time_seconds: Total query duration
-            - message: Error message if failed
-
-    Example:
-        >>> result = await get_policy_traffic_profile(
-        ...     policy_ids=[1, 5, 10],
-        ...     time_range="7-day",
-        ...     action="accept"
-        ... )
-    """
-    if top_n < 1:
-        top_n = DEFAULT_TOP_N
-    return await _run_bounded_policy_analysis(
-        operation="get_policy_traffic_profile",
-        adom=adom,
-        device=device,
-        policy_ids=policy_ids,
-        time_range=time_range,
-        action=action,
-        aggregate=lambda logs: _aggregate_traffic_profile(logs, top_n),
-    )
-
-
-@mcp.tool(annotations=READ_ONLY)
-async def get_policy_port_analysis(
-    adom: str | None = None,
-    device: str | None = None,
-    policy_ids: list[int] | None = None,
-    time_range: str = "24-hour",
-    action: str | None = None,
-) -> dict[str, Any]:
-    """Get bounded port/protocol enumeration per firewall policy.
-
-    Enumerates destination ports and protocols observed in fixed bounded traffic
-    log slices for each policy. The result is exact only when no queried slice
-    reaches the log fetch limit; otherwise it returns observed values with
-    limitation metadata and a recommendation to narrow the time window.
-
-    Args:
-        adom: ADOM name (default: from config DEFAULT_ADOM)
-        device: Device filter (serial number like "FG100FTK19001333" or name).
-            Default: All FortiGate devices.
-        policy_ids: List of firewall policy IDs to analyze (1-24 IDs, each > 0).
-        time_range: Time range for log query. Options:
-            - "1-hour", "6-hour", "12-hour", "24-hour" (default)
-            - "7-day", "30-day"
-            - Custom: "start_time|end_time"
-        action: Filter by action (optional). Valid values:
-            "accept", "deny", "close", "drop", "ip-conn", "timeout"
-
-    Returns:
-        dict with keys:
-            - status: "success" or "error"
-            - adom, time_range, timezone: resolved query-window audit metadata
-            - results: Per-policy port analysis with:
-                - is_exact: True only when every slice was fully scanned and
-                  proved its total (no truncated slice AND total_hits ==
-                  observed_hits)
-                - analysis_mode: "complete" or "bounded_sample"
-                - total_hits: sum of per-slice total-counts when
-                  total_hits_is_known, else the observed row count. A floor that is
-                  always at least observed_hits, not the true total on heavy
-                  (bounded) policies
-                - total_hits_is_known / total_hit_source: True with
-                  "logsearch_total-count" when every slice reported a total; False
-                  with "observed_rows" when any slice did not
-                - observed_hits: Number of log rows fetched and aggregated
-                - ports: List of port/protocol pairs with hit counts
-                - protocols: Protocol breakdown
-                - portless_protocols: Protocols without ports (ICMP, GRE, etc.)
-                - uncovered_port_hits: Hits without a destination port
-                - icmp: ICMP type/code breakdown (if applicable)
-              ports/protocols/uncovered counts describe observed rows only.
-            - query_time_seconds: Total query duration
-            - message: Error message if failed
-
-    Example:
-        >>> result = await get_policy_port_analysis(
-        ...     policy_ids=[1],
-        ...     time_range="7-day"
-        ... )
-    """
-    return await _run_bounded_policy_analysis(
-        operation="get_policy_port_analysis",
-        adom=adom,
-        device=device,
-        policy_ids=policy_ids,
-        time_range=time_range,
-        action=action,
-        aggregate=_aggregate_port_analysis,
-    )
-
-
-@mcp.tool(annotations=READ_ONLY)
-async def get_policy_protocol_summary(
-    adom: str | None = None,
-    device: str | None = None,
-    policy_ids: list[int] | None = None,
-    time_range: str = "24-hour",
-    action: str | None = None,
-) -> dict[str, Any]:
-    """Get lightweight protocol breakdown per firewall policy.
-
-    Returns TCP/UDP/ICMP/other hit counts per policy. This is a faster,
-    less detailed alternative to get_policy_port_analysis when only the
-    protocol distribution is needed.
-
-    Args:
-        adom: ADOM name (default: from config DEFAULT_ADOM)
-        device: Device filter (serial number like "FG100FTK19001333" or name).
-            Default: All FortiGate devices.
-        policy_ids: List of firewall policy IDs to analyze (1-24 IDs, each > 0).
-        time_range: Time range for log query. Options:
-            - "1-hour", "6-hour", "12-hour", "24-hour" (default)
-            - "7-day", "30-day"
-            - Custom: "start_time|end_time"
-        action: Filter by action (optional). Valid values:
-            "accept", "deny", "close", "drop", "ip-conn", "timeout"
-
-    Returns:
-        dict with keys:
-            - status: "success" or "error"
-            - adom, time_range, timezone: resolved query-window audit metadata
-            - results: Per-policy protocol summaries with hit counts, plus
-              total_hits / total_hits_is_known / total_hit_source and
-              observed_hits (the protocol breakdown describes observed rows only;
-              total_hits is the sum of per-slice total-counts, a floor at least
-              observed_hits, when known)
-            - query_time_seconds: Total query duration
-            - message: Error message if failed
-
-    Example:
-        >>> result = await get_policy_protocol_summary(
-        ...     policy_ids=[1, 5],
-        ...     time_range="24-hour"
-        ... )
-    """
-    return await _run_bounded_policy_analysis(
-        operation="get_policy_protocol_summary",
-        adom=adom,
-        device=device,
-        policy_ids=policy_ids,
-        time_range=time_range,
-        action=action,
-        aggregate=_aggregate_protocol_summary,
-    )
