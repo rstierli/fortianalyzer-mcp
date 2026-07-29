@@ -13,8 +13,11 @@ to strip out of free text once we know what it masks to:
    depth, and composite keys are parsed and masked part by part
    (``groupby1``/``groupby2`` are ``"<field>:<value>"``, ``grpby`` is an
    embedded JSON blob, ``target`` is a list of ``{name, value}``,
-   ``devvds`` is ``"<devname>[<vdom>]"``). Every real value masked here is
-   recorded in a response-scoped raw-to-token map.
+   ``devvds`` is ``"<devname>[<vdom>]"``, ``breakdowns`` is
+   ``{dimension: [{"value", "hits"}, ...]}`` from ``analyze_policy_traffic``
+   and ``query_logs(sample_by=...)``, the dimension name typing each
+   bucket's ``"value"``). Every real value masked here is recorded in a
+   response-scoped raw-to-token map.
 2. **Free-text pass.** ``msg``, ``logdesc``, ``subject``, ``extrainfo``,
    the echoed ``filter`` strings and friends get an in-place scan for
    embedded IPv4s, MACs and emails, then every raw value from pass 1 is
@@ -57,6 +60,7 @@ from functools import wraps
 from typing import Any
 
 from fortianalyzer_mcp.masking.fields import (
+    COMPOSITE_BREAKDOWNS,
     COMPOSITE_DEVICE_VDOM,
     COMPOSITE_FILTER_ENTRIES,
     COMPOSITE_JSON,
@@ -241,6 +245,59 @@ class OutputMasker:
             device = self._mask_scalar(HOSTNAME, match.group("dev"), mapping)
             out.append(f"{device}[{match.group('vdom')}]")
         return ",".join(out)
+
+    def _mask_breakdowns(self, value: Any, mapping: dict[str, str], keep: frozenset[str]) -> Any:
+        """``{dimension: [{"value": ..., "hits": N}, ...]}`` (#98).
+
+        ``analyze_policy_traffic`` and ``query_logs(sample_by=...)`` both
+        return this shape. The dimension name -- the dict key one level up
+        from each bucket -- decides the type of that bucket's ``"value"``,
+        the same "field decides the paired value's type" rule ``groupby1``
+        already applies, just with the field name sitting one level up
+        instead of packed into the string.
+
+        Deliberately not a "burn what we do not recognise" handler like
+        ``_mask_target``: ``sample_by``/``group_by`` let a caller group on
+        almost any field (``port``, ``service``, ``app``, ``proto``, a
+        derived dimension with no field type at all), and most of those are
+        not identifiers. A dimension absent from the type table -- because
+        it is not in ``FIELD_TYPES``, or is a TEXT field, or is a
+        device-identity field and ``FAZ_MASK_DEVICE_IDENTITY`` is off --
+        passes its bucket values through untouched rather than being burned
+        to a placeholder. That table already merges in
+        ``DEVICE_IDENTITY_TYPES`` only when the flag is set (see
+        ``__init__``), so the device-identity keep-set applies to a
+        dimension name exactly as it does to a flat field, with no separate
+        check needed here.
+        """
+        if not isinstance(value, dict):
+            return self._mask_structured(value, mapping, keep)
+        out: dict[str, Any] = {}
+        for dimension, buckets in value.items():
+            vtype = (
+                self._field_types.get(dimension.strip().lower())
+                if isinstance(dimension, str)
+                else None
+            )
+            if vtype is None or vtype == TEXT or not isinstance(buckets, list):
+                out[dimension] = self._mask_structured(buckets, mapping, keep)
+                continue
+            masked_buckets: list[Any] = []
+            for bucket in buckets:
+                if not isinstance(bucket, dict):
+                    masked_buckets.append(self._mask_structured(bucket, mapping, keep))
+                    continue
+                entry: dict[str, Any] = {}
+                for bkey, bvalue in bucket.items():
+                    if bkey.lower() == "value" and isinstance(bvalue, str):
+                        entry[bkey] = (
+                            bvalue if bvalue in keep else self._mask_scalar(vtype, bvalue, mapping)
+                        )
+                    else:
+                        entry[bkey] = bvalue
+                masked_buckets.append(entry)
+            out[dimension] = masked_buckets
+        return out
 
     def _burn_strings(self, value: Any, keep: frozenset[str]) -> Any:
         if isinstance(value, str):
@@ -830,6 +887,8 @@ class OutputMasker:
             return self._burn_strings(value, keep)
         if lowered in COMPOSITE_DEVICE_VDOM and isinstance(value, str):
             return self._mask_device_vdom(value, mapping)
+        if lowered in COMPOSITE_BREAKDOWNS and isinstance(value, dict):
+            return self._mask_breakdowns(value, mapping, keep)
 
         vtype = self._field_types.get(lowered)
         if vtype is not None and vtype != TEXT:

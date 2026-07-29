@@ -1528,3 +1528,180 @@ class TestProjectionEchoIsNotAnOracle:
         assert (
             masker.mask_result({"count": 0, "fields_returned": names})["fields_returned"] == names
         )
+
+
+class TestBreakdownsComposite:
+    """``analyze_policy_traffic`` and ``query_logs(sample_by=...)`` both
+    return ``{dimension: [{"value": ..., "hits": N}, ...]}``, and the raw
+    value survived masking whole (#98): pass 1 only masks a bare ``"value"``
+    key when a sibling ``"type"`` key exists (SOAR's ``_mask_indicator_pair``),
+    and pass 2 only scans keys typed TEXT, which a plain ``"value"`` key never
+    is. The dimension name -- the dict key one level up -- now decides the
+    type of each bucket's ``"value"``.
+
+    ``sample_by``/``group_by`` are not restricted to a safe subset: grouping
+    by source or user is legitimate SOC functionality, so the fix lives
+    entirely in the masking layer.
+    """
+
+    def test_the_reviewers_synthetic_payload_no_longer_survives(self, masker: OutputMasker) -> None:
+        """The exact shape the review found leaking, reproduced verbatim."""
+        masked = masker.mask_result({"breakdowns": {"srcip": [{"value": ENDPOINT_IP, "hits": 5}]}})
+
+        assert ENDPOINT_IP not in str(masked)
+
+    def test_analyze_policy_traffic_shape_masks_sensitive_dimensions(
+        self, masker: OutputMasker
+    ) -> None:
+        """``analyze_policy_traffic``'s per-policy ``results[].breakdowns``."""
+        payload = {
+            "status": "success",
+            "results": [
+                {
+                    "policy_id": 7,
+                    "breakdowns": {
+                        "srcip": [{"value": ENDPOINT_IP, "hits": 5}],
+                        "user": [{"value": ANALYST, "hits": 3}],
+                        "hostname": [{"value": SRC_NAME, "hits": 2}],
+                        "port": [{"value": "6/443", "hits": 10}],
+                        "app": [{"value": "HTTPS", "hits": 10}],
+                    },
+                    "is_exact": True,
+                }
+            ],
+        }
+
+        masked = masker.mask_result(payload)
+        breakdowns = masked["results"][0]["breakdowns"]
+
+        assert ENDPOINT_IP not in str(masked)
+        assert ANALYST not in str(masked)
+        assert SRC_NAME not in str(masked)
+        # Non-sensitive dimensions are ordinary log fields with no type in
+        # the allowlist, and must not be burned to a placeholder just
+        # because sample_by can point at almost anything.
+        assert breakdowns["port"] == [{"value": "6/443", "hits": 10}]
+        assert breakdowns["app"] == [{"value": "HTTPS", "hits": 10}]
+
+    def test_query_logs_sample_by_shape_masks_the_same_way(self, masker: OutputMasker) -> None:
+        """``query_logs(sample_by=...)`` returns the identical shape (Task 4)."""
+        payload = {
+            "status": "success",
+            "sample_by": ["srcip", "app"],
+            "breakdowns": {
+                "srcip": [{"value": PEER_IP, "hits": 12}],
+                "app": [{"value": "SSL", "hits": 12}],
+            },
+        }
+
+        masked = masker.mask_result(payload)
+
+        assert PEER_IP not in str(masked)
+        assert masked["breakdowns"]["app"] == [{"value": "SSL", "hits": 12}]
+
+    def test_derived_dimensions_have_no_type_and_are_never_masked(
+        self, masker: OutputMasker
+    ) -> None:
+        """``port``/``icmp_type_code`` are computed, not stored fields."""
+        payload = {
+            "breakdowns": {
+                "port": [{"value": "6/443", "hits": 4}],
+                "icmp_type_code": [{"value": "type=8/code=0", "hits": 1}],
+            }
+        }
+
+        assert masker.mask_result(payload) == payload
+
+    def test_device_identity_dimension_stays_clear_by_default(self, masker: OutputMasker) -> None:
+        """A dimension named after a device-identity field follows the same
+        keep-set as a flat field: clear unless the deployment opts in."""
+        payload = {"breakdowns": {"fortigate": [{"value": DEV_NAME, "hits": 5}]}}
+
+        masked = masker.mask_result(payload)
+
+        assert masked["breakdowns"]["fortigate"][0]["value"] == DEV_NAME
+
+    def test_device_identity_dimension_masks_when_flag_is_on(
+        self, full_masker: OutputMasker
+    ) -> None:
+        payload = {"breakdowns": {"fortigate": [{"value": DEV_NAME, "hits": 5}]}}
+
+        masked = full_masker.mask_result(payload)
+
+        assert masked["breakdowns"]["fortigate"][0]["value"] != DEV_NAME
+
+    def test_multiple_hits_all_mask_to_the_same_token(self, masker: OutputMasker) -> None:
+        """Deterministic FPE: the same raw value in two buckets of the same
+        breakdown (unlikely given aggregate_breakdowns's dedup, but not
+        structurally impossible) still gets one consistent token."""
+        payload = {
+            "breakdowns": {
+                "srcip": [
+                    {"value": ENDPOINT_IP, "hits": 3},
+                    {"value": PEER_IP, "hits": 1},
+                ]
+            }
+        }
+
+        masked = masker.mask_result(payload)["breakdowns"]["srcip"]
+
+        assert masked[0]["value"] != ENDPOINT_IP
+        assert masked[1]["value"] != PEER_IP
+        assert masked[0]["value"] != masked[1]["value"]
+
+
+class TestGroupByGroupsRowsAlreadyCovered:
+    """Third leak surface, checked per the review: ``query_logs(group_by=...)``
+    returns ``groups: [<native FortiView row>, ...]``. Unlike ``breakdowns``,
+    these rows carry the view's OWN field names (``srcip``, ``srcip_hostname``,
+    ``threat``/``obf_url``, ``fortigate``) directly as dict keys -- the same
+    keys ``FIELD_TYPES`` already documents as fortiview-sourced -- so the
+    ordinary per-key allowlist already reaches them with no composite handler
+    needed. These tests lock that finding in as a regression guard rather
+    than leaving it as an unverified claim.
+    """
+
+    def test_top_sources_style_groups_are_masked_by_the_ordinary_allowlist(
+        self, masker: OutputMasker
+    ) -> None:
+        payload = {
+            "status": "success",
+            "group_by": "srcip",
+            "groups": [
+                {"srcip": ENDPOINT_IP, "srcip_hostname": SRC_NAME, "hits": 42},
+                {"srcip": PEER_IP, "hits": 7},
+            ],
+        }
+
+        masked = masker.mask_result(payload)
+
+        assert ENDPOINT_IP not in str(masked)
+        assert PEER_IP not in str(masked)
+        assert SRC_NAME not in str(masked)
+
+    def test_top_threats_style_groups_use_the_existing_pair_handler(
+        self, masker: OutputMasker
+    ) -> None:
+        payload = {
+            "group_by": "attack",
+            "groups": [
+                {"threat": THREAT_DOMAIN, "obf_url": OBF_URL, "hits": 3},
+                {"threat": THREAT_SIGNATURE, "obf_url": "", "hits": 1},
+            ],
+        }
+
+        masked = masker.mask_result(payload)
+
+        assert THREAT_DOMAIN not in str(masked)
+        assert masked["groups"][1]["threat"] == THREAT_SIGNATURE
+
+    def test_device_identity_in_groups_follows_the_same_flag(
+        self, masker: OutputMasker, full_masker: OutputMasker
+    ) -> None:
+        payload = {"group_by": "srcip", "groups": [{"srcip": ENDPOINT_IP, "fortigate": DEV_NAME}]}
+
+        default = masker.mask_result(payload)
+        assert default["groups"][0]["fortigate"] == DEV_NAME
+
+        flagged = full_masker.mask_result(payload)
+        assert flagged["groups"][0]["fortigate"] != DEV_NAME

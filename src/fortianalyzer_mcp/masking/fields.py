@@ -358,6 +358,27 @@ COMPOSITE_PREFIXED = ("groupby1", "groupby2")
 COMPOSITE_JSON = ("grpby",)
 COMPOSITE_TARGET = ("target",)
 
+#: ``analyze_policy_traffic`` and ``query_logs(sample_by=...)``:
+#: ``{dimension: [{"value": "...", "hits": N}, ...]}``. The dimension name
+#: (the dict key one level up) decides the type of each bucket's
+#: ``"value"``, exactly the "field decides the paired value's type" shape
+#: ``groupby1`` already uses, just with the field name sitting one level up
+#: instead of packed into the string. Verified live to leak: a synthetic
+#: ``{"breakdowns": {"srcip": [{"value": "10.1.2.3", "hits": 5}]}}`` survived
+#: masking whole -- pass 1 only masks a bare ``"value"`` key when a sibling
+#: ``"type"`` key exists (``_mask_indicator_pair``, SOAR-specific), and pass 2
+#: only scans keys typed TEXT, which a plain ``"value"`` key never is.
+#:
+#: Deliberately NOT a "burn unknown dimension" handler like ``target``'s: a
+#: caller may group by almost any field (``port``, ``service``, ``app``,
+#: ``proto``, a derived dimension with no field type at all), and most of
+#: those are not identifiers. A dimension absent from ``FIELD_TYPES`` (and
+#: from ``DEVICE_IDENTITY_TYPES`` unless ``FAZ_MASK_DEVICE_IDENTITY`` is set)
+#: passes its bucket values through untouched instead of being burned to a
+#: placeholder -- the device-identity keep-set applies here exactly as it
+#: does to a flat field, because the lookup is the same shared type table.
+COMPOSITE_BREAKDOWNS = ("breakdowns",)
+
 #: ``filter_applied`` when a tool echoes a *compiled* filter as
 #: ``[[field, op, value], ...]`` rather than as one string. Argument
 #: unmasking runs at the wrapper boundary, so a tool that compiles a
