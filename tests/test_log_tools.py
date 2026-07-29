@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+import fortianalyzer_mcp.tools.fortiview_tools as fortiview_tools
 import fortianalyzer_mcp.tools.log_tools as log_tools
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.query.filters import FilterCondition
@@ -716,3 +717,90 @@ class TestQueryLogsAggregationModes:
 
         assert "logs" in result
         assert "breakdowns" not in result
+
+
+class TestQueryLogsGroupByDispatch:
+    """The group_by success path: FortiView dispatch and its resolved window.
+
+    query_logs resolves its own window via the log-clock-anchored
+    resolve_time_window and must thread that exact {start, end} into the
+    FortiView call -- not let get_fortiview_data's own FAZ-system-tz "now"
+    anchor re-resolve it a second, potentially different way. These tests
+    mock at the fortiview_tools boundary (_get_fortiview_data_impl, the
+    function log_tools calls directly) rather than the client, so the
+    assertions can inspect the exact kwargs query_logs passed across that
+    boundary.
+    """
+
+    CUSTOM_RANGE = "2024-01-01 00:00:00|2024-01-02 00:00:00"
+    RESOLVED_WINDOW = {"start": "2024-01-01 00:00:00", "end": "2024-01-02 00:00:00"}
+
+    class _Faz:
+        async def ensure_connected(self) -> None:
+            return None
+
+        async def get_system_timezone(self) -> None:
+            return None
+
+    def _install_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(log_tools, "get_faz_client", lambda: self._Faz())
+
+    async def test_group_by_threads_the_resolved_window_into_the_fortiview_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._install_client(monkeypatch)
+        calls: list[dict[str, object]] = []
+
+        async def fake_impl(**kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return {
+                "status": "success",
+                "data": [{"app": "HTTPS", "sessions": 4}, {"app": "HTTP", "sessions": 1}],
+            }
+
+        monkeypatch.setattr(fortiview_tools, "_get_fortiview_data_impl", fake_impl)
+
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, group_by="app"
+        )
+
+        assert result["status"] == "success"
+        assert result["group_by"] == "app"
+        assert result["groups"] == [{"app": "HTTPS", "sessions": 4}, {"app": "HTTP", "sessions": 1}]
+        assert result["group_source"] == "fortiview:top-applications"
+        assert result["is_exact"] is True
+        assert result["time_range"] == self.RESOLVED_WINDOW
+
+        # Exactly the window the response echoes -- not a second, independently
+        # re-resolved one -- reached the FortiView call.
+        assert len(calls) == 1
+        assert calls[0]["view_name"] == "top-applications"
+        assert calls[0]["tr"] == self.RESOLVED_WINDOW
+        assert calls[0]["tr"] == result["time_range"]
+        assert calls[0]["device"] == "All_Device"
+        assert calls[0]["field_names"] == ["*"]
+
+    async def test_group_by_dispatch_failure_gets_the_full_query_logs_envelope(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-success FortiView result must not pass through unwrapped."""
+        self._install_client(monkeypatch)
+
+        async def fake_impl(**kwargs: object) -> dict[str, object]:
+            return {
+                "status": "timeout",
+                "tid": 999,
+                "message": "FortiView query timed out after 30s",
+            }
+
+        monkeypatch.setattr(fortiview_tools, "_get_fortiview_data_impl", fake_impl)
+
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, group_by="app"
+        )
+
+        assert result["status"] == "error"
+        assert result["error"] == "search_timeout"
+        assert result["operation"] == "query_logs"
+        assert "retry_count" in result
+        assert "timed out" in result["message"]
