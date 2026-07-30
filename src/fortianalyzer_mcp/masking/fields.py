@@ -396,6 +396,16 @@ COMPOSITE_TARGET = ("target",)
 #: passes its bucket values through untouched instead of being burned to a
 #: placeholder -- the device-identity keep-set applies here exactly as it
 #: does to a flat field, because the lookup is the same shared type table.
+#:
+#: A TEXT dimension (``sample_by=["msg"]``, ``["ui"]``, ``["subject"]``) is the
+#: one class pass 1 cannot finish: prose has no scalar type to mask by, and the
+#: generic ``"value"`` key means the sentence above applies to it too -- pass 2
+#: never reached it, so the free text rode out in clear while a hostname inside
+#: it sat beside its own token in a sibling row (#109 review). ``wrapper``
+#: therefore handles this key in BOTH passes: identifier dimensions in pass 1,
+#: TEXT dimensions in pass 2 via ``_mask_breakdown_text``, which gives a bucket
+#: value the same scan the flat key of that name gets. Only TEXT, because a
+#: pass-1 token is itself a valid IPv4 and a second scan would mask it again.
 COMPOSITE_BREAKDOWNS = ("breakdowns",)
 
 #: ``filter_applied`` when a tool echoes a *compiled* filter as

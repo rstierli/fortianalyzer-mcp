@@ -261,14 +261,19 @@ class OutputMasker:
         almost any field (``port``, ``service``, ``app``, ``proto``, a
         derived dimension with no field type at all), and most of those are
         not identifiers. A dimension absent from the type table -- because
-        it is not in ``FIELD_TYPES``, or is a TEXT field, or is a
-        device-identity field and ``FAZ_MASK_DEVICE_IDENTITY`` is off --
-        passes its bucket values through untouched rather than being burned
-        to a placeholder. That table already merges in
-        ``DEVICE_IDENTITY_TYPES`` only when the flag is set (see
-        ``__init__``), so the device-identity keep-set applies to a
-        dimension name exactly as it does to a flat field, with no separate
-        check needed here.
+        it is not in ``FIELD_TYPES``, or is a device-identity field and
+        ``FAZ_MASK_DEVICE_IDENTITY`` is off -- passes its bucket values
+        through untouched rather than being burned to a placeholder. That
+        table already merges in ``DEVICE_IDENTITY_TYPES`` only when the flag
+        is set (see ``__init__``), so the device-identity keep-set applies to
+        a dimension name exactly as it does to a flat field, with no
+        separate check needed here.
+
+        A TEXT dimension is skipped here but *not* passed through: its values
+        are prose with no scalar type to mask by, so they are scanned in pass
+        2 by :meth:`_mask_breakdown_text`, exactly as the same string would be
+        under a flat ``msg``/``ui``/``subject`` key. Leaving them to this pass
+        was the gap the #109 review found.
         """
         if not isinstance(value, dict):
             return self._mask_structured(value, mapping, keep)
@@ -923,6 +928,8 @@ class OutputMasker:
             for key, value in obj.items():
                 if key.lower() in COMPOSITE_FILTER_ENTRIES and isinstance(value, list):
                     out[key] = self._mask_filter_entries(value, mapping, keep)
+                elif key.lower() in COMPOSITE_BREAKDOWNS and isinstance(value, dict):
+                    out[key] = self._mask_breakdown_text(value, mapping, keep)
                 elif self._field_types.get(key.lower()) == TEXT:
                     out[key] = self._mask_text_tree(value, mapping, keep)
                 else:
@@ -931,6 +938,59 @@ class OutputMasker:
         if isinstance(obj, list):
             return [self._mask_free_text(item, mapping, keep) for item in obj]
         return obj
+
+    def _mask_breakdown_text(
+        self, value: Any, mapping: dict[str, str], keep: frozenset[str] = frozenset()
+    ) -> Any:
+        """``breakdowns`` in pass 2: the buckets of a TEXT dimension.
+
+        Pass 1 types a bucket's ``"value"`` from the dimension name, which
+        covers every dimension whose values *are* identifiers. A TEXT dimension
+        has none to mask by -- its values are prose that may embed an identifier
+        anywhere -- and prose is what this pass exists for. Under a flat
+        ``msg``/``ui``/``subject`` key the scan fires because the KEY is typed
+        TEXT; inside a bucket the key is a generic ``"value"``, so nothing
+        reached it and the free text rode out in clear. ``sample_by`` is not
+        restricted to a vocabulary, so ``sample_by=["msg"]`` is an ordinary
+        call, and a hostname in that prose sat beside its own token in the same
+        response.
+
+        Only a TEXT dimension is scanned here. An identifier-typed dimension was
+        already masked in pass 1 and a masked IPv4 is itself a valid IPv4, so
+        re-scanning it would mask it twice and yield a token matching nothing
+        else in the response -- the same hazard that puts
+        ``_mask_filter_entries`` in this pass rather than the other. An untyped
+        dimension keeps the passthrough :meth:`_mask_breakdowns` documents: it
+        is not an identifier, and a flat key of that name is not scanned either.
+        Both fall through to the ordinary walk, so behaviour there is unchanged.
+        """
+        out: dict[str, Any] = {}
+        for dimension, buckets in value.items():
+            vtype = (
+                self._field_types.get(dimension.strip().lower())
+                if isinstance(dimension, str)
+                else None
+            )
+            if vtype != TEXT or not isinstance(buckets, list):
+                out[dimension] = self._mask_free_text(buckets, mapping, keep)
+                continue
+            scanned: list[Any] = []
+            for bucket in buckets:
+                if not isinstance(bucket, dict):
+                    # Not the shape aggregate_breakdowns writes. Treat it as the
+                    # free-text leaf a flat TEXT key would have made of it.
+                    scanned.append(self._mask_text_tree(bucket, mapping, keep))
+                    continue
+                scanned.append(
+                    {
+                        bkey: self._mask_scalar_text(bvalue, mapping, keep)
+                        if bkey.lower() == "value" and isinstance(bvalue, str)
+                        else bvalue
+                        for bkey, bvalue in bucket.items()
+                    }
+                )
+            out[dimension] = scanned
+        return out
 
     def _mask_filter_entries(
         self, value: Any, mapping: dict[str, str], keep: frozenset[str] = frozenset()

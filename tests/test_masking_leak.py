@@ -1763,6 +1763,122 @@ class TestBreakdownsComposite:
         assert masked[0]["value"] != masked[1]["value"]
 
 
+class TestBreakdownsTextDimensions:
+    """A TEXT dimension's bucket values, raised on review of #109.
+
+    Pass 1 types a bucket's ``"value"`` from the dimension name, which covers
+    every dimension whose values ARE identifiers. A TEXT dimension has no
+    scalar type to mask by: its values are prose that may embed an identifier
+    anywhere, which is what pass 2's free-text scan exists for. Under a flat
+    ``msg``/``ui``/``subject`` key that scan fires because the KEY is typed
+    TEXT; inside a bucket the key is a generic ``"value"``, so pass 2 never
+    reached it and the free text rode out in clear.
+
+    ``sample_by`` is not validated against a vocabulary -- deliberately, since
+    a caller may break down on any field the rows carry -- so
+    ``query_logs(logtype="event", sample_by=["msg"])`` is an ordinary call,
+    not a contrived one.
+
+    The invariant asserted here is parity: a bucket value gets exactly what
+    the same string gets under its own flat key. That is one rule for all
+    three classes of dimension (TEXT scanned, identifier tokenised, untyped
+    passed through) instead of three, and it is what the review asked for.
+    """
+
+    # (dimension, bucket text). The last two are the deliberate passthroughs
+    # a flat key of the same name also gets, kept here so the boundary is
+    # asserted rather than assumed.
+    TEXT_CASES = [
+        ("msg", f"Admin login from {ENDPOINT_IP} failed"),
+        ("ui", f"GUI({ENDPOINT_IP})"),
+        ("subject", f"Report delivery to {SOC_EMAIL} deferred"),
+        ("extrainfo", "client mac 00:11:22:33:44:55 not on the allow list"),
+        ("logdesc", f"Traffic from {PEER_IP} denied by policy"),
+        ("prompt", f"summarise the credentials for {SRC_NAME}"),
+        ("srcip", ENDPOINT_IP),
+        ("user", ANALYST),
+        ("port", "6/443"),
+        ("app", "HTTPS"),
+    ]
+
+    @pytest.mark.parametrize("dimension,text", TEXT_CASES, ids=[case[0] for case in TEXT_CASES])
+    def test_a_bucket_value_gets_what_the_flat_field_gets(
+        self, masker: OutputMasker, dimension: str, text: str
+    ) -> None:
+        flat = masker.mask_result({"rows": [{dimension: text}]})["rows"][0][dimension]
+        bucket = masker.mask_result({"breakdowns": {dimension: [{"value": text, "hits": 3}]}})
+
+        assert bucket["breakdowns"][dimension][0]["value"] == flat
+
+    def test_embedded_iocs_do_not_survive_a_text_bucket(self, masker: OutputMasker) -> None:
+        """The whole point, stated as identity comparison rather than parity."""
+        payload = {
+            "status": "success",
+            "sample_by": ["msg", "subject", "extrainfo"],
+            "breakdowns": {
+                "msg": [{"value": f"Admin login from {ENDPOINT_IP} failed", "hits": 4}],
+                "subject": [{"value": f"mail to {SOC_EMAIL}", "hits": 2}],
+                "extrainfo": [{"value": "client mac 00:11:22:33:44:55", "hits": 1}],
+            },
+        }
+
+        masked = masker.mask_result(payload)
+
+        assert ENDPOINT_IP not in str(masked)
+        assert SOC_EMAIL not in str(masked)
+        assert "00:11:22:33:44:55" not in str(masked)
+        # Counts are not identifiers and must survive the scan intact.
+        assert [b["hits"] for b in masked["breakdowns"]["msg"]] == [4]
+
+    def test_a_value_masked_elsewhere_is_resolved_inside_a_text_bucket(
+        self, masker: OutputMasker
+    ) -> None:
+        """The sharp case: a hostname cannot be recognised by pattern, so it
+        survives a bucket unless pass 2 substitutes what this response already
+        mapped. Leaving it clear beside its own token in a sibling row is the
+        token-to-plaintext pairing the layer exists to withhold."""
+        payload = {
+            "rows": [{"hostname": SRC_NAME}],
+            "breakdowns": {"msg": [{"value": f"session from {SRC_NAME} blocked", "hits": 2}]},
+        }
+
+        masked = masker.mask_result(payload)
+
+        assert SRC_NAME not in str(masked)
+        assert masked["rows"][0]["hostname"] in masked["breakdowns"]["msg"][0]["value"]
+
+    def test_an_identifier_dimension_is_not_masked_twice(self, masker: OutputMasker) -> None:
+        """Pass 1 already tokenised this bucket, and a masked IPv4 is itself a
+        valid IPv4, so a pass-2 scan over the same value would mask it again
+        and hand back a token that matches nothing else in the response. Same
+        hazard ``_mask_filter_entries`` documents."""
+        payload = {
+            "rows": [{"srcip": ENDPOINT_IP}],
+            "breakdowns": {"srcip": [{"value": ENDPOINT_IP, "hits": 6}]},
+        }
+
+        masked = masker.mask_result(payload)
+
+        assert masked["breakdowns"]["srcip"][0]["value"] == masked["rows"][0]["srcip"]
+
+    def test_odd_bucket_shapes_do_not_crash_the_scan(self, masker: OutputMasker) -> None:
+        """``aggregate_breakdowns`` always emits ``[{"value", "hits"}]``, but
+        masking runs on whatever the appliance and the tools actually returned,
+        so the handler must survive a shape it did not write."""
+        payload = {
+            "breakdowns": {
+                "msg": [f"bare string from {ENDPOINT_IP}", {"value": None, "hits": 1}, None],
+                "subject": {"not": "a list"},
+            }
+        }
+
+        masked = masker.mask_result(payload)
+
+        assert ENDPOINT_IP not in str(masked["breakdowns"]["msg"])
+        assert masked["breakdowns"]["msg"][1] == {"value": None, "hits": 1}
+        assert masked["breakdowns"]["subject"] == {"not": "a list"}
+
+
 class TestGroupByGroupsRowsAlreadyCovered:
     """Third leak surface, checked per the review: ``query_logs(group_by=...)``
     returns ``groups: [<native FortiView row>, ...]``. Unlike ``breakdowns``,
