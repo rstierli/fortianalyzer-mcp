@@ -277,10 +277,12 @@ The MCP server provides **73 tools** across 12 categories (74 with the optional 
 - `get_fortiview_data` - Run a view and wait for results. Pass `view_name`:
   `top-sources`, `top-destinations`, `top-applications`, `top-websites`,
   `top-threats`, `top-cloud-applications`, `top-countries`,
-  `site-to-site-ipsec`, `policy-hits`, `policy-line`. (The seven `get_top_*`
-  wrappers were removed; they only hard-coded this argument. They also
-  defaulted to a 24-hour window where this defaults to 1-hour, so pass
-  `time_range` explicitly when migrating.)
+  `site-to-site-ipsec`, `policy-hits`, `policy-line`. (Seven wrappers were
+  removed — the six `get_top_*` plus `get_policy_hits`; they only hard-coded
+  this argument. Two of them, `get_top_threats` and `get_policy_hits`,
+  defaulted to `24-hour` where this defaults to `1-hour`; the other five
+  already defaulted to `1-hour`. So pass `time_range` explicitly when
+  migrating a call to either of those two.)
 - `run_fortiview` / `fetch_fortiview` - Raw FortiView queries
 
 ### Event Tools (9)
