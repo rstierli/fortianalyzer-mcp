@@ -26,6 +26,17 @@ to strip out of free text once we know what it masks to:
    but you can replace the exact strings you just masked elsewhere in the
    same response. It also removes the "masked under one key, cleartext two
    keys away" failure that a leak test over live alert records exposed.
+   Two keys are handled in this pass rather than the first because their
+   values name their own field and a pass-1 token would be scanned twice:
+   ``filter_applied``'s compiled entries, and the buckets of a ``breakdowns``
+   dimension typed TEXT.
+
+One assumption runs through every pass here: **dict keys are strings.** Each
+key-matching site calls ``key.lower()`` unguarded, which holds because a tool
+result is JSON-shaped, and JSON has no other kind of key. The two breakdown
+handlers do check ``isinstance(dimension, str)`` — not as defence against a
+malformed response, but because those particular keys are dimension names a
+tool built in-process from caller input, so they never came off the wire.
 
 Fail-closed by construction:
 
