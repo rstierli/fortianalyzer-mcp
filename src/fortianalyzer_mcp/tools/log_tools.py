@@ -21,7 +21,14 @@ from fortianalyzer_mcp.query.shape import fields_returned, project_rows, resolve
 from fortianalyzer_mcp.server import get_faz_client, mcp
 from fortianalyzer_mcp.tool_annotations import DESTRUCTIVE, READ_ONLY
 from fortianalyzer_mcp.utils.log_clock import resolve_time_window
-from fortianalyzer_mcp.utils.responses import build_warnings, coerce_num, error_response, redact
+from fortianalyzer_mcp.utils.responses import (
+    build_warnings,
+    coerce_num,
+    error_response,
+    limit_clamped_warning,
+    redact,
+    unknown_timezone_warning,
+)
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
@@ -147,6 +154,39 @@ def _clamp_limit(limit: int) -> int:
     if not isinstance(limit, int) or isinstance(limit, bool):
         return 100
     return max(1, min(limit, LOG_FETCH_LIMIT_MAX))
+
+
+def _aggregation_warnings(
+    *,
+    requested_limit: int,
+    limit: int,
+    timezone: str,
+    filter_warnings: list[str],
+) -> list[str]:
+    """The advisories every ``query_logs`` aggregation path shares.
+
+    ``build_warnings`` is the rows-path builder, and two of its four conditions
+    are not about rows at all: the limit clamp bounds a grouping's top-N and a
+    sample's scan just as it bounds a page, and the undetected-timezone caveat
+    applies to whatever the window produced. Only the rows path emitted them, so
+    a caller who passed ``limit=5000`` to ``sample_by`` was silently answered
+    from 1000 scanned rows. Its other two conditions stay out: a bare count
+    reports ``total_is_known`` structurally, and "aggregate instead of paging
+    rows" is absurd advice to someone already aggregating.
+
+    Order matches ``build_warnings`` (clamp, then timezone), with the caller's
+    filter/projection warnings after, so a response's ``warnings`` list stays
+    deterministic across paths.
+    """
+    out: list[str] = []
+    clamped = limit_clamped_warning(requested_limit, limit)
+    if clamped is not None:
+        out.append(clamped)
+    unknown_tz = unknown_timezone_warning(timezone)
+    if unknown_tz is not None:
+        out.append(unknown_tz)
+    out.extend(filter_warnings)
+    return out
 
 
 def _compute_has_more(offset: int, count: int, limit: int, total: int | None) -> bool:
@@ -513,7 +553,9 @@ async def query_logs(
             it caps the number of *groups* instead, since no rows are returned:
             the response reports `group_limit` and `groups_truncated` so a cut
             ranking is visible. With sample_by it caps the rows scanned (and so
-            drives is_exact); use top_n to cap the buckets reported.
+            drives is_exact); use top_n to cap the buckets reported. A value
+            above 1000 is clamped, not refused, on every one of those paths, and
+            `warnings` names both numbers when that happens.
         offset: Offset for pagination (default: 0)
         timeout: Search timeout in seconds (default: 60)
 
@@ -527,8 +569,9 @@ async def query_logs(
             - group_source: "fortiview:<view>" — which surface counted it
             - is_exact: always true here; group_by refuses anything it cannot
               answer exactly rather than falling back to a sample
-            - group_limit, groups_truncated: the cap `limit` set, and whether
-              it bound (more groups may exist; the counts shown are still exact)
+            - group_limit, groups_truncated: the cap actually applied (the
+              clamped `limit`, which is not the caller's above 1000), and
+              whether it bound (more groups may exist; counts stay exact)
 
         With sample_by (bounded, one row scan):
             - status, adom, logtype, filter, time_range, timezone, warnings
@@ -808,12 +851,25 @@ async def query_logs(
             # is *groups*, not accuracy -- so it gets its own flag rather than
             # a downgrade of the exactness claim.
             groups_truncated = len(groups) >= limit
-            group_warnings = list(filter_warnings)
+            group_warnings = _aggregation_warnings(
+                requested_limit=requested_limit,
+                limit=limit,
+                timezone=tz_name,
+                filter_warnings=filter_warnings,
+            )
             if groups_truncated:
+                # Say which cap bound, and never advise raising a limit that is
+                # already at the ceiling: `limit` here is the CLAMPED value, so
+                # attributing it to the caller reads as a lie to anyone who
+                # asked for more than 1000 and got 1000.
                 group_warnings.append(
-                    f"Returned the top {limit} groups, which is the cap `limit` set; "
-                    "further groups may exist below them. Raise limit (max 1000) for a "
-                    "longer ranking. Each count shown is still exact."
+                    f"Returned the top {limit} groups, the most this server requests from "
+                    "a view; further groups may exist below them. Narrow the time window "
+                    "to bring the tail into range. Each count shown is still exact."
+                    if limit >= LOG_FETCH_LIMIT_MAX
+                    else f"Returned the top {limit} groups, the effective `limit`; further "
+                    f"groups may exist below them. Raise limit (max {LOG_FETCH_LIMIT_MAX}) "
+                    "for a longer ranking. Each count shown is still exact."
                 )
 
             return {
@@ -875,7 +931,12 @@ async def query_logs(
                 "time_range": time_range_dict,
                 "timezone": tz_name,
                 "filter": filter,
-                "warnings": filter_warnings,
+                "warnings": _aggregation_warnings(
+                    requested_limit=requested_limit,
+                    limit=limit,
+                    timezone=tz_name,
+                    filter_warnings=filter_warnings,
+                ),
             }
 
         if sample_by:
@@ -911,7 +972,12 @@ async def query_logs(
                 "time_range": time_range_dict,
                 "timezone": tz_name,
                 "filter": filter,
-                "warnings": filter_warnings,
+                "warnings": _aggregation_warnings(
+                    requested_limit=requested_limit,
+                    limit=limit,
+                    timezone=tz_name,
+                    filter_warnings=filter_warnings,
+                ),
             }
 
         logs = project_rows(page["logs"], projection)

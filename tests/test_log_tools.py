@@ -800,6 +800,178 @@ class TestQueryLogsGroupByDispatch:
         assert "timed out" in result["message"]
 
 
+class TestAggregationPathWarnings:
+    """``build_warnings`` is the rows-path builder, and two of its four
+    conditions are not about rows: the limit clamp bounds a grouping's top-N and
+    a sample's row scan exactly as it bounds a page, and FAZ interprets a naive
+    window in its own timezone whatever the query returns. Only the rows path
+    emitted them, so a caller who passed ``limit=5000`` to ``sample_by`` was
+    answered from 1000 scanned rows with nothing saying so.
+
+    The other two conditions stay out on purpose, and the last test here is what
+    keeps them out: a bare count reports ``total_is_known`` structurally, and
+    "aggregate instead of paging rows" is absurd advice to someone aggregating.
+    """
+
+    CUSTOM_RANGE = "2024-01-01 00:00:00|2024-01-02 00:00:00"
+
+    class _Faz:
+        async def ensure_connected(self) -> None:
+            return None
+
+        async def get_system_timezone(self) -> None:
+            return None
+
+    def _install_rows(
+        self, monkeypatch: pytest.MonkeyPatch, total: int | None = 3, row_count: int = 3
+    ) -> None:
+        async def fake_page(client: object, **kwargs: object) -> dict[str, object]:
+            return {
+                "timed_out": False,
+                "tid": 11,
+                "logs": [{"app": "HTTPS"} for _ in range(row_count)],
+                "total": total,
+            }
+
+        monkeypatch.setattr(log_tools, "get_faz_client", lambda: self._Faz())
+        monkeypatch.setattr(log_tools, "_run_logsearch_page", fake_page)
+
+    def _install_view(self, monkeypatch: pytest.MonkeyPatch, group_count: int) -> None:
+        async def fake_impl(**kwargs: object) -> dict[str, object]:
+            return {
+                "status": "success",
+                "data": [{"app": f"app-{n}", "sessions": 1} for n in range(group_count)],
+            }
+
+        monkeypatch.setattr(log_tools, "get_faz_client", lambda: self._Faz())
+        monkeypatch.setattr(fortiview_tools, "_get_fortiview_data_impl", fake_impl)
+
+    @staticmethod
+    def _clamp_notice(warnings: list[str]) -> str | None:
+        return next((w for w in warnings if "was clamped to" in w), None)
+
+    async def test_group_by_names_both_numbers_when_the_limit_was_clamped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._install_view(monkeypatch, group_count=1000)
+
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, group_by="app", limit=5000
+        )
+
+        notice = self._clamp_notice(result["warnings"])
+        assert notice is not None, "a clamped group cap was reported by nothing"
+        assert "5000" in notice and "1000" in notice
+        # The echo is the cap actually applied, not the one asked for.
+        assert result["group_limit"] == 1000
+        assert result["groups_truncated"] is True
+
+    async def test_a_ranking_cut_at_the_ceiling_does_not_blame_the_caller(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The old message called 1000 "the cap `limit` set" to a caller who set
+        5000, then told them to raise it to a maximum they had already exceeded."""
+        self._install_view(monkeypatch, group_count=1000)
+
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, group_by="app", limit=5000
+        )
+
+        cut = next(w for w in result["warnings"] if "top 1000 groups" in w)
+        assert "the cap `limit` set" not in cut
+        assert "Raise limit" not in cut
+        assert "the most this server requests" in cut
+        assert "Each count shown is still exact." in cut
+
+    async def test_a_ranking_cut_below_the_ceiling_still_advises_raising_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Where raising `limit` IS the remedy, it must still be offered."""
+        self._install_view(monkeypatch, group_count=3)
+
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, group_by="app", limit=3
+        )
+
+        cut = next(w for w in result["warnings"] if "top 3 groups" in w)
+        assert "Raise limit (max 1000)" in cut
+        assert self._clamp_notice(result["warnings"]) is None, "nothing was clamped"
+
+    async def test_sample_by_reports_the_clamp_that_bounded_its_scan(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._install_rows(monkeypatch)
+
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, sample_by=["app"], limit=5000
+        )
+
+        notice = self._clamp_notice(result["warnings"])
+        assert notice is not None and "5000" in notice
+        # The structured echo already agreed with the clamp; the prose now does.
+        assert result["log_limit_per_slice"] == 1000
+
+    async def test_count_only_reports_the_clamp(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._install_rows(monkeypatch)
+
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, count_only=True, limit=5000
+        )
+
+        assert self._clamp_notice(result["warnings"]) is not None
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"group_by": "app"},
+            {"sample_by": ["app"]},
+            {"count_only": True},
+        ],
+        ids=["group_by", "sample_by", "count_only"],
+    )
+    async def test_an_undetected_timezone_is_reported_on_every_path(
+        self, monkeypatch: pytest.MonkeyPatch, kwargs: dict[str, object]
+    ) -> None:
+        """FAZ reads a naive window in its own timezone, so an undetected one is
+        a caveat on the window -- which every mode here has."""
+        if "group_by" in kwargs:
+            self._install_view(monkeypatch, group_count=2)
+        else:
+            self._install_rows(monkeypatch)
+
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, **kwargs
+        )
+
+        assert result["timezone"] == "unknown"
+        assert any("timezone could not be detected" in w for w in result["warnings"])
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"group_by": "app"},
+            {"sample_by": ["app"]},
+            {"count_only": True},
+        ],
+        ids=["group_by", "sample_by", "count_only"],
+    )
+    async def test_no_aggregation_path_advises_aggregating(
+        self, monkeypatch: pytest.MonkeyPatch, kwargs: dict[str, object]
+    ) -> None:
+        """The rows-path high-volume advisory names group_by/sample_by as the
+        remedy. Emitted here it would tell a caller to do what they just did."""
+        if "group_by" in kwargs:
+            self._install_view(monkeypatch, group_count=2)
+        else:
+            self._install_rows(monkeypatch, total=50_000, row_count=100)
+
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, limit=100, **kwargs
+        )
+
+        assert not any("Aggregate instead of paging rows" in w for w in result["warnings"])
+
+
 class TestQueryLogsGroupByDeviceFilter:
     """What reaches ``client.fortiview_run``, not what reaches the helper.
 

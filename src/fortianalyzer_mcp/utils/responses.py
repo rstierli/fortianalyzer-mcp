@@ -69,6 +69,45 @@ def coerce_num(value: Any) -> float | None:
     return num if math.isfinite(num) else None
 
 
+def limit_clamped_warning(requested_limit: int, limit: int) -> str | None:
+    """The clamp advisory, or ``None`` when the caller's limit was honoured.
+
+    Its own function because :func:`build_warnings` is a rows-path builder and
+    the aggregation paths need this one message without the rest of it: a
+    ``group_by`` or ``count_only`` response has no ``has_more`` to reason about
+    and must never be told to aggregate instead of paging rows, yet it is bound
+    by exactly the same clamp. Emitting it from one place is what keeps a caller
+    who passed ``limit=5000`` from being told "1000" by three response shapes
+    and nothing by the fourth.
+
+    The parenthetical names the logsearch fetch endpoint's own maximum, which is
+    where the number comes from; the server then applies that one bound on every
+    path, including the FortiView dispatch behind ``group_by``.
+    """
+    if requested_limit == limit:
+        return None
+    return (
+        f"Requested limit {requested_limit} was clamped to {limit} "
+        "(FortiAnalyzer allows 1-1000 rows per fetch)."
+    )
+
+
+def unknown_timezone_warning(timezone: str) -> str | None:
+    """The undetected-timezone advisory, or ``None`` when it was detected.
+
+    Shared for the same reason as :func:`limit_clamped_warning`: FAZ interprets
+    a naive window in its own timezone, so this caveat applies to whatever the
+    window produced -- rows, an exact grouping, a bounded breakdown or a bare
+    count -- and it was previously reported on the rows path alone.
+    """
+    if timezone != "unknown":
+        return None
+    return (
+        "FortiAnalyzer timezone could not be detected; timestamps are interpreted "
+        "as naive FortiAnalyzer-local time."
+    )
+
+
 def build_warnings(
     *,
     requested_limit: int,
@@ -82,24 +121,23 @@ def build_warnings(
 
     Emits one message for each of exactly four conditions: the requested limit was
     clamped; the total is unknown; the FortiAnalyzer timezone is unknown; or the
-    result set is large enough that aggregation tools are a better fit.
+    result set is large enough that aggregation tools are a better fit. The first
+    and third are shared with the aggregation paths through
+    :func:`limit_clamped_warning` and :func:`unknown_timezone_warning`; the order
+    here is unchanged.
     """
     warnings: list[str] = []
-    if requested_limit != limit:
-        warnings.append(
-            f"Requested limit {requested_limit} was clamped to {limit} "
-            "(FortiAnalyzer allows 1-1000 rows per fetch)."
-        )
+    clamped = limit_clamped_warning(requested_limit, limit)
+    if clamped is not None:
+        warnings.append(clamped)
     if total is None:
         warnings.append(
             "Total match count is unavailable from FortiAnalyzer for this search; "
             "has_more is best-effort."
         )
-    if timezone == "unknown":
-        warnings.append(
-            "FortiAnalyzer timezone could not be detected; timestamps are interpreted "
-            "as naive FortiAnalyzer-local time."
-        )
+    unknown_tz = unknown_timezone_warning(timezone)
+    if unknown_tz is not None:
+        warnings.append(unknown_tz)
     if (
         has_more
         and total_is_known
