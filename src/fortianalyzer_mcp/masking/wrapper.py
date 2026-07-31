@@ -95,6 +95,10 @@ _MIN_SUBSTITUTION_LEN = 4
 
 _PLACEHOLDER_MARK = "masked-unrepresentable-"
 
+#: Structural shape of a prefix-marked token: ``<marker>-<4-hex-kid>-``.
+#: "host-fw01" has no kid group and is a legitimate name, not a token.
+_TOKEN_PREFIX_SHAPE_RE = re.compile(r"^(?:host|user|url)-[0-9a-f]{4}-")
+
 
 def _find_key(obj: dict[str, Any], name: str) -> str | None:
     """Original spelling of the lowercase ``name`` in ``obj``, or None.
@@ -959,31 +963,43 @@ def install_masking(mcp: Any) -> tuple[OutputMasker, ArgUnmasker]:
     unmasker = ArgUnmasker(engine)
     original_tool = mcp.tool
 
-    def marked_arg_key(value: Any, key: str = "") -> str | None:
-        """Key under which a whole-value marked token sits, or None.
+    def contains_marked(value: Any) -> bool:
+        """True when a whole-value marked token sits anywhere in ``value``.
 
         Only whole-value tokens count: a token embedded in a longer string
         has nothing that would restore it, so it passes through as token
         text and cannot become a decrypted write. A marker that matches
-        but does not decrypt is the forged/stale case, which is exactly
-        the threat, so it refuses rather than passing.
+        but does not decrypt counts only when the value is structurally a
+        token: the ``<marker>-<4-hex-kid>-`` group, or the domain/email
+        suffix form. A genuine name that merely starts with ``host-`` /
+        ``user-`` / ``url-`` ("host-fw01") is not token-shaped, so its
+        decrypt failure means "not a token", not "forged".
         """
         if isinstance(value, str):
             try:
-                return key if engine.unmask_token(value) is not None else None
+                return engine.unmask_token(value) is not None
             except MaskingError:
-                return key
+                candidate = value.strip().lower()
+                return bool(
+                    _TOKEN_PREFIX_SHAPE_RE.match(candidate)
+                    or candidate.endswith("." + engine.mask_suffix)
+                )
         if isinstance(value, dict):
-            for inner_key, inner in value.items():
-                found = marked_arg_key(inner, str(inner_key))
-                if found is not None:
-                    return found
-            return None
+            return any(contains_marked(inner) for inner in value.values())
         if isinstance(value, list | tuple):
-            for inner in value:
-                found = marked_arg_key(inner, key)
-                if found is not None:
-                    return found
+            return any(contains_marked(inner) for inner in value)
+        return False
+
+    def marked_arg_key(kwargs: dict[str, Any]) -> str | None:
+        """The tool parameter whose value carries a marked token, or None.
+
+        Reports the top-level parameter name even when the token sits in
+        a nested container, so the refusal points the caller at an
+        argument that actually exists on the tool.
+        """
+        for param, value in kwargs.items():
+            if contains_marked(value):
+                return param
         return None
 
     def refuse_restore(tool_name: str, arg_key: str) -> dict[str, Any]:
@@ -1012,8 +1028,17 @@ def install_masking(mcp: Any) -> tuple[OutputMasker, ArgUnmasker]:
         # a whole-value marked token is refused outright. Unmarked IP/MAC
         # tokens are indistinguishable from real addresses and pass
         # through; making them detectable is the #40 v2 envelope work.
+        # The hint is read from the keyword form every tool uses today. A
+        # dict-shaped annotations object is honored too; anything else
+        # (positional, absent, unrecognized) computes read_only=False and
+        # the tool loses restoration rather than gaining a write path.
         annotations = kwargs.get("annotations")
-        read_only = bool(annotations is not None and getattr(annotations, "readOnlyHint", False))
+        if isinstance(annotations, dict):
+            read_only = bool(annotations.get("readOnlyHint", False))
+        else:
+            read_only = bool(
+                annotations is not None and getattr(annotations, "readOnlyHint", False)
+            )
 
         def register(fn: Any) -> Any:
             if inspect.iscoroutinefunction(fn):

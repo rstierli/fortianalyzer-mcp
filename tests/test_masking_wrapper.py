@@ -869,3 +869,54 @@ class TestMutatingToolGate:
 
         assert calls == []
         assert result["error"] == "masked_token_in_mutating_args"
+        # the message names the tool's parameter, not the innermost dict key
+        assert "devices" in result["message"]
+
+    @pytest.mark.parametrize(
+        "legit",
+        [
+            "host-fw01",
+            "host-fw01.example",
+            "user-svc",
+            "url-shortener",
+        ],
+    )
+    async def test_marker_prefixed_legit_name_is_not_refused(
+        self, monkeypatch: pytest.MonkeyPatch, legit: str
+    ):
+        # A genuine name can start with host-/user-/url-. Only a value that
+        # is structurally a token (the <4-hex-kid>- group, or the suffix
+        # form) is treated as forged when it fails to decrypt.
+        from fortianalyzer_mcp.tool_annotations import CREATES
+
+        mcp = self._install(monkeypatch)
+        calls: list[str] = []
+
+        @mcp.tool(annotations=CREATES)
+        async def fake_add_device(name: str) -> dict:
+            calls.append(name)
+            return {"status": "success"}
+
+        result = await fake_add_device(name=legit)
+
+        assert calls == [legit]
+        assert result.get("error") != "masked_token_in_mutating_args"
+
+    async def test_forged_suffix_form_is_refused(self, monkeypatch: pytest.MonkeyPatch):
+        # The domain/email token form is marked by its suffix; a value in
+        # that shape which does not decrypt is forged and stays refused.
+        from fortianalyzer_mcp.tool_annotations import CREATES
+
+        mcp = self._install(monkeypatch)
+        engine = FPEEngine(KEY)
+        calls: list[str] = []
+
+        @mcp.tool(annotations=CREATES)
+        async def fake_add_device(name: str) -> dict:
+            calls.append(name)
+            return {"status": "success"}
+
+        result = await fake_add_device(name="zzz." + engine.mask_suffix)
+
+        assert calls == []
+        assert result["error"] == "masked_token_in_mutating_args"
