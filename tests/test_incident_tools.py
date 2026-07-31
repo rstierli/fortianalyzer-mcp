@@ -143,13 +143,7 @@ class TestIncidentClient:
             password="password",
         )
         with pytest.raises(ConnectionError, match="Not connected"):
-            await client.get_incidents(
-                adom="root",
-                time_range={
-                    "start": "2024-01-01 00:00:00",
-                    "end": "2024-01-02 00:00:00",
-                },
-            )
+            await client.get_incidents(adom="root")
 
     async def test_get_incident_not_connected(self) -> None:
         """Test get_incident raises when not connected."""
@@ -173,13 +167,7 @@ class TestIncidentClient:
             password="password",
         )
         with pytest.raises(ConnectionError, match="Not connected"):
-            await client.get_incidents_count(
-                adom="root",
-                time_range={
-                    "start": "2024-01-01 00:00:00",
-                    "end": "2024-01-02 00:00:00",
-                },
-            )
+            await client.get_incidents_count(adom="root")
 
     async def test_create_incident_not_connected(self) -> None:
         """Test create_incident raises when not connected."""

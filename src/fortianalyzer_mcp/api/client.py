@@ -1059,13 +1059,24 @@ class FortiAnalyzerClient:
 
         FNDN: GET /eventmgmt/adom/{adom}/alerts
 
+        ``time-order`` is not among this endpoint's documented parameters on
+        7.6.6 or 8.0.0 (``/alertlogs`` does define one). It is still sent:
+        the spec demonstrably under-reports this API — logtypes 20-28 are
+        absent from it and live on the appliance — and dropping it would
+        risk flipping alert ordering away from newest-first on nothing
+        firmer than an omission. Do not treat it as load-bearing.
+
         Args:
             adom: ADOM name
             time_range: {"start": "2024-01-01 00:00:00", "end": "2024-01-02 00:00:00"}
-            filter: Filter expression
+            filter: Filter expression. Supported fields differ from
+                ``get_alerts_count``: here ``event_value``, ``severity``,
+                ``trigger_name``, ``count``, ``comment``, ``flags`` — note
+                ``trigger_name``, which the count endpoint spells
+                ``triggername``.
             limit: Max records (1-2000)
             offset: Record offset
-            time_order: Sort order ("asc" or "desc")
+            time_order: Sort order ("asc" or "desc"); see note above
         """
         params: dict[str, Any] = {
             "apiver": API_VERSION,
@@ -1089,6 +1100,14 @@ class FortiAnalyzerClient:
         """Get alert count.
 
         FNDN: GET /eventmgmt/adom/{adom}/alerts/count
+
+        The filter vocabulary here is NOT the one ``get_alerts`` takes:
+        ``ackflag``, ``assigned``, ``mgmt_state``, ``triggername``,
+        ``eventtype``, ``severity``, ``eventstatus``, ``tag``. Same concept,
+        different spelling — ``triggername`` here, ``trigger_name`` there.
+        ``group-by`` (severity/trigger/severity_timescale/eventtype/
+        mgmt_state/severity_epdevtype) and ``timescale`` are also available
+        and not currently surfaced.
         """
         params: dict[str, Any] = {"apiver": API_VERSION}
         if time_range:
@@ -1182,13 +1201,19 @@ class FortiAnalyzerClient:
     ) -> dict[str, Any]:
         """Add comment to alert.
 
-        FNDN: ADD /eventmgmt/adom/{adom}/alerts/comment
+        FNDN: UPDATE /eventmgmt/adom/{adom}/alerts/comment
+
+        The verb is ``update``, not ``add`` — the spec heading reads
+        "Add Alert Comment" but the JSON-RPC method it documents is
+        ``update`` on 7.6.6 and 8.0.0 alike. ``alertid`` is an array here,
+        the same as on ack/unack, even though this wrapper comments on one
+        alert at a time.
         """
         return await self._raw_request_dict(
-            "add",
+            "update",
             f"/eventmgmt/adom/{adom}/alerts/comment",
             apiver=API_VERSION,
-            alertid=alert_id,
+            alertid=[alert_id],
             comment=comment,
             **{"update-by": user},
         )
@@ -1197,20 +1222,28 @@ class FortiAnalyzerClient:
         self,
         adom: str,
         time_range: dict[str, str],
-        stat_type: str = "severity",
+        timescale: str = "month",
     ) -> dict[str, Any]:
         """Get alert-incident statistics.
 
         FNDN: GET /eventmgmt/adom/{adom}/alert-incident/stats
 
+        This endpoint takes ``timescale``, ``timezone`` and ``time-range``
+        and nothing else. It used to be sent a ``type`` parameter carrying
+        values like "severity" / "severity-timescale"; no such parameter
+        exists on 7.6.6 or 8.0.0, so it was inert — a nonsense value and
+        "severity" returned byte-identical responses live. The breakdown
+        this endpoint returns is fixed; ``timescale`` only chooses the
+        bucket width.
+
         Args:
-            stat_type: "severity", "severity-timescale", "status", etc.
+            timescale: Bucket width, "month" (default) or "hour".
         """
         return await self._raw_request_dict(
             "get",
             f"/eventmgmt/adom/{adom}/alert-incident/stats",
             apiver=API_VERSION,
-            type=stat_type,
+            timescale=timescale,
             **{"time-range": time_range},
         )
 
@@ -1597,6 +1630,30 @@ class FortiAnalyzerClient:
         """Get incidents.
 
         FNDN: GET /incidentmgmt/adom/{adom}/incidents
+
+        ``time-range`` is UNDOCUMENTED here. The parameter table lists only
+        ``incids``, ``filter``, ``sort-by``, ``limit``, ``offset`` and
+        ``detail-level`` on 7.6.6 and 8.0.0, while ``/incident/stats`` and
+        ``/eventmgmt/alerts`` both list it explicitly. It is still sent, and
+        callers are told the window is unverified, because the two failure
+        modes are not symmetric:
+
+        * if the appliance ignores it, sending it costs nothing as long as
+          the response stops claiming the window applied;
+        * if the appliance honours it undocumented, dropping it silently
+          widens every incident query from "last 24h" to ADOM-wide,
+          truncated by ``limit`` — wrong data, quietly.
+
+        And this API demonstrably under-reports itself: logtypes 20-28 are
+        absent from the same document and live on the appliance.
+
+        NOT SETTLED LIVE: fna-itd-01 holds zero incidents and its read-only
+        API token cannot create one. The experiment that would settle it is
+        proven working on ``/eventmgmt/alerts/count`` — a July-2026 window
+        returns 15341, a year-2000 window returns 0, an omitted one returns
+        15341 — and needs only a single incident record to be re-run here.
+        Malformed-value probing does NOT substitute: FAZ silently degrades
+        bad dates to "all" even on endpoints that do document the field.
         """
         params: dict[str, Any] = {
             "apiver": API_VERSION,
@@ -1648,6 +1705,10 @@ class FortiAnalyzerClient:
         """Get incident count.
 
         FNDN: GET /incidentmgmt/adom/{adom}/incidents/count
+
+        Documents ``incids`` and ``filter`` only; ``time-range`` is
+        undocumented and sent anyway. See ``get_incidents`` for the
+        reasoning and for what would settle it.
         """
         params: dict[str, Any] = {"apiver": API_VERSION}
         if time_range:
@@ -1711,19 +1772,27 @@ class FortiAnalyzerClient:
         incident_id: str,
         status: str | None = None,
         severity: str | None = None,
-        assignee: str | None = None,
+        last_user: str | None = None,
     ) -> dict[str, Any]:
         """Update an incident.
 
         FNDN: UPDATE /incidentmgmt/adom/{adom}/incident/{incid}
+
+        Accepts ``lastuser``, ``epid``, ``endpoint``, ``euid``, ``category``,
+        ``severity``, ``status``, ``description`` and ``lastrevision``. There
+        is no ``assignee`` field on 7.6.6 or 8.0.0 — one used to be sent and
+        was silently dropped, so an "assign this incident" call reported
+        success while changing nothing. ``lastuser`` (who last touched the
+        record) is the nearest real field and is what the ownership-ish
+        argument now maps to.
         """
         params: dict[str, Any] = {"apiver": API_VERSION}
         if status:
             params["status"] = status
         if severity:
             params["severity"] = severity
-        if assignee:
-            params["assignee"] = assignee
+        if last_user:
+            params["lastuser"] = last_user
 
         return await self._raw_request_dict(
             "update", f"/incidentmgmt/adom/{adom}/incident/{incident_id}", **params
@@ -1774,19 +1843,37 @@ class FortiAnalyzerClient:
     async def acknowledge_ioc_events(
         self,
         adom: str,
-        event_ids: list[str],
-        user: str,
+        events: list[dict[str, str]],
+        comment: str | None = None,
     ) -> dict[str, Any]:
         """Acknowledge IOC events.
 
         FNDN: UPDATE /ioc/adom/{adom}/events/ack
+
+        An IOC event is not addressed by an opaque id — it is identified by
+        the endpoint it fired on plus when it fired. The payload is an
+        ``events`` array of ``{endpoint-id, source-ip, timestamp, comment}``
+        objects. This previously sent ``eventid`` (a flat id list) and
+        ``update-by``; neither string occurs anywhere in the IOC spec on
+        7.6.6 or 8.0.0.
+
+        Args:
+            adom: ADOM name
+            events: Event identities to acknowledge. Each entry carries
+                ``endpoint-id`` and/or ``source-ip`` plus ``timestamp``.
+            comment: Optional acknowledgement note applied to every entry
+                that does not already carry its own ``comment``.
         """
+        payload = [dict(event) for event in events]
+        if comment:
+            for event in payload:
+                event.setdefault("comment", comment)
+
         return await self._raw_request_dict(
             "update",
             f"/ioc/adom/{adom}/events/ack",
             apiver=API_VERSION,
-            eventid=event_ids,
-            **{"update-by": user},
+            events=payload,
         )
 
     async def ioc_rescan_run(
@@ -1797,7 +1884,16 @@ class FortiAnalyzerClient:
     ) -> dict[str, Any]:
         """Run IOC rescan.
 
-        FNDN: ADD /ioc/adom/{adom}/rescan/run
+        FNDN: ADD /ioc/adom/{adom}/rescan/run — UNDOCUMENTED.
+
+        The IOC module documents exactly five operations on 7.6.6 and 8.0.0
+        (``update /events/ack``, ``get /license/state``, ``get /rescan/run``,
+        ``get /rescan/history``, ``delete /rescan/run/{tid}``) and no way to
+        *start* a rescan is among them. This add-verb call is the shipped
+        behaviour and is left as-is rather than guessed at, but it is not
+        spec-backed: treat a failure here as "the endpoint moved", not as a
+        transient error. Same for the tid-scoped status read in
+        ``ioc_rescan_status``.
 
         Returns TID for tracking.
         """
@@ -1816,7 +1912,16 @@ class FortiAnalyzerClient:
     ) -> dict[str, Any]:
         """Get IOC rescan status.
 
-        FNDN: GET /ioc/adom/{adom}/rescan/run/{tid}
+        FNDN: GET /ioc/adom/{adom}/rescan/run/{tid} — UNDOCUMENTED.
+
+        The spec defines ``{tid}`` on this path only under ``delete``; the
+        documented status read is the tid-less ``get /rescan/run``, which
+        returns the single running task's ``tid``, ``percentage``,
+        ``status`` and ``threats-count``. The tid-scoped form is kept
+        because it is what ships and switching a live polling path on spec
+        reading alone is not verifiable from an idle lab — but if this
+        starts returning the wrong task, the tid-less endpoint is the
+        documented answer.
         """
         return await self._raw_request_dict(
             "get", f"/ioc/adom/{adom}/rescan/run/{tid}", apiver=API_VERSION
@@ -2002,6 +2107,11 @@ class FortiAnalyzerClient:
     # omits one (documented in the FNDN soar.indicator.get spec), which hides
     # older indicators. This unbounded window matches the GUI's "show all"
     # behaviour; callers narrow it via the ``time_range`` argument.
+    #
+    # Scope note: only the indicator LIST endpoint (/soar/adom/{adom}/indicator)
+    # documents time-range. /alert/indicator and /incident/indicator take just
+    # alert-id / incident-id plus filter, so the window sent to those two is
+    # inert — harmless, and kept so all four reads share one code path.
     _WIDE_TIME_RANGE = {"start": "1970-01-01 00:00:00", "end": "2099-12-31 23:59:59"}
 
     async def get_linked_indicators(

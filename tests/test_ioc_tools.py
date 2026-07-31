@@ -90,8 +90,7 @@ class TestIOCClient:
         with pytest.raises(ConnectionError, match="Not connected"):
             await client.acknowledge_ioc_events(
                 adom="root",
-                event_ids=["IOC-001"],
-                user="analyst1",
+                events=[{"endpoint-id": "1234", "timestamp": "2024-01-15 09:30:00"}],
             )
 
     async def test_ioc_rescan_run_not_connected(self) -> None:

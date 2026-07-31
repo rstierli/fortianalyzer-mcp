@@ -8,6 +8,8 @@ import asyncio
 import logging
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict, model_validator
+
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.server import get_faz_client, mcp
 from fortianalyzer_mcp.tool_annotations import CREATES, READ_ONLY, UPDATES
@@ -16,6 +18,45 @@ from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import build_device_filter, get_default_adom, validate_adom
 
 logger = logging.getLogger(__name__)
+
+
+class IocEventRef(BaseModel):
+    """One IOC event to acknowledge.
+
+    An IOC event has no standalone id. The appliance addresses it by the
+    endpoint it fired on (``endpoint-id`` and/or ``source-ip``) plus the
+    ``timestamp`` it fired at -- so an acknowledgement needs the identity
+    triple, not an opaque handle. A Pydantic model rather than a dict so
+    FastMCP publishes a real JSON schema and a caller cannot silently omit
+    the whole identity.
+
+    Take the values straight off an IOC event row rather than composing
+    them by hand.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint_id: str | None = None
+    source_ip: str | None = None
+    timestamp: str
+    comment: str | None = None
+
+    @model_validator(mode="after")
+    def _require_an_identity(self) -> "IocEventRef":
+        """An event with neither endpoint nor source IP identifies nothing."""
+        if not self.endpoint_id and not self.source_ip:
+            raise ValueError("give endpoint_id or source_ip (or both) to identify the event")
+        return self
+
+    def to_payload(self) -> dict[str, str]:
+        """Render to the API's hyphenated field names, dropping empties."""
+        payload = {
+            "endpoint-id": self.endpoint_id,
+            "source-ip": self.source_ip,
+            "timestamp": self.timestamp,
+            "comment": self.comment,
+        }
+        return {k: v for k, v in payload.items() if v}
 
 
 def _get_client() -> FortiAnalyzerClient:
@@ -74,17 +115,26 @@ async def get_ioc_license_state() -> dict[str, Any]:
 
 @mcp.tool(annotations=UPDATES)
 async def acknowledge_ioc_events(
-    ioc_ids: list[str],
-    user: str,
+    events: list[IocEventRef],
+    comment: str | None = None,
     adom: str | None = None,
 ) -> dict[str, Any]:
     """Acknowledge IOC events.
 
     Marks IOC detection events as acknowledged for SOC tracking.
 
+    Identify each event the way the appliance does -- by endpoint plus the
+    timestamp it fired at. This tool used to take a list of ``ioc_ids``
+    with a ``user``; neither an event-id nor an acknowledging-user field
+    exists in the IOC API on 7.6.6 or 8.0.0, so those never reached the
+    appliance in a form it could act on.
+
     Args:
-        ioc_ids: List of IOC event IDs to acknowledge
-        user: Username performing the acknowledgment
+        events: Events to acknowledge. Each needs ``timestamp`` plus
+            ``endpoint_id`` and/or ``source_ip``, and may carry its own
+            ``comment``.
+        comment: Acknowledgement note applied to every event that does not
+            carry its own.
         adom: ADOM name (default: from config DEFAULT_ADOM)
 
     Returns:
@@ -92,27 +142,34 @@ async def acknowledge_ioc_events(
 
     Example:
         >>> result = await acknowledge_ioc_events(
-        ...     ioc_ids=["IOC-001", "IOC-002"],
-        ...     user="analyst1"
+        ...     events=[
+        ...         IocEventRef(
+        ...             endpoint_id="1234",
+        ...             source_ip="10.0.0.5",
+        ...             timestamp="2024-01-15 09:30:00",
+        ...         )
+        ...     ],
+        ...     comment="triaged - false positive",
         ... )
     """
     try:
         adom = validate_adom(adom or get_default_adom())
+        if not events:
+            raise ValueError("events must not be empty")
         client = _get_client()
 
-        logger.info(f"Acknowledging {len(ioc_ids)} IOC events in ADOM {adom}")
+        logger.info(f"Acknowledging {len(events)} IOC events in ADOM {adom}")
 
         result = await client.acknowledge_ioc_events(
             adom=adom,
-            event_ids=ioc_ids,
-            user=user,
+            events=[event.to_payload() for event in events],
+            comment=comment,
         )
 
         return {
             "status": "success",
             "adom": adom,
-            "acknowledged_count": len(ioc_ids),
-            "user": user,
+            "acknowledged_count": len(events),
             "data": result,
         }
     except Exception as e:

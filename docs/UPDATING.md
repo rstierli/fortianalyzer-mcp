@@ -18,23 +18,76 @@ Fortinet releases new FortiAnalyzer versions approximately every 6-8 weeks. Each
    - FNDN Portal: https://fndn.fortinet.net/
    - Or extract from FortiAnalyzer: `System > API > Export`
 
-2. Place the JSON definition files in `docs/fndn/` directory:
-   ```
+2. Place them in `docs/fndn/<version>/`. That directory is **gitignored** — the
+   specs are a local working copy, not part of the repo.
+
+   The portal ships the reference as a set of **HTML** pages, roughly 45 per
+   version — not the per-module JSON this document used to describe.
+   `tools/compare_api_versions.py` still expects JSON and does not read the HTML.
+
+   ```text
    docs/fndn/
-   ├── 7.6.4/
-   │   ├── dvmdb.json
-   │   ├── dvm.json
-   │   ├── logview.json
-   │   ├── fortiview.json
-   │   ├── report.json
-   │   ├── eventmgmt.json
-   │   ├── incidentmgmt.json
-   │   ├── ioc.json
-   │   ├── sys.json
-   │   └── task.json
-   └── 7.6.5/           # New version
+   ├── 7.6.6/
+   │   ├── faz_logview.htm   faz_eventmgmt.htm   faz_incidentmgmt.htm
+   │   ├── faz_fortiview.htm faz_report.htm      faz_reportconfig.htm
+   │   ├── faz_ioc.htm       faz_soar.htm        faz_ueba.htm  faz_fazsys.htm
+   │   ├── dvmdb-*.htm  task-*.htm  sys-*.htm  cli-*.htm  um-*.htm
+   │   └── index.htm    obj-index.htm  objects.htm
+   └── 8.0.0/            # New version
        └── ...
    ```
+
+> **Name the directory after the version in the page titles, not the download.**
+> Every page carries `<title>FortiAnalyzer X.Y.Z (build) JSON API Reference…`.
+> A bundle downloaded as "7.6.7" was found to contain 7.6.6 (build 3654) pages
+> throughout. Check before trusting a directory name:
+>
+> ```bash
+> grep -h -o '<title>[^<]*</title>' docs/fndn/<dir>/*.htm | sed 's/<[^>]*>//g' | sort -u
+> ```
+
+#### The spec under-reports — verify against an appliance
+
+Treat FNDN as the starting point, not the authority. Two confirmed cases:
+
+- **Log types.** The `faz_logview.htm` appendix lists 20 and the `logsearch`
+  `logtype` enum fewer still; live 7.6.6 serves 29. Indices 20–28 (`dns`, `ssh`,
+  `ssl`, `file-filter`, `asset`, `protocol`, `siem`, `ztna`, `security`) appear
+  in neither version of the document. Read the real list by asking for an
+  unrecognised logtype — the appliance answers with its whole catalogue:
+  `get_log_fields(logtype="__enumerate__", name_filter="srcip")`.
+- **Unknown parameters are ignored, not rejected.** A parameter an endpoint does
+  not define yields a normal-looking success response. That is why the
+  spec-conformance defects fixed in `tests/test_fndn_spec_conformance.py` were
+  silent for so long — and why a `filter` field name cannot be validated by
+  probing either.
+
+#### How to test whether a parameter is actually applied
+
+Only one method works, and two obvious ones do not:
+
+- **Malformed values prove nothing.** FortiAnalyzer silently degrades a bad
+  value to the default rather than erroring. Measured on 7.6.6:
+  `/eventmgmt/alerts/count` with `time-range={"start":"not-a-date", ...}` returns
+  the *same* counts as a valid window, on an endpoint that documents the field.
+- **A wrong-shaped value proves nothing either.** `time-range="garbage"` (string
+  where an object belongs) returns HTTP 503 on documented and undocumented
+  endpoints alike — a shared request-parsing layer, not endpoint behaviour.
+- **What works: a well-formed window over an endpoint that has data.** Compare a
+  window covering the data, a window covering nothing, and the parameter
+  omitted. On `/eventmgmt/alerts/count` in root that reads 15341 / 0 / 15341,
+  which proves the field is applied and that omitting it means "all".
+
+The corollary is that **an endpoint with no records cannot be tested at all** —
+every window returns zero. `time-range` on `/incidentmgmt/.../incidents` is
+undocumented and remains unsettled for exactly this reason; see
+`api/client.get_incidents`. Re-run the three-way comparison there once a single
+incident exists.
+
+The pages also contradict themselves in places:
+`/eventmgmt/.../alerts/extra-details` shows `alertid` in its request skeleton and
+`alertids` in its parameter table (the table is right), and the `alerts/comment`
+heading reads "Add Alert Comment" while documenting the `update` method.
 
 ### Step 2: Compare API Definitions
 

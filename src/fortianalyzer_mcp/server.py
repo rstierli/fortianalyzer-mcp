@@ -8,6 +8,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from pydantic import BaseModel
 from pydantic import ValidationError as PydanticValidationError
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
@@ -91,41 +92,63 @@ def health_check() -> str:
     return f"FortiAnalyzer MCP Server is healthy (mode: {mode}, {tool_info})"
 
 
-def _coerce_structured_filters(raw: object) -> list[FilterCondition]:
-    """Validate a caller's ``filters`` into models, as FastMCP would have.
+def _coerce_model_list(
+    raw: object, model: type[BaseModel], param: str, shape: str
+) -> list[BaseModel]:
+    """Validate a caller's list-of-models parameter, as FastMCP would have.
 
     ``execute_advanced_tool`` invokes tool functions directly, so the protocol
-    layer that turns JSON arguments into typed parameters never runs and
-    ``filters`` arrives as raw dicts. The compilers are models-only by contract
-    (attribute access; see ``TestCompilerRequiresModelsNotDicts``), so without
-    this the dicts surfaced as an ``AttributeError`` that the tools' broad
-    handlers buried in a generic ``faz_operation_failed``. This mirrors full
-    mode's boundary: coerce before the tool runs, and reject a malformed
-    condition with a message about the condition.
+    layer that turns JSON arguments into typed parameters never runs and a
+    model-typed parameter arrives as raw dicts. Consumers are models-only by
+    contract (attribute access; see ``TestCompilerRequiresModelsNotDicts``), so
+    without this the dicts surfaced as an ``AttributeError`` that the tools'
+    broad handlers buried in a generic ``faz_operation_failed``. This mirrors
+    full mode's boundary: coerce before the tool runs, and reject a malformed
+    entry with a message about that entry.
+
+    Any tool parameter typed ``list[SomeModel]`` needs an entry in
+    ``_STRUCTURED_PARAMS`` or it breaks in dynamic mode only — full mode keeps
+    working because FastMCP coerces there, which is what made this class of bug
+    easy to ship.
 
     Raises:
         ValidationError: If ``raw`` is not a list, or an entry fails model
-            validation (unknown op, unknown key, non-dict entry).
+            validation (unknown key, wrong type, non-dict entry).
     """
     if not isinstance(raw, list):
         raise ValidationError(
-            "'filters' must be a list of conditions, each {field, op, value} -- got "
-            f"{type(raw).__name__}. Wrap the condition in a list: filters=[{{...}}]."
+            f"'{param}' must be a list of {shape} -- got {type(raw).__name__}. "
+            f"Wrap it in a list: {param}=[{{...}}]."
         )
-    coerced: list[FilterCondition] = []
+    coerced: list[BaseModel] = []
     for index, item in enumerate(raw):
-        if isinstance(item, FilterCondition):
+        if isinstance(item, model):
             coerced.append(item)
             continue
         try:
-            coerced.append(FilterCondition.model_validate(item))
+            coerced.append(model.model_validate(item))
         except PydanticValidationError as exc:
             details = "; ".join(
-                f"{'.'.join(str(loc) for loc in err['loc']) or 'condition'}: {err['msg']}"
+                f"{'.'.join(str(loc) for loc in err['loc']) or 'entry'}: {err['msg']}"
                 for err in exc.errors()
             )
-            raise ValidationError(f"filters[{index}] is invalid: {details}") from exc
+            raise ValidationError(f"{param}[{index}] is invalid: {details}") from exc
     return coerced
+
+
+def _structured_params() -> dict[str, tuple[type[BaseModel], str]]:
+    """Tool parameters typed ``list[SomeModel]``, by parameter name.
+
+    ``IocEventRef`` is imported lazily: it lives in a tool module, and tool
+    modules import this one at registration time, so a module-level import
+    would be circular.
+    """
+    from fortianalyzer_mcp.tools.ioc_tools import IocEventRef
+
+    return {
+        "filters": (FilterCondition, "conditions, each {field, op, value}"),
+        "events": (IocEventRef, "IOC events, each {endpoint_id/source_ip, timestamp}"),
+    }
 
 
 #: Category -> tool names, for dynamic mode's search surface.
@@ -363,9 +386,11 @@ def register_dynamic_tools(mcp_server: FastMCP) -> None:
                 "available_tools": list(tool_map.keys()),
             }
 
-        if params.get("filters") is not None:
+        for param, (model, shape) in _structured_params().items():
+            if params.get(param) is None:
+                continue
             try:
-                params["filters"] = _coerce_structured_filters(params["filters"])
+                params[param] = _coerce_model_list(params[param], model, param, shape)
             except ValidationError as e:
                 return error_response(
                     error="validation_error",

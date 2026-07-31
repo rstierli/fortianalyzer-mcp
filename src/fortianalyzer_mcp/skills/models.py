@@ -51,9 +51,10 @@ class IncidentsParams(BaseModel):
     adom: str | None = None
     time_range: str = Field(
         default="7-day",
-        description='Preset ("1-hour".."90-day") or custom "start|end"',
+        description='Preset ("1-hour".."90-day") or custom "start|end". Certain for '
+        "the correlated alerts; unverified for the incidents themselves",
     )
-    filter: str | None = Field(default=None, description='e.g. "severity==critical"')
+    filter: str | None = Field(default=None, description='e.g. "severity==high"')
     limit: int = Field(default=50, ge=1, le=200, description="Max incidents returned")
     include_alerts: bool = Field(
         default=True, description="Correlate alerts from the same window to each incident"

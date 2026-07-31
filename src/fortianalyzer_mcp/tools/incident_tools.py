@@ -70,13 +70,22 @@ async def get_incidents(
     Retrieves incidents from the incident management module.
     Incidents can be created manually or automatically from alerts.
 
+    The time window is sent but UNVERIFIED — FortiAnalyzer does not document
+    ``time-range`` on this endpoint (it does on ``/incident/stats`` and on
+    the alert endpoints), and it could not be confirmed live because the
+    test appliance holds no incidents. The response carries
+    ``time_range_verified: False`` to say so. Treat the result as
+    "at most this window", and use ``get_incident_stats`` when you need a
+    window you can rely on. Each record also carries ``createtime`` and
+    ``lastupdate`` if you want to narrow by hand.
+
     Args:
         adom: ADOM name (default: from config DEFAULT_ADOM)
         time_range: Time range for incidents. Options:
             - "1-hour", "6-hour", "12-hour", "24-hour"
             - "1-day", "7-day", "30-day", "90-day"
             - Custom: "2024-01-01 00:00:00|2024-01-02 00:00:00"
-        filter: Filter expression (e.g., "severity==critical")
+        filter: Filter expression (e.g., "severity==high")
         limit: Maximum number of incidents to return (1-2000)
         offset: Record offset for pagination
         fields: Which keys each incident carries. Omit for a curated default
@@ -122,6 +131,7 @@ async def get_incidents(
             "status": "success",
             "adom": adom,
             "time_range": tr,
+            "time_range_verified": False,
             "count": len(data),
             "data": data,
             "fields_returned": returned,
@@ -190,6 +200,10 @@ async def get_incident_count(
 ) -> dict[str, Any]:
     """Get count of incidents matching criteria.
 
+    The time window is sent but UNVERIFIED — see ``get_incidents``. The
+    response carries ``time_range_verified: False``; ``get_incident_stats``
+    is the endpoint whose window FortiAnalyzer documents.
+
     Args:
         adom: ADOM name (default: from config DEFAULT_ADOM)
         time_range: Time range for incidents
@@ -219,6 +233,7 @@ async def get_incident_count(
             "status": "success",
             "adom": adom,
             "time_range": tr,
+            "time_range_verified": False,
             "data": result,
         }
     except Exception as e:
@@ -332,11 +347,17 @@ async def update_incident(
     adom: str | None = None,
     status: str | None = None,
     severity: str | None = None,
-    assignee: str | None = None,
+    last_user: str | None = None,
 ) -> dict[str, Any]:
     """Update an existing incident.
 
     Modifies incident properties for SOC workflow management.
+
+    There is no assignment/ownership field on this API. This tool used to
+    take an ``assignee``; no such field exists on 7.6.6 or 8.0.0, so it was
+    dropped by the appliance while the call reported success. ``last_user``
+    records who last touched the record, which is the nearest real field --
+    it is an audit stamp, not an assignment.
 
     Args:
         incident_id: Incident ID to update
@@ -348,7 +369,7 @@ async def update_incident(
             - "closed": Incident closed
             - "cancelled": Incident cancelled
         severity: New severity (optional)
-        assignee: Assign to user (optional)
+        last_user: Username to stamp on the record as last editor (optional)
 
     Returns:
         dict with update result
@@ -357,7 +378,7 @@ async def update_incident(
         >>> result = await update_incident(
         ...     incident_id="INC-001",
         ...     status="analysis",
-        ...     assignee="analyst1"
+        ...     last_user="analyst1"
         ... )
     """
     try:
@@ -380,7 +401,7 @@ async def update_incident(
             incident_id=incident_id,
             status=status,
             severity=severity,
-            assignee=assignee,
+            last_user=last_user,
         )
 
         return {

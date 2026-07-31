@@ -14,6 +14,12 @@ The dispatch path therefore has to perform the validation FastMCP would
 have: dicts become models before the tool runs, and a malformed condition
 is rejected with the standard ``validation_error`` envelope instead of
 reaching a compiler.
+
+This applies to every ``list[SomeModel]`` tool parameter, not just
+``filters`` -- ``acknowledge_ioc_events``'s ``events`` is the second one, and
+is covered at the bottom of this module. Registering a new one means adding
+it to ``server._structured_params``; miss that and it breaks in dynamic mode
+only, which is what makes the failure easy to ship.
 """
 
 from __future__ import annotations
@@ -25,7 +31,7 @@ from mcp.server.fastmcp import FastMCP
 
 from fortianalyzer_mcp.query.filters import FilterCondition
 from fortianalyzer_mcp.server import register_dynamic_tools
-from fortianalyzer_mcp.tools import dvm_tools
+from fortianalyzer_mcp.tools import dvm_tools, ioc_tools
 
 
 @pytest.fixture(scope="module")
@@ -179,3 +185,84 @@ class TestMalformedFiltersAreRejectedAtDispatch:
 
         assert result["operation"] == "execute_advanced_tool"
         assert result["tool_name"] == "search_devices"
+
+
+class FakeIocClient:
+    """Captures the events payload acknowledge_ioc_events hands to the client."""
+
+    def __init__(self) -> None:
+        self.captured: list[dict[str, str]] | None = None
+        self.calls: int = 0
+
+    async def acknowledge_ioc_events(
+        self,
+        adom: str,
+        events: list[dict[str, str]],
+        comment: str | None = None,
+    ) -> dict[str, Any]:
+        self.calls += 1
+        self.captured = events
+        return {"status": "ok"}
+
+
+@pytest.fixture
+def fake_ioc_client(monkeypatch: pytest.MonkeyPatch) -> FakeIocClient:
+    fake = FakeIocClient()
+    monkeypatch.setattr(ioc_tools, "get_faz_client", lambda: fake)
+    return fake
+
+
+class TestIocEventsAreCoerced:
+    """``events`` is the second ``list[SomeModel]`` parameter on this path.
+
+    ``acknowledge_ioc_events`` takes ``list[IocEventRef]`` because an IOC event
+    is addressed by endpoint plus timestamp, not by an id. Dynamic dispatch
+    hands it raw dicts, so it needs the same coercion ``filters`` gets --
+    otherwise ``IocEventRef.to_payload`` is called on a dict and the tool's
+    broad handler buries the ``AttributeError``.
+    """
+
+    async def test_dict_events_reach_the_client_as_wire_payloads(
+        self, execute_advanced_tool: Any, fake_ioc_client: FakeIocClient
+    ) -> None:
+        result = await execute_advanced_tool(
+            tool_name="acknowledge_ioc_events",
+            parameters={
+                "events": [{"endpoint_id": "1234", "timestamp": "2024-01-15 09:30:00"}],
+                "adom": "root",
+            },
+        )
+
+        assert result["status"] == "success"
+        assert fake_ioc_client.captured == [
+            {"endpoint-id": "1234", "timestamp": "2024-01-15 09:30:00"}
+        ]
+
+    async def test_event_without_an_identity_is_rejected_before_dispatch(
+        self, execute_advanced_tool: Any, fake_ioc_client: FakeIocClient
+    ) -> None:
+        """Neither endpoint_id nor source_ip identifies nothing -- catch it here."""
+        result = await execute_advanced_tool(
+            tool_name="acknowledge_ioc_events",
+            parameters={"events": [{"timestamp": "2024-01-15 09:30:00"}], "adom": "root"},
+        )
+
+        assert result["status"] == "error"
+        assert result["error"] == "validation_error"
+        assert fake_ioc_client.calls == 0
+
+    async def test_bare_dict_instead_of_list_is_rejected_with_guidance(
+        self, execute_advanced_tool: Any, fake_ioc_client: FakeIocClient
+    ) -> None:
+        result = await execute_advanced_tool(
+            tool_name="acknowledge_ioc_events",
+            parameters={
+                "events": {"endpoint_id": "1234", "timestamp": "2024-01-15 09:30:00"},
+                "adom": "root",
+            },
+        )
+
+        assert result["status"] == "error"
+        assert result["error"] == "validation_error"
+        assert "list" in result["message"]
+        assert fake_ioc_client.calls == 0

@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 import fortianalyzer_mcp.tools.fortiview_tools as fortiview_tools
 import fortianalyzer_mcp.tools.ioc_tools as ioc_tools
@@ -23,27 +24,60 @@ CUSTOM_RANGE = "2024-01-01 00:00:00|2024-01-02 00:00:00"
 
 
 class TestAcknowledgeIocEventsKwarg:
-    """Regression: tool passed ``ioc_ids=`` but the client expects ``event_ids=``."""
+    """Regression: the tool must call the client with the kwargs it declares.
 
-    async def test_tool_calls_client_with_event_ids(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        calls: list[tuple[str, list[str], str]] = []
+    The IOC ack payload is an ``events`` array of ``{endpoint-id, source-ip,
+    timestamp, comment}`` objects (FNDN 7.6.6 and 8.0.0). It used to be sent
+    a flat ``eventid`` list plus ``update-by``, neither of which exists in
+    the IOC spec, so the acknowledgement could not identify an event.
+    """
+
+    async def test_tool_calls_client_with_events(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[tuple[str, list[dict[str, str]], str | None]] = []
 
         class FakeClient:
             async def acknowledge_ioc_events(
-                self, adom: str, event_ids: list[str], user: str
+                self, adom: str, events: list[dict[str, str]], comment: str | None = None
             ) -> dict[str, Any]:
-                calls.append((adom, event_ids, user))
+                calls.append((adom, events, comment))
                 return {"status": "ok"}
 
         monkeypatch.setattr(ioc_tools, "get_faz_client", lambda: FakeClient())
 
         result = await ioc_tools.acknowledge_ioc_events(
-            ioc_ids=["IOC-001", "IOC-002"], user="analyst1", adom="root"
+            events=[
+                ioc_tools.IocEventRef(
+                    endpoint_id="1234", source_ip="10.0.0.5", timestamp="2024-01-15 09:30:00"
+                ),
+                ioc_tools.IocEventRef(source_ip="10.0.0.6", timestamp="2024-01-15 09:31:00"),
+            ],
+            comment="triaged",
+            adom="root",
         )
 
         assert result["status"] == "success"
         assert result["acknowledged_count"] == 2
-        assert calls == [("root", ["IOC-001", "IOC-002"], "analyst1")]
+        # Hyphenated wire names, and absent identity fields are dropped rather
+        # than sent as null.
+        assert calls == [
+            (
+                "root",
+                [
+                    {
+                        "endpoint-id": "1234",
+                        "source-ip": "10.0.0.5",
+                        "timestamp": "2024-01-15 09:30:00",
+                    },
+                    {"source-ip": "10.0.0.6", "timestamp": "2024-01-15 09:31:00"},
+                ],
+                "triaged",
+            )
+        ]
+
+    async def test_event_without_endpoint_or_source_ip_is_rejected(self) -> None:
+        """An event identified by neither endpoint nor source IP identifies nothing."""
+        with pytest.raises(ValidationError):
+            ioc_tools.IocEventRef(timestamp="2024-01-15 09:30:00")
 
 
 class TestFortiviewPollsToCompletion:

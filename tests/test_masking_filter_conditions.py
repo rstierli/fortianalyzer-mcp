@@ -177,7 +177,7 @@ class TestCompilerRequiresModelsNotDicts:
     access -- so the dict form is supported at one layer and rejected at the
     next. That is harmless in production only because every boundary coerces
     before a tool body runs: FastMCP validates into models in full mode, and
-    ``server._coerce_structured_filters`` does the same for dynamic mode's
+    ``server._coerce_model_list`` does the same for dynamic mode's
     direct dispatch (``tests/test_dynamic_mode_filters.py``). It is worth
     pinning so the two layers are not mistaken for having the same contract.
     """

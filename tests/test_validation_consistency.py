@@ -76,7 +76,8 @@ class TestAdomValidationConsistency:
     ) -> None:
         _patch_client(monkeypatch, ioc_tools, RejectingClient())
         result = await ioc_tools.acknowledge_ioc_events(
-            ioc_ids=["IOC-001"], user="tester", adom=INJECTED_ADOM
+            events=[ioc_tools.IocEventRef(endpoint_id="1234", timestamp="2024-01-15 09:30:00")],
+            adom=INJECTED_ADOM,
         )
         assert result["status"] == "error"
         assert "Invalid ADOM" in result["message"]
@@ -195,7 +196,7 @@ class TestLimitOffsetClamps:
             async def get_incidents(
                 self,
                 adom: str,
-                time_range: dict[str, str],
+                time_range: dict[str, str] | None = None,
                 filter: str | None = None,
                 limit: int = 100,
                 offset: int = 0,

@@ -18,6 +18,10 @@ from fortianalyzer_mcp.utils.validation import get_default_adom, validate_adom
 
 logger = logging.getLogger(__name__)
 
+# Bucket widths for the alert-incident stats endpoint, from its `timescale`
+# enum. Identical on 7.6.6 and 8.0.0.
+_VALID_TIMESCALES = {"month", "hour"}
+
 
 def _get_client() -> FortiAnalyzerClient:
     """Get the FortiAnalyzer client instance."""
@@ -410,40 +414,52 @@ async def add_alert_comment(
 async def get_alert_incident_stats(
     adom: str | None = None,
     time_range: str = "30-day",
-    stat_type: str = "severity",
+    timescale: str = "month",
 ) -> dict[str, Any]:
     """Get alert and incident statistics.
 
     Retrieves aggregated statistics for SOC dashboards.
 
+    The breakdown returned is fixed -- ``timescale`` only chooses the
+    bucket width. This tool used to take a ``stat_type`` ("severity",
+    "severity-timescale", "status"); the endpoint has no such parameter on
+    7.6.6 or 8.0.0, so it never selected anything: live, a nonsense value
+    and "severity" returned byte-identical responses while the tool echoed
+    the requested type back as though it had applied.
+
     Args:
         adom: ADOM name (default: from config DEFAULT_ADOM)
         time_range: Time range for statistics
-        stat_type: Type of statistics:
-            - "severity": Alert counts by severity
-            - "severity-timescale": Severity over time
-            - "status": Alert counts by status
+        timescale: Bucket width, "month" (default) or "hour"
 
     Returns:
         dict with statistics
     """
     try:
         adom = validate_adom(adom or get_default_adom())
+        if timescale not in _VALID_TIMESCALES:
+            valid = ", ".join(sorted(_VALID_TIMESCALES))
+            return {
+                "status": "error",
+                "message": (
+                    f"Validation error: Invalid timescale '{timescale}'. Must be one of: {valid}"
+                ),
+            }
         client = _get_client()
         tr = await _parse_time_range(time_range)
 
-        logger.info(f"Getting {stat_type} stats from ADOM {adom}")
+        logger.info(f"Getting alert-incident stats ({timescale}) from ADOM {adom}")
 
         result = await client.get_alert_incident_stats(
             adom=adom,
             time_range=tr,
-            stat_type=stat_type,
+            timescale=timescale,
         )
 
         return {
             "status": "success",
             "adom": adom,
-            "stat_type": stat_type,
+            "timescale": timescale,
             "time_range": tr,
             "data": result,
         }
