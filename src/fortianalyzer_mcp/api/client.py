@@ -1631,29 +1631,32 @@ class FortiAnalyzerClient:
 
         FNDN: GET /incidentmgmt/adom/{adom}/incidents
 
-        ``time-range`` is UNDOCUMENTED here. The parameter table lists only
-        ``incids``, ``filter``, ``sort-by``, ``limit``, ``offset`` and
-        ``detail-level`` on 7.6.6 and 8.0.0, while ``/incident/stats`` and
-        ``/eventmgmt/alerts`` both list it explicitly. It is still sent, and
-        callers are told the window is unverified, because the two failure
-        modes are not symmetric:
+        ``time-range`` is UNDOCUMENTED here but VERIFIED WORKING. The
+        parameter table lists only ``incids``, ``filter``, ``sort-by``,
+        ``limit``, ``offset`` and ``detail-level`` on 7.6.6 and 8.0.0, while
+        ``/incident/stats`` and ``/eventmgmt/alerts`` list it explicitly —
+        yet the appliance filters on it here exactly as it does there.
 
-        * if the appliance ignores it, sending it costs nothing as long as
-          the response stops claiming the window applied;
-        * if the appliance honours it undocumented, dropping it silently
-          widens every incident query from "last 24h" to ADOM-wide,
-          truncated by ``limit`` — wrong data, quietly.
+        Measured on 7.6.6 build 3654 against a single incident (createtime
+        epoch 1785489898), on ``/incidents`` and ``/incidents/count`` alike:
 
-        And this API demonstrably under-reports itself: logtypes 20-28 are
-        absent from the same document and live on the appliance.
+            window covering createtime -> 1
+            window in year 2000        -> 0
+            window in year 2099        -> 0
+            time-range omitted         -> 1
 
-        NOT SETTLED LIVE: fna-itd-01 holds zero incidents and its read-only
-        API token cannot create one. The experiment that would settle it is
-        proven working on ``/eventmgmt/alerts/count`` — a July-2026 window
-        returns 15341, a year-2000 window returns 0, an omitted one returns
-        15341 — and needs only a single incident record to be re-run here.
-        Malformed-value probing does NOT substitute: FAZ silently degrades
-        bad dates to "all" even on endpoints that do document the field.
+        which is the same pattern the documented ``/incident/stats`` returns
+        for the same four windows. So DO NOT "clean this up" by removing the
+        parameter on the strength of the parameter table: that silently
+        widens every incident query from "last 24h" to ADOM-wide, truncated
+        by ``limit``. This API under-reports itself in more than one place —
+        logtypes 20-28 are absent from the same document and live on the
+        appliance.
+
+        Note for anyone re-testing: malformed-value probing does NOT work
+        here. FAZ silently degrades bad dates to "all" even on endpoints
+        that document the field, so only a well-formed window over an
+        endpoint holding data discriminates.
         """
         params: dict[str, Any] = {
             "apiver": API_VERSION,
@@ -1707,8 +1710,8 @@ class FortiAnalyzerClient:
         FNDN: GET /incidentmgmt/adom/{adom}/incidents/count
 
         Documents ``incids`` and ``filter`` only; ``time-range`` is
-        undocumented and sent anyway. See ``get_incidents`` for the
-        reasoning and for what would settle it.
+        undocumented here but verified to filter — see ``get_incidents``
+        for the measurement.
         """
         params: dict[str, Any] = {"apiver": API_VERSION}
         if time_range:
@@ -1783,8 +1786,16 @@ class FortiAnalyzerClient:
         is no ``assignee`` field on 7.6.6 or 8.0.0 — one used to be sent and
         was silently dropped, so an "assign this incident" call reported
         success while changing nothing. ``lastuser`` (who last touched the
-        record) is the nearest real field and is what the ownership-ish
-        argument now maps to.
+        record) is documented, is a real field, and is what the
+        ownership-ish argument now maps to.
+
+        Open question worth a probe when a write-capable token exists: an
+        incident record carries an ``assigned_to`` field (seen live on 7.6.6),
+        which is semantically what ``assignee`` was reaching for — but it is
+        absent from this endpoint's documented parameter list, so whether it
+        is settable here is unknown. ``lastuser`` is an audit stamp, not an
+        assignment; if ``assigned_to`` turns out to be writable, real
+        assignment support belongs on top of it rather than replacing this.
         """
         params: dict[str, Any] = {"apiver": API_VERSION}
         if status:

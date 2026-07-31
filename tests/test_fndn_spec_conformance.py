@@ -88,21 +88,23 @@ class TestIncidentMgmt:
             ("get_incidents_count", "/incidentmgmt/adom/root/incidents/count"),
         ],
     )
-    async def test_incident_reads_still_send_undocumented_time_range(
+    async def test_incident_reads_send_undocumented_but_working_time_range(
         self, client: FortiAnalyzerClient, call_name: str, url: str
     ) -> None:
-        """time-range is undocumented on these two, and sent deliberately.
+        """time-range is undocumented on these two and MUST still be sent.
 
         The parameter tables list only incids/filter/sort-by/limit/offset/
         detail-level and incids/filter respectively -- `/incident/stats` and
-        `/eventmgmt/alerts` do list it. It could not be settled live (the
-        test appliance holds no incidents and its token cannot create one),
-        and the failure modes are asymmetric: if FAZ ignores it, sending it
-        is harmless once the response stops claiming the window applied; if
-        FAZ honours it undocumented -- as it does for logtypes 20-28, which
-        are absent from the same document -- dropping it would silently
-        widen every incident query. Honesty is carried by
-        `time_range_verified: False` on the tool response instead.
+        `/eventmgmt/alerts` do list it. The appliance filters on it here
+        anyway. Measured on 7.6.6 build 3654 against one incident, on both
+        endpoints: a window covering its createtime returns 1, windows in
+        2000 and 2099 return 0, an omitted window returns 1 -- the same
+        pattern documented `/incident/stats` gives.
+
+        So this is a guard against a plausible "clean up the payload to
+        match the spec" change: dropping the parameter silently widens every
+        incident query from the caller's window to ADOM-wide, truncated by
+        `limit`.
         """
         window = {"start": "2024-01-01 00:00:00", "end": "2024-01-02 00:00:00"}
         method, called_url, params = await _capture(

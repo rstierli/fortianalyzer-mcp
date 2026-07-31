@@ -79,10 +79,17 @@ Only one method works, and two obvious ones do not:
   which proves the field is applied and that omitting it means "all".
 
 The corollary is that **an endpoint with no records cannot be tested at all** —
-every window returns zero. `time-range` on `/incidentmgmt/.../incidents` is
-undocumented and remains unsettled for exactly this reason; see
-`api/client.get_incidents`. Re-run the three-way comparison there once a single
-incident exists.
+every window returns zero, so create one record rather than trusting a null result.
+
+That is how `time-range` on `/incidentmgmt/.../incidents` was settled. It is
+absent from that endpoint's parameter table (and from `/incidents/count`'s) on
+both 7.6.6 and 8.0.0, yet against a single incident it filters exactly as the
+documented `/incident/stats` does — covering window 1, year-2000 0, year-2099 0,
+omitted 1. **It must keep being sent.** See `api/client.get_incidents`.
+
+Which is the general lesson: a parameter missing from an FNDN table is not
+evidence that the appliance ignores it. Two independent cases now say
+otherwise — this one, and logtypes 20-28. Measure before removing.
 
 The pages also contradict themselves in places:
 `/eventmgmt/.../alerts/extra-details` shows `alertid` in its request skeleton and

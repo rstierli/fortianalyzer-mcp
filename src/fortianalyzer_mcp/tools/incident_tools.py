@@ -70,14 +70,12 @@ async def get_incidents(
     Retrieves incidents from the incident management module.
     Incidents can be created manually or automatically from alerts.
 
-    The time window is sent but UNVERIFIED — FortiAnalyzer does not document
-    ``time-range`` on this endpoint (it does on ``/incident/stats`` and on
-    the alert endpoints), and it could not be confirmed live because the
-    test appliance holds no incidents. The response carries
-    ``time_range_verified: False`` to say so. Treat the result as
-    "at most this window", and use ``get_incident_stats`` when you need a
-    window you can rely on. Each record also carries ``createtime`` and
-    ``lastupdate`` if you want to narrow by hand.
+    The time window IS applied, though FortiAnalyzer does not document
+    ``time-range`` on this endpoint. Verified on 7.6.6: a window covering an
+    incident's createtime returns it, windows in 2000 and 2099 return
+    nothing, and omitting the window returns everything — the same pattern
+    the documented ``/incident/stats`` gives. Each record also carries
+    ``createtime`` and ``lastupdate``.
 
     Args:
         adom: ADOM name (default: from config DEFAULT_ADOM)
@@ -131,7 +129,6 @@ async def get_incidents(
             "status": "success",
             "adom": adom,
             "time_range": tr,
-            "time_range_verified": False,
             "count": len(data),
             "data": data,
             "fields_returned": returned,
@@ -200,9 +197,8 @@ async def get_incident_count(
 ) -> dict[str, Any]:
     """Get count of incidents matching criteria.
 
-    The time window is sent but UNVERIFIED — see ``get_incidents``. The
-    response carries ``time_range_verified: False``; ``get_incident_stats``
-    is the endpoint whose window FortiAnalyzer documents.
+    The time window is applied even though FortiAnalyzer does not document
+    it on this endpoint — see ``get_incidents`` for the measurement.
 
     Args:
         adom: ADOM name (default: from config DEFAULT_ADOM)
@@ -233,7 +229,6 @@ async def get_incident_count(
             "status": "success",
             "adom": adom,
             "time_range": tr,
-            "time_range_verified": False,
             "data": result,
         }
     except Exception as e:

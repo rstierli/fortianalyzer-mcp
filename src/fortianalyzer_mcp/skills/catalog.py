@@ -67,9 +67,7 @@ SKILLS: dict[str, SkillSpec] = {
             id="incidents",
             tier="data_access",
             description="Security incidents in a time window, each with "
-            "best-effort correlated alerts. The window is certain for the "
-            "alerts; FortiAnalyzer does not document one on the incidents "
-            "endpoint, so incident scoping is unverified.",
+            "best-effort correlated alerts.",
             params_model=IncidentsParams,
             output_model=IncidentsResult,
             handler=handlers.run_incidents,

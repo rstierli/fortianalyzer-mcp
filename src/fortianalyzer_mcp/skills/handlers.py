@@ -268,22 +268,11 @@ async def _fetch_attached_alerts(
 
 
 async def run_incidents(params: IncidentsParams) -> IncidentsResult:
-    """Incidents in the window, each with best-effort correlated alerts.
-
-    The window is applied to the correlated alerts for certain, and to the
-    incident subject only if the appliance honours an undocumented
-    ``time-range`` there — see ``tools.incident_tools.get_incidents``. The
-    uncertainty is surfaced in ``warnings`` rather than left implied by the
-    ``time_range`` the result carries.
-    """
+    """Incidents in the window, each with best-effort correlated alerts."""
     from fortianalyzer_mcp.tools.event_tools import get_alerts
     from fortianalyzer_mcp.tools.incident_tools import get_incidents
 
-    warnings: list[str] = [
-        "incident time filtering is unverified: FortiAnalyzer does not document "
-        f"a time range on the incidents endpoint, so '{params.time_range}' is "
-        "applied for certain only to the correlated alerts"
-    ]
+    warnings: list[str] = []
 
     # fields=["*"]: these readers curate by default, and the skills below read
     # keys outside that set (risk_score, importance, vuln-stats, and — here —
@@ -622,10 +611,9 @@ async def run_triage(params: TriageParams) -> TriageResult:
             # (attachsrcid without incid) is rejected by FAZ, and with incid
             # present the attachsrcid param is ignored (both live-verified
             # on 7.6.7), so membership is checked per candidate incident.
-            # context_time_range may not narrow this the way it narrows the
-            # alert reads above: time-range is undocumented on the incidents
-            # endpoint (see tools.incident_tools.get_incidents). Sent anyway,
-            # so candidates are at most the window rather than possibly more.
+            # time-range is undocumented on the incidents endpoint but does
+            # filter (verified 7.6.6 — see tools.incident_tools.get_incidents),
+            # so context_time_range narrows this like the alert reads above.
             inc_res, err = await _call(
                 get_incidents,
                 adom=params.adom,

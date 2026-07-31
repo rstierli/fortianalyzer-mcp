@@ -303,9 +303,7 @@ class TestAttachmentCorrelation:
         rec = result.incidents[0]
         assert rec.correlation_basis == "incident.attachments.alertevent"
         assert rec.correlated_alerts == [{**self.SNAPSHOT, "alertid": "alert-001"}]
-        # The unverified-window notice is always present (time-range is
-        # undocumented on the incidents endpoint); nothing else went wrong.
-        assert [w for w in result.warnings if "unverified" not in w] == []
+        assert result.warnings == []
 
     async def test_full_attachment_page_warns_about_truncation(self):
         page = [alertevent_attachment(f"alert-{i}", self.SNAPSHOT) for i in range(200)]
