@@ -480,7 +480,7 @@ async def query_logs(
 
     Args:
         adom: ADOM name (default: from config DEFAULT_ADOM)
-        logtype: Log type to query. Options:
+        logtype: Log type to query. The common ones:
             - "traffic": Firewall traffic logs
             - "event": System event logs
             - "attack": IPS/IDS attack logs
@@ -489,6 +489,14 @@ async def query_logs(
             - "app-ctrl": Application control logs
             - "dlp": DLP logs
             - "emailfilter": Email filter logs
+            - "dns", "ssl", "ssh", "file-filter", "waf", "netscan",
+              "security", "ztna", "gtp", "content", "voip", "sniffer",
+              "protocol", "asset", "siem", "im", "generic", "history",
+              "fct-event", "fct-traffic", "fct-netscan" are also served.
+            "anomaly", "icap" and "virtual-patch" are accepted and resolve
+            to "attack", "protocol" and "security". There is no "utm"
+            logtype -- the appliance reads it as "no logtype filter", so it
+            is rejected rather than silently widening the search.
         device: Device filter (optional). Options:
             - Serial number (recommended): "FG100FTK19001333"
             - Device name: "myfw01" or "myfw01[root]" (with VDOM)

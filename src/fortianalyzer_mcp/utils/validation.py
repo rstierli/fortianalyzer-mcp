@@ -135,25 +135,62 @@ DEVICE_VM_SERIAL_PATTERN = re.compile(
     r"^(FG|FM|FW|FA|FS|FD|FP|FC|FV)[A-Z0-9]{0,2}-VM[A-Z0-9]{4,18}$"
 )
 
-# Log type validation
+# Log type validation.
+#
+# This is the appliance's own catalogue, read off live 7.6.6 via
+# `get /logview/adom/{adom}/logfields` with an unrecognised logtype: FAZ answers
+# that by returning every logtype it knows, each with its index. The 29 names
+# below are that answer, in index order.
+#
+# The FNDN appendix ("List of Available Log Types", docs/fndn/*/faz_logview.htm)
+# stops at index 19 and the logsearch `logtype` enum is narrower still. Both
+# under-report — indices 20-28 (`dns` .. `security`) are absent from the docs and
+# present on the appliance — so the live catalogue wins over the spec here.
 VALID_LOG_TYPES = {
-    "traffic",
-    "event",
-    "attack",
-    "virus",
-    "webfilter",
-    "app-ctrl",
-    "dlp",
-    "emailfilter",
-    "utm",
-    "anomaly",
-    "voip",
-    "dns",
-    "ssh",
-    "ssl",
-    "file-filter",
-    "icap",
-    "virtual-patch",
+    "app-ctrl",  # 0
+    "attack",  # 1
+    "content",  # 2
+    "dlp",  # 3
+    "emailfilter",  # 4
+    "event",  # 5
+    "generic",  # 6
+    "history",  # 7
+    "im",  # 8
+    "sniffer",  # 9
+    "traffic",  # 10
+    "virus",  # 11
+    "voip",  # 12
+    "webfilter",  # 13
+    "netscan",  # 14
+    "fct-event",  # 15
+    "fct-traffic",  # 16
+    "fct-netscan",  # 17
+    "waf",  # 18
+    "gtp",  # 19
+    "dns",  # 20
+    "ssh",  # 21
+    "ssl",  # 22
+    "file-filter",  # 23
+    "asset",  # 24
+    "protocol",  # 25
+    "siem",  # 26
+    "ztna",  # 27
+    "security",  # 28
+}
+
+# Names the appliance resolves onto a catalogue entry rather than serving in its
+# own right. Accepted so a caller reaching for FortiGate's UTM-subtype spelling
+# is not rejected, and recorded here so the mapping is visible rather than folded
+# into VALID_LOG_TYPES where it would look like a 30th logtype.
+#
+# `utm` is deliberately NOT among these: live 7.6.6 answers a `utm` logfields
+# request with the entire 29-logtype catalogue, i.e. it is not a logtype and not
+# an alias — it silently means "no logtype filter". Accepting it turned an
+# unscoped search into one wearing a scoped label, so it is now rejected.
+LOG_TYPE_ALIASES = {
+    "anomaly": "attack",  # -> index 1
+    "icap": "protocol",  # -> index 25
+    "virtual-patch": "security",  # -> index 28
 }
 
 # FortiView view names. Every name here is one FortiAnalyzer actually serves:
@@ -354,13 +391,15 @@ def build_device_filter(device: str | None) -> list[dict[str, str]]:
 
 
 def validate_log_type(logtype: str) -> str:
-    """Validate log type.
+    """Validate log type, resolving appliance-side aliases to their catalogue name.
 
     Args:
         logtype: Log type to validate
 
     Returns:
-        Validated log type (lowercase)
+        Validated log type (lowercase). An alias from ``LOG_TYPE_ALIASES``
+        resolves to the catalogue name it stands for, so callers downstream
+        only ever see one spelling of a given logtype.
 
     Raises:
         ValidationError: If log type is invalid
@@ -369,6 +408,7 @@ def validate_log_type(logtype: str) -> str:
         raise ValidationError("Log type cannot be empty")
 
     logtype = logtype.strip().lower()
+    logtype = LOG_TYPE_ALIASES.get(logtype, logtype)
 
     if logtype not in VALID_LOG_TYPES:
         raise ValidationError(
