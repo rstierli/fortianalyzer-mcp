@@ -150,13 +150,40 @@ class TestFilterExpressions:
             unmasker.unmask_filter(f'!(srcip like "%{token}%")') == '!(srcip like "%192.0.2.102%")'
         )
 
-    def test_field_must_start_at_a_word_boundary(self, unmasker: ArgUnmasker):
-        # #73 item 7a: the field group could start mid-word, so a non-clause
-        # fragment like "a-srcip=<ip>" was read as a srcip clause and the
-        # address silently transformed to a different one.
-        fragment = "note a-srcip=192.0.2.7 tail"
-
+    @pytest.mark.parametrize(
+        "fragment",
+        [
+            "note a-srcip=192.0.2.7 tail",
+            "x /srcip==192.0.2.7",
+            "x :srcip==192.0.2.7",
+            "x @srcip==192.0.2.7",
+            "x *srcip==192.0.2.7",
+        ],
+    )
+    def test_field_must_start_where_a_clause_can(self, unmasker: ArgUnmasker, fragment: str):
+        # #73 item 7a: the field group could start mid-string, so a
+        # non-clause fragment was read as a srcip clause and the address
+        # silently transformed to a different one. The lookbehind is an
+        # allowlist, so every separator is closed at once.
         assert unmasker.unmask_filter(fragment) == fragment
+
+    def test_ampersand_join_resolves_both_clauses(self, unmasker: ArgUnmasker, engine: FPEEngine):
+        # "a&&b" is a working join on live 7.6.7 and 8.0.0 (identical row
+        # counts to "a and b"), so a clause legitimately begins after "&"
+        # and the second token must still resolve.
+        t1 = engine.mask_ip("192.0.2.102")
+        t2 = engine.mask_ip("198.51.100.7")
+
+        out = unmasker.unmask_filter(f'srcip=="{t1}"&&dstip=="{t2}"')
+
+        assert out == 'srcip=="192.0.2.102"&&dstip=="198.51.100.7"'
+
+    def test_bare_negation_resolves(self, unmasker: ArgUnmasker, engine: FPEEngine):
+        # "!f==v" (no parens) is served by the appliance, so a clause
+        # legitimately begins after "!".
+        token = engine.mask_ip("192.0.2.102")
+
+        assert unmasker.unmask_filter(f'!srcip=="{token}"') == '!srcip=="192.0.2.102"'
 
     def test_dotted_field_is_left_untouched(self, unmasker: ArgUnmasker, engine: FPEEngine):
         # The documented cost of the anchor: "foo.srcip" no longer resolves

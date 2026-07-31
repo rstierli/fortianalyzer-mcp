@@ -68,14 +68,19 @@ from fortianalyzer_mcp.utils.validation import sanitize_filter_value
 logger = logging.getLogger(__name__)
 
 # field==value / field=value / field contain value, single or double quoted.
-# The lookbehind keeps the field group from starting mid-word: without it a
-# non-clause fragment like "a-srcip=<ip>" reads as a srcip clause and the
-# address is silently transformed (#73 7a). The cost is that a dotted
-# spelling ("foo.srcip") no longer resolves as srcip, which prices at zero:
-# on live 7.6.7 and 8.0.0 a dotted field matches nothing at the appliance,
-# so such a clause only ever produced zero rows.
+# The lookbehind keeps the field group from starting mid-string: without it
+# a non-clause fragment like "a-srcip=<ip>" (or "x /srcip==<ip>", any
+# separator) reads as a srcip clause and the address is silently
+# transformed (#73 7a). It is an allowlist of the places a clause can
+# legitimately begin, measured against live 7.6.7 and 8.0.0: start of
+# string, after whitespace, after "(" (grouping and the !(...) complement),
+# after "&" ("a&&b" parses identically to "a and b"; single "&", "|", "||"
+# and "," are all rejected by the appliance), and after "!" (bare "!f==v"
+# negation is served). The cost is that a dotted spelling ("foo.srcip") no
+# longer resolves as srcip, which prices at zero: a dotted field matches
+# nothing at the appliance, so such a clause only ever produced zero rows.
 _FILTER_CLAUSE_RE = re.compile(
-    r"(?<![A-Za-z0-9_.-])"
+    r"(?<![^\s(!&])"
     r"(?P<field>[A-Za-z_][A-Za-z0-9_]*)"
     r"\s*(?P<op>==|!=|<=|>=|=~|!~|<|>|=(?![=~])|~|!contain\b|\bcontain\b|\b(?ai:like)\b)\s*"
     r"(?P<quote>[\"']?)(?P<value>[^\"'\s()]+)(?P=quote)"
