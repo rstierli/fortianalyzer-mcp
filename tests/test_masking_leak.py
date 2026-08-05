@@ -1782,6 +1782,112 @@ class TestBreakdownsComposite:
         assert masked[0]["value"] != masked[1]["value"]
 
 
+BREAKDOWN_URL = "https://intranet.example.org/hr/salary?user=jdoe"
+
+
+class TestBreakdownsCompositeDimensions:
+    """A dimension whose flat key is handled by a COMPOSITE table, not by
+    ``FIELD_TYPES`` (#109 review).
+
+    The first cut of ``_mask_breakdowns`` typed a bucket from
+    ``FIELD_TYPES`` alone, but ``url``/``referralurl``/``http_url``/``link``
+    and ``devvds`` carry no entry there -- their flat keys are served by
+    ``COMPOSITE_URL_FULL``/``COMPOSITE_URL_HOST``/``COMPOSITE_DEVICE_VDOM``.
+    An untyped dimension passes through by design, so those rode out whole,
+    beside the token the same host carried under a flat key in the same
+    response: ``hits`` is the join key that pairs them.
+
+    The fix is the rule the handler's docstring already stated -- a bucket
+    value gets exactly what the same value gets under a flat key of the
+    dimension's name -- so the walk now goes through :meth:`_mask_entry`
+    rather than a ``FIELD_TYPES`` lookup.
+    """
+
+    @pytest.mark.parametrize("dimension", ["url", "referralurl", "http_url", "link"])
+    def test_a_url_dimension_masks_like_its_flat_key(
+        self, masker: OutputMasker, dimension: str
+    ) -> None:
+        payload = {"breakdowns": {dimension: [{"value": BREAKDOWN_URL, "hits": 2}]}}
+
+        masked = masker.mask_result(payload)
+        bucket = masked["breakdowns"][dimension][0]
+
+        assert BREAKDOWN_URL not in str(masked)
+        assert "intranet.example.org" not in str(masked)
+        assert bucket["hits"] == 2
+
+    def test_a_url_bucket_gets_the_same_token_as_the_flat_key(self, masker: OutputMasker) -> None:
+        """The pairing that made this a correlation gift, pinned both ways:
+        the bucket and the flat key must agree, not merely both be masked."""
+        payload = {
+            "url": BREAKDOWN_URL,
+            "breakdowns": {"url": [{"value": BREAKDOWN_URL, "hits": 1}]},
+        }
+
+        masked = masker.mask_result(payload)
+
+        assert masked["breakdowns"]["url"][0]["value"] == masked["url"]
+
+    def test_a_devvds_dimension_follows_the_device_flag(
+        self, masker: OutputMasker, full_masker: OutputMasker
+    ) -> None:
+        """``devvds`` is ``"<devname>[<vdom>]"`` -- composite, and device
+        identity, so it must follow the flag exactly as the flat key does."""
+        payload = {"breakdowns": {"devvds": [{"value": f"{DEV_NAME}[{VDOM}]", "hits": 3}]}}
+
+        assert masker.mask_result(payload)["breakdowns"]["devvds"][0]["value"] == (
+            f"{DEV_NAME}[{VDOM}]"
+        )
+        assert DEV_NAME not in str(full_masker.mask_result(payload))
+
+    def test_an_untyped_dimension_still_passes_through(self, masker: OutputMasker) -> None:
+        """The deliberate passthrough the handler's docstring argues for must
+        survive the switch to _mask_entry: sample_by accepts almost any field
+        and most of them (port, service, app, proto) are not identifiers."""
+        payload = {"breakdowns": {"service": [{"value": "HTTPS", "hits": 9}]}}
+
+        assert masker.mask_result(payload) == payload
+
+
+class TestBreakdownsMalformedShapes:
+    """An unrecognised bucket shape under a dimension we know is an
+    identifier field (#109 review).
+
+    ``_mask_target`` and the URL-dict branch both burn a shape they cannot
+    type rather than trust the allowlist walk to cover it (#104). The
+    breakdown handler failed open instead, so a bucket list holding bare
+    strings rode out in clear under a dimension positively typed as an IP.
+    No shipped producer emits either shape -- ``aggregate_breakdowns`` always
+    emits ``[{"value", "hits"}]`` -- so this pins the policy, not a live bug.
+
+    An *untyped* dimension keeps its passthrough: burning there would
+    placeholder every legitimate non-identifier breakdown.
+    """
+
+    def test_a_bare_string_bucket_under_a_typed_dimension_burns(self, masker: OutputMasker) -> None:
+        payload = {"breakdowns": {"srcip": [ENDPOINT_IP, 42, None]}}
+
+        masked = masker.mask_result(payload)
+
+        assert ENDPOINT_IP not in str(masked)
+        assert masked["breakdowns"]["srcip"][1] == 42
+        assert masked["breakdowns"]["srcip"][2] is None
+
+    def test_a_non_list_bucket_container_under_a_typed_dimension_burns(
+        self, masker: OutputMasker
+    ) -> None:
+        payload = {"breakdowns": {"srcip": {"value": ENDPOINT_IP}}}
+
+        assert ENDPOINT_IP not in str(masker.mask_result(payload))
+
+    def test_a_malformed_shape_under_an_untyped_dimension_passes_through(
+        self, masker: OutputMasker
+    ) -> None:
+        payload = {"breakdowns": {"service": ["HTTPS", "DNS"]}}
+
+        assert masker.mask_result(payload) == payload
+
+
 class TestBreakdownsTextDimensions:
     """A TEXT dimension's bucket values, raised on review of #109.
 

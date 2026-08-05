@@ -110,6 +110,23 @@ _MIN_SUBSTITUTION_LEN = 4
 
 _PLACEHOLDER_MARK = "masked-unrepresentable-"
 
+#: Dimension names whose flat key is served by a composite handler rather
+#: than by a ``FIELD_TYPES`` entry. ``_mask_breakdowns`` has to consult this
+#: as well as the type table: a bucket under ``url`` carries exactly what a
+#: flat ``url`` carries, and typing it from ``FIELD_TYPES`` alone found
+#: nothing and passed it through in clear (#109 review). ``COMPOSITE_TARGET``
+#: and ``COMPOSITE_BREAKDOWNS`` are deliberately absent -- neither names a
+#: log field, so neither can be a breakdown dimension.
+_COMPOSITE_DIMENSIONS: frozenset[str] = frozenset(
+    (
+        *COMPOSITE_URL_HOST,
+        *COMPOSITE_URL_FULL,
+        *COMPOSITE_DEVICE_VDOM,
+        *COMPOSITE_PREFIXED,
+        *COMPOSITE_JSON,
+    )
+)
+
 #: Structural shape of a prefix-marked token: ``<marker>-<4-hex-kid>-``.
 #: "host-fw01" has no kid group and is a legitimate name, not a token.
 _TOKEN_PREFIX_SHAPE_RE = re.compile(r"^(?:host|user|url)-[0-9a-f]{4}-")
@@ -285,29 +302,51 @@ class OutputMasker:
         2 by :meth:`_mask_breakdown_text`, exactly as the same string would be
         under a flat ``msg``/``ui``/``subject`` key. Leaving them to this pass
         was the gap the #109 review found.
+
+        The bucket ``"value"`` goes through :meth:`_mask_entry` under the
+        dimension's own name rather than through a ``FIELD_TYPES`` lookup, so
+        the rule above holds literally: a bucket value gets exactly what the
+        same value gets under a flat key of that name. Typing it from
+        ``FIELD_TYPES`` alone missed every composite-served key -- ``url``,
+        ``referralurl``, ``http_url``, ``link``, ``devvds`` have no entry
+        there -- and passed them through in clear beside the token the same
+        host carried elsewhere in the response, with ``hits`` as the join key.
+        The ``keep`` check stays wrapped around the call: ``_mask_entry`` does
+        not consult the keep set on its typed-scalar path, and a value left
+        clear under one key must never be masked under another.
+
+        A shape this handler cannot type -- a non-dict bucket, or a
+        ``buckets`` that is not a list -- burns when the dimension IS typed or
+        composite, the same fail-closed policy ``_mask_target`` and the URL
+        dict branch follow (#104). Under an untyped dimension it still passes
+        through: burning there would placeholder every legitimate
+        non-identifier breakdown.
         """
         if not isinstance(value, dict):
             return self._mask_structured(value, mapping, keep)
         out: dict[str, Any] = {}
         for dimension, buckets in value.items():
-            vtype = (
-                self._field_types.get(dimension.strip().lower())
-                if isinstance(dimension, str)
-                else None
-            )
-            if vtype is None or vtype == TEXT or not isinstance(buckets, list):
+            lowered = dimension.strip().lower() if isinstance(dimension, str) else ""
+            vtype = self._field_types.get(lowered)
+            handled = (vtype is not None and vtype != TEXT) or lowered in _COMPOSITE_DIMENSIONS
+            if not handled:
                 out[dimension] = self._mask_structured(buckets, mapping, keep)
+                continue
+            if not isinstance(buckets, list):
+                out[dimension] = self._burn_strings(buckets, keep)
                 continue
             masked_buckets: list[Any] = []
             for bucket in buckets:
                 if not isinstance(bucket, dict):
-                    masked_buckets.append(self._mask_structured(bucket, mapping, keep))
+                    masked_buckets.append(self._burn_strings(bucket, keep))
                     continue
                 entry: dict[str, Any] = {}
                 for bkey, bvalue in bucket.items():
                     if bkey.lower() == "value" and isinstance(bvalue, str):
                         entry[bkey] = (
-                            bvalue if bvalue in keep else self._mask_scalar(vtype, bvalue, mapping)
+                            bvalue
+                            if bvalue in keep
+                            else self._mask_entry(lowered, bvalue, mapping, keep)
                         )
                     else:
                         # Today's producers emit only {value, hits}, but a
