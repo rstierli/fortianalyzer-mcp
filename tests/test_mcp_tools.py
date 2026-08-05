@@ -222,7 +222,7 @@ class MCPToolsTestRunner:
             "event_tools.get_alert_incident_stats",
             "event",
             self.event_tools.get_alert_incident_stats(
-                adom="root", time_range="7-day", stat_type="severity"
+                adom="root", time_range="7-day", timescale="month"
             ),
         )
 

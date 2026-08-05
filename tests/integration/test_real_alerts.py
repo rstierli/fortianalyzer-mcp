@@ -89,23 +89,23 @@ async def test_get_alert_incident_stats(
     test_adom: str,
     time_range_last_week: dict[str, str],
 ):
-    """Test getting alert-incident statistics by severity."""
+    """Test getting alert-incident statistics in monthly buckets."""
     result = await faz_client.get_alert_incident_stats(
-        test_adom, time_range=time_range_last_week, stat_type="severity"
+        test_adom, time_range=time_range_last_week, timescale="month"
     )
     assert result is not None
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_get_alert_incident_stats_status(
+async def test_get_alert_incident_stats_hourly(
     faz_client: FortiAnalyzerClient,
     test_adom: str,
     time_range_last_week: dict[str, str],
 ):
-    """Test getting alert-incident statistics by status."""
+    """Test getting alert-incident statistics in hourly buckets."""
     result = await faz_client.get_alert_incident_stats(
-        test_adom, time_range=time_range_last_week, stat_type="status"
+        test_adom, time_range=time_range_last_week, timescale="hour"
     )
     assert result is not None
 

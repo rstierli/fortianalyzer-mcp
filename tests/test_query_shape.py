@@ -9,6 +9,7 @@ import pytest
 from fortianalyzer_mcp.query.fields import resolve_field
 from fortianalyzer_mcp.query.shape import (
     fields_returned,
+    project_payload,
     project_rows,
     resolve_projection,
 )
@@ -158,3 +159,49 @@ class TestFieldsReturned:
 
     def test_no_projection_and_no_rows_is_empty(self) -> None:
         assert fields_returned([], None) == []
+
+
+class TestProjectPayload:
+    """The tool-facing entry: only a row list is projected, everything else
+    passes through and reports no fields_returned -- claiming a projection
+    that did not happen is worse than reporting none."""
+
+    def test_a_row_list_is_projected_and_echoed(self) -> None:
+        payload = [_row(), _row(srcip="10.0.0.3")]
+
+        rows, echoed, warnings = project_payload("traffic", payload, ["srcip", "dstport"])
+
+        assert rows == [
+            {"srcip": "10.0.0.1", "dstport": 443},
+            {"srcip": "10.0.0.3", "dstport": 443},
+        ]
+        assert echoed == ["dstport", "srcip"]
+        assert warnings == []
+
+    def test_a_dict_payload_passes_through_with_no_echo(self) -> None:
+        payload = {"count": 3, "status": {"code": 0}}
+
+        result, echoed, _ = project_payload("traffic", payload, ["srcip"])
+
+        assert result is payload
+        assert echoed == []
+
+    def test_a_scalar_payload_passes_through_with_no_echo(self) -> None:
+        for payload in (7, "three rows", None):
+            result, echoed, _ = project_payload("traffic", payload, ["srcip"])
+            assert result == payload
+            assert echoed == []
+
+    def test_non_dict_rows_inside_the_list_survive(self) -> None:
+        """project_rows leaves a non-dict element alone rather than dropping
+        it; the payload stays list-shaped either way."""
+        payload = [_row(), "not-a-row"]
+
+        rows, _, _ = project_payload("traffic", payload, ["srcip"])
+
+        assert rows[0] == {"srcip": "10.0.0.1"}
+        assert rows[1] == "not-a-row"
+
+    def test_an_invalid_field_name_raises_for_the_tool_envelope(self) -> None:
+        with pytest.raises(ValidationError):
+            project_payload("traffic", [_row()], ['srcip=="x"'])
