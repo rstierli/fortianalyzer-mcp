@@ -1175,6 +1175,73 @@ class TestDeviceListAndSourceLink:
         assert BAD_DOMAIN not in str(masked)
         assert "url-" in out  # sealed, not burned: it resolves back
 
+    def test_dvmdb_device_name_masks_under_the_flag(self, full_masker: OutputMasker):
+        """``name`` is dvmdb's device-name key, and it is in neither
+        FIELD_TYPES nor DEVICE_IDENTITY_TYPES, so with the flag on a clear
+        ``name`` sat beside its own ``devname`` token -- the flag defeated
+        rather than followed, the same shape as ``devs`` (#79) and
+        ``dev_name`` (#83), and made routine by this branch's curated
+        ``_DEVICE_PROJECTION`` putting ``name`` in every default
+        ``search_devices`` row (#109 review).
+
+        It cannot be typed key-name-globally: ``name`` is also the ADOM key,
+        the report-layout key and the device-group key, and a blanket entry
+        burns "Monthly Security Report" to an irreversible placeholder.
+        The record decides, exactly as ``incident_reporter`` does.
+        """
+        device = {"name": DEV_NAME, "devname": DEV_NAME, "sn": DEV_SERIAL, "os_ver": "7.4"}
+
+        masked = full_masker.mask_result(device)
+
+        assert DEV_NAME not in str(masked)
+        assert masked["name"] == masked["devname"]
+
+    def test_dvmdb_device_name_stays_clear_by_default(self, masker: OutputMasker):
+        device = {"name": DEV_NAME, "sn": DEV_SERIAL, "os_ver": "7.4"}
+
+        assert masker.mask_result(device)["name"] == DEV_NAME
+
+    @pytest.mark.parametrize(
+        "record",
+        [
+            {"name": "root", "desc": "default adom"},
+            {"name": "Monthly Security Report", "layout-id": 7},
+            {"name": "Branch-Group", "member": ["fgt-a"]},
+        ],
+        ids=["adom", "report-layout", "device-group"],
+    )
+    def test_a_name_with_no_device_siblings_is_untouched(
+        self, full_masker: OutputMasker, record: dict[str, Any]
+    ):
+        """The blast radius the shape check exists to avoid. A report layout
+        name is the sharp case: it is not a valid hostname, so a blanket
+        entry would not tokenise it but burn it, with no way back."""
+        assert full_masker.mask_result(dict(record)) == record
+
+    def test_a_device_name_joins_the_keep_set_with_the_flag_off(self, masker: OutputMasker):
+        """Flag off, the pairing runs the other way: the name must stay clear
+        everywhere, including where another handler would have masked it."""
+        payload = {
+            "device": {"name": DEV_NAME, "sn": DEV_SERIAL},
+            "target": [{"name": "srcname", "value": DEV_NAME}],
+        }
+
+        masked = masker.mask_result(payload)
+
+        assert masked["target"][0]["value"] == DEV_NAME
+
+    def test_a_non_device_name_does_not_join_the_keep_set(self, masker: OutputMasker):
+        """The other half of the shape check: an ADOM or report name must not
+        exempt an arbitrary string from masking elsewhere in the response."""
+        payload = {
+            "adom": {"name": SRC_NAME, "desc": "an adom that happens to be named this"},
+            "target": [{"name": "srcname", "value": SRC_NAME}],
+        }
+
+        masked = masker.mask_result(payload)
+
+        assert masked["target"][0]["value"] != SRC_NAME
+
     def test_source_link_round_trips(self, masker: OutputMasker):
         from fortianalyzer_mcp.masking.unmask import ArgUnmasker
 

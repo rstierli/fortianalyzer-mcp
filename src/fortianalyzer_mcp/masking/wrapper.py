@@ -132,6 +132,49 @@ _COMPOSITE_DIMENSIONS: frozenset[str] = frozenset(
 _TOKEN_PREFIX_SHAPE_RE = re.compile(r"^(?:host|user|url)-[0-9a-f]{4}-")
 
 
+#: Keys that prove a dict is a dvmdb device object, so its ``name`` is the
+#: device's name rather than an ADOM's, a report layout's or a device
+#: group's. Every one of these is device-only: none appears on an ADOM row
+#: (``name``/``desc``/``oid``), a report layout or a group (``name``/
+#: ``member``). One is enough -- a record carrying ``sn`` or ``platform_str``
+#: is not something else wearing a device's clothes.
+_DEVICE_SHAPE_SIBLINGS: frozenset[str] = frozenset(
+    {
+        "sn",
+        "serialno",
+        "os_ver",
+        "os_type",
+        "platform_str",
+        "conn_status",
+        "dev_status",
+        "ha_mode",
+        "mr",
+        "patch",
+    }
+)
+
+
+def _device_name_in(obj: dict[str, Any]) -> str | None:
+    """Original spelling of a device-proving ``name`` key, or None.
+
+    ``name`` cannot be typed key-name-globally: dvmdb uses it for a device,
+    but it is equally the ADOM key, the report-layout key and the
+    device-group key. Masking it everywhere under
+    ``FAZ_MASK_DEVICE_IDENTITY`` tokenises ADOM names and *burns* a report
+    layout ("Monthly Security Report" is not a valid hostname, so it becomes
+    an irreversible placeholder), and with the flag off it would put every
+    such string into the keep set, exempting arbitrary values from masking
+    elsewhere. The record decides instead, the same way
+    ``incident_reporter`` is decided by its siblings (#109 review).
+    """
+    key = _find_key(obj, "name")
+    if key is None or not isinstance(obj[key], str) or not obj[key].strip():
+        return None
+    if not _DEVICE_SHAPE_SIBLINGS & {k.lower() for k in obj if isinstance(k, str)}:
+        return None
+    return key
+
+
 def _find_key(obj: dict[str, Any], name: str) -> str | None:
     """Original spelling of the lowercase ``name`` in ``obj``, or None.
 
@@ -630,6 +673,9 @@ class OutputMasker:
 
         def walk(node: Any) -> None:
             if isinstance(node, dict):
+                shaped = _device_name_in(node)
+                if shaped is not None:
+                    out.add(node[shaped].strip())
                 for key, value in node.items():
                     if key.lower() in DEVICE_IDENTITY_TYPES:
                         if isinstance(value, str):
@@ -667,6 +713,7 @@ class OutputMasker:
             paired = self._mask_threat_pair(obj, mapping)
             paired.update(self._mask_incident_reporter(obj, mapping))
             paired.update(self._mask_indicator_pair(obj, mapping))
+            paired.update(self._mask_device_name(obj, mapping))
             return {
                 key: paired[key] if key in paired else self._mask_entry(key, value, mapping, keep)
                 for key, value in obj.items()
@@ -674,6 +721,26 @@ class OutputMasker:
         if isinstance(obj, list):
             return [self._mask_structured(item, mapping, keep) for item in obj]
         return obj
+
+    def _mask_device_name(self, obj: dict[str, Any], mapping: dict[str, str]) -> dict[str, str]:
+        """``name``: masked only when the record proves it a device object.
+
+        Device identity follows ``FAZ_MASK_DEVICE_IDENTITY``, so with the
+        flag off this returns nothing and the value additionally joins the
+        keep set (see :meth:`_device_identity_values`), which is what stops
+        the same name masking under ``target[].value`` two keys away. With
+        the flag on it carries the identical token its ``devname`` sibling
+        carries, because both go through ``_mask_scalar(HOSTNAME, ...)``.
+
+        See :func:`_device_name_in` for why the shape, not the key name,
+        decides.
+        """
+        if not self._mask_device_identity:
+            return {}
+        key = _device_name_in(obj)
+        if key is None:
+            return {}
+        return {key: self._mask_scalar(HOSTNAME, obj[key], mapping)}
 
     def _mask_incident_reporter(
         self, obj: dict[str, Any], mapping: dict[str, str]
