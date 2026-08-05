@@ -1663,6 +1663,25 @@ class TestBreakdownsComposite:
 
         assert ENDPOINT_IP not in str(masked)
 
+    def test_a_typed_sibling_key_in_a_bucket_still_masks(self, masker: OutputMasker) -> None:
+        """Before this handler existed, a bucket's sibling keys went through
+        the allowlist walk; the handler must not trade the ``value`` leak it
+        closes for a sibling leak it opens (#83's list-shape lesson). No
+        shipped producer emits a typed sibling today -- this pins the walk
+        so one can appear without re-opening it."""
+        payload = {
+            "breakdowns": {
+                "srcip": [{"value": ENDPOINT_IP, "hits": 5, "hostname": SRC_NAME}],
+            }
+        }
+
+        masked = masker.mask_result(payload)
+        bucket = masked["breakdowns"]["srcip"][0]
+
+        assert ENDPOINT_IP not in str(masked)
+        assert SRC_NAME not in str(masked)
+        assert bucket["hits"] == 5
+
     def test_analyze_policy_traffic_shape_masks_sensitive_dimensions(
         self, masker: OutputMasker
     ) -> None:

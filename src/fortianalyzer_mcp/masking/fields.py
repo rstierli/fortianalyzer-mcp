@@ -365,6 +365,17 @@ FIELD_TYPES: dict[str, str] = {
 #: unmapped dimension is refused, and the refusal quotes the dimension. Resolve
 #: the token first and the refusal hands back the plaintext -- a token ->
 #: plaintext oracle that needs no valid query at all, only a bad one.
+#:
+#: This closes one direction only: token -> plaintext. The opposite,
+#: plaintext -> token, stays open on the same keys, because the now-unresolved
+#: argument reaches the tool body verbatim and its echo is masked on the way
+#: out, so a caller learns ``mask()`` of any value it chooses (guess, mask,
+#: compare -- a chosen-plaintext check against a token it already holds). That
+#: oracle is not new -- an echoed ``filter`` over an untyped field does the
+#: same on every release since masking shipped -- and it is not closable from
+#: here: only a keyed tag on tokens (#40's authenticated envelope) makes a
+#: chosen-plaintext token distinguishable from a real one. Recorded so the
+#: docstring does not overclaim.
 FIELD_NAME_ARGS = ("fields", "group_by", "sample_by", "sort_by", "view_name")
 
 #: Composite keys whose value is a single string holding one or more

@@ -310,7 +310,14 @@ class OutputMasker:
                             bvalue if bvalue in keep else self._mask_scalar(vtype, bvalue, mapping)
                         )
                     else:
-                        entry[bkey] = bvalue
+                        # Today's producers emit only {value, hits}, but a
+                        # type-specific branch must preserve the walk for the
+                        # shapes it does not consume (#83's lesson): before
+                        # this handler existed a typed sibling key masked via
+                        # the allowlist walk, and copying it verbatim here
+                        # would have quietly re-opened it. `hits` is an int
+                        # and passes through _mask_entry untouched.
+                        entry[bkey] = self._mask_entry(bkey, bvalue, mapping, keep)
                 masked_buckets.append(entry)
             out[dimension] = masked_buckets
         return out
