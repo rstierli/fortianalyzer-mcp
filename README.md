@@ -1,5 +1,7 @@
 # FortiAnalyzer MCP Server
 
+[![MCP Toplist](https://mcptoplist.com/badge/glama%2Frstierli%2Ffortianalyzer-mcp.svg)](https://mcptoplist.com/server/glama%2Frstierli%2Ffortianalyzer-mcp)
+
 [![CI](https://github.com/rstierli/fortianalyzer-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/rstierli/fortianalyzer-mcp/actions/workflows/ci.yml)
 [![Python Version](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
