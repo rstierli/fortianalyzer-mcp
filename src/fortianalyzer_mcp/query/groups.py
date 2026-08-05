@@ -150,6 +150,37 @@ VIEW_SORT_DEFAULTS: Mapping[str, str] = {
 }
 
 
+#: Filter fields each FortiView view was *measured* to accept, per view.
+#:
+#: The ``group_by`` path originally refused every filter, on the assumption
+#: recorded in ``docs/probes/2026-07-fortiview-surface.md`` that FortiAnalyzer
+#: silently ignores a filter field it does not know -- which would have
+#: returned an unfiltered top-N under ``is_exact: true``. Live probing on
+#: 7.6.7 and 8.0.0 (#109 review) measured the opposite: an unknown filter
+#: field is rejected loudly (``Invalid params: filter 'x' not supported``),
+#: and each accepted filter demonstrably narrowed the result. The probe doc's
+#: own decision table calls that the "filters rejected loudly" verdict, whose
+#: consequence is to forward the filter.
+#:
+#: Only the measured pairs are here. top-applications rejected ``app``/
+#: ``appid`` and top-websites rejected ``hostname``, so neither has an entry;
+#: ``catdesc`` on top-websites was never probed and so is absent too. A view
+#: or field outside this table still takes the refusal path.
+#:
+#: RESIDUAL: the probes covered 7.6.7 and 8.0.0. 7.6.6 is a supported version
+#: here and its filter acceptance was NOT measured. Both probed versions
+#: agreed exactly, and the failure mode on an unprobed version is bounded by
+#: the same loud rejection, but this is an inference rather than a
+#: measurement -- see the probe doc.
+VIEW_FILTER_FIELDS: Mapping[str, frozenset[str]] = {
+    "top-sources": frozenset({"srcip"}),
+    "top-destinations": frozenset({"dstip"}),
+    "policy-hits": frozenset({"policyid"}),
+    "top-countries": frozenset({"dstcountry"}),
+    "top-threats": frozenset({"threat"}),
+}
+
+
 #: Alert dimensions served by /eventmgmt/adom/{adom}/alert-incident/stats.
 ALERT_GROUP_DIMENSIONS: frozenset[str] = frozenset({"severity", "status"})
 

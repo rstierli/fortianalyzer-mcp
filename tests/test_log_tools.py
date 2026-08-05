@@ -640,13 +640,73 @@ class TestQueryLogsAggregationModes:
             assert result["status"] == "error", dimension
             assert "sample_by" in result["message"], dimension
 
-    # Include this test ONLY if Task 0 put you on the refusal branch -- i.e. the
-    # probe found filters silently ignored for the target view, or you had no
-    # appliance and took the conservative fallback. If Task 0 proved the view
-    # honours filters, delete this test and assert the forwarding instead:
-    # that the fake's fortiview_run received the compiled filter string.
-    async def test_group_by_with_a_filter_is_refused_when_unverified(self) -> None:
-        """An ignored filter would return an unfiltered top-N under is_exact."""
+    async def test_group_by_forwards_a_filter_the_view_was_measured_to_accept(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Live probing on 7.6.7 and 8.0.0 measured top-sources accepting a
+        srcip filter and narrowing the result (#109 review), and measured an
+        unknown filter field being rejected loudly rather than ignored. So the
+        refusal that covered this pair was refusing a question the appliance
+        answers exactly."""
+        self._install(monkeypatch)
+        calls: list[dict[str, object]] = []
+
+        async def fake_impl(**kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return {"status": "success", "data": [{"srcip": "10.0.0.1", "sessions": 4}]}
+
+        monkeypatch.setattr(fortiview_tools, "_get_fortiview_data_impl", fake_impl)
+
+        result = await log_tools.query_logs(
+            logtype="traffic",
+            time_range=self.CUSTOM_RANGE,
+            group_by="srcip",
+            filters=[FilterCondition(field="srcip", op="eq", value="10.0.0.1")],
+        )
+
+        assert result["status"] == "success"
+        assert result["is_exact"] is True
+        assert calls[0]["filter"] == "srcip==10.0.0.1"
+
+    async def test_group_by_refuses_a_field_the_view_rejects(self) -> None:
+        """top-sources accepts srcip; dstport is not in its measured set, and
+        an unmeasured pair must stay on the refusal path."""
+        result = await log_tools.query_logs(
+            logtype="traffic",
+            group_by="srcip",
+            filters=[FilterCondition(field="dstport", op="eq", value="443")],
+        )
+
+        assert result["error"] == "unsupported_view_filter"
+        assert "dstport" in result["message"]
+        assert "srcip" in result["recommendation"]
+
+    async def test_group_by_refuses_a_view_with_no_measured_acceptance(self) -> None:
+        """top-websites rejected hostname when probed, and catdesc was never
+        probed at all, so the whole view stays on the refusal path."""
+        result = await log_tools.query_logs(
+            logtype="webfilter",
+            group_by="catdesc",
+            filters=[FilterCondition(field="hostname", op="eq", value="example.test")],
+        )
+
+        assert result["error"] == "unsupported_view_filter"
+
+    async def test_group_by_refuses_a_raw_filter_string_even_for_an_accepted_field(
+        self,
+    ) -> None:
+        """A raw string's fields would have to be re-parsed out of syntax this
+        server did not build; guessing wrong is the unfiltered-top-N hazard
+        the check exists to prevent. structured `filters` is the way in."""
+        result = await log_tools.query_logs(
+            logtype="traffic", group_by="srcip", filter="srcip==10.0.0.1"
+        )
+
+        assert result["error"] == "unsupported_view_filter"
+        assert "raw 'filter' string" in result["message"]
+
+    async def test_group_by_with_an_unaccepted_raw_filter_is_still_refused(self) -> None:
+        """The original refusal case, unchanged."""
         result = await log_tools.query_logs(
             logtype="traffic", group_by="srcip", filter="dstport==443"
         )

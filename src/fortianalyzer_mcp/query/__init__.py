@@ -28,6 +28,7 @@ from fortianalyzer_mcp.query.filters import (
 )
 from fortianalyzer_mcp.query.groups import (
     LOG_GROUP_SURFACES,
+    VIEW_FILTER_FIELDS,
     VIEW_SORT_DEFAULTS,
     GroupPlan,
     GroupSurfacePopulationMismatch,
@@ -47,6 +48,7 @@ from fortianalyzer_mcp.query.shape import (
 __all__ = [
     "ALL_FIELDS",
     "LOG_GROUP_SURFACES",
+    "VIEW_FILTER_FIELDS",
     "VIEW_SORT_DEFAULTS",
     "TASK_STATE_CODES",
     "FilterCondition",

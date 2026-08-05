@@ -13,6 +13,7 @@ from fortianalyzer_mcp.query.derive import is_derived
 from fortianalyzer_mcp.query.fields import resolve_field
 from fortianalyzer_mcp.query.filters import FilterCondition, compile_to_string
 from fortianalyzer_mcp.query.groups import (
+    VIEW_FILTER_FIELDS,
     VIEW_SORT_DEFAULTS,
     GroupPlan,
     GroupSurfacePopulationMismatch,
@@ -681,8 +682,26 @@ async def query_logs(
                     "Use 'filters' unless you need syntax it cannot express, such as a regex match."
                 ),
             )
+        # Canonical field names behind a structured `filters`, kept so the
+        # group_by path can check them against each view's measured filter
+        # acceptance. A raw `filter` string stays None: its fields would have
+        # to be re-parsed out of syntax this server did not build, and
+        # guessing wrong there is exactly the unfiltered-top-N hazard the
+        # check exists to prevent.
+        filter_fields: frozenset[str] | None = None
         if filters:
             filter, filter_warnings = compile_to_string(filters, logtype)
+            resolved_filter_fields: set[str] = set()
+            for condition in filters:
+                try:
+                    resolved_filter_fields.add(
+                        resolve_field(logtype, condition.field, enforce_complete=False)[0]
+                    )
+                except ValidationError:
+                    resolved_filter_fields.clear()
+                    break
+            else:
+                filter_fields = frozenset(resolved_filter_fields)
 
         # Exactly one aggregation mode, or none. Two would each describe a
         # different response shape and there is no sensible merge.
@@ -753,23 +772,44 @@ async def query_logs(
                     recommendation=f"Use sample_by=['{group_by}'] for a bounded breakdown.",
                 )
 
-            # Task 0 could not prove this view honours a logview filter. Forwarding
-            # it would return an unfiltered top-N under is_exact: true -- a
-            # confident answer about a population nobody asked for.
-            if filter:
+            # A filter is forwarded only for a (view, field) pair measured to
+            # be accepted -- see VIEW_FILTER_FIELDS. Anything else is refused:
+            # an ignored filter would return an unfiltered top-N under
+            # is_exact: true, a confident answer about a population nobody
+            # asked for. A raw `filter` string never qualifies, because its
+            # fields are not known here.
+            accepted = VIEW_FILTER_FIELDS.get(group_plan.target, frozenset())
+            if filter and not (filter_fields and filter_fields <= accepted):
+                unsupported = sorted(filter_fields - accepted) if filter_fields else []
                 return error_response(
                     error="unsupported_view_filter",
                     message=(
                         f"group_by='{group_by}' dispatches to the FortiView view "
-                        f"'{group_plan.target}', and this server has not verified that the "
-                        "view applies a logview filter rather than ignoring it. Refusing "
-                        "rather than returning a top-N that may cover unfiltered traffic."
+                        f"'{group_plan.target}', which "
+                        + (
+                            f"does not accept a filter on {', '.join(unsupported)}"
+                            if unsupported
+                            else "has no measured filter acceptance for the fields given"
+                        )
+                        + ". Refusing rather than returning a top-N that may cover "
+                        "unfiltered traffic."
+                        + (
+                            ""
+                            if filter_fields
+                            else " Pass 'filters' rather than a raw 'filter' string: the "
+                            "fields of a raw string cannot be checked against the view."
+                        )
                     ),
                     operation="query_logs",
                     adom=adom,
                     logtype=logtype,
                     recommendation=(
-                        f"Drop the filter to group the whole window, or use "
+                        (
+                            f"This view accepts a filter on {', '.join(sorted(accepted))}. "
+                            if accepted
+                            else ""
+                        )
+                        + f"Otherwise drop the filter to group the whole window, or use "
                         f"sample_by=['{group_by}'] which applies the filter and labels the "
                         "result as a bounded sample."
                     ),
