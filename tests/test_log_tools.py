@@ -716,20 +716,24 @@ class TestQueryLogsAggregationModes:
 
         async def fake_impl(**kwargs: object) -> dict[str, object]:
             calls.append(kwargs)
-            return {"status": "success", "data": [{"srcip": "10.0.0.1", "sessions": 4}]}
+            return {"status": "success", "data": [{"policyid": 7, "sessions": 4}]}
 
         monkeypatch.setattr(fortiview_tools, "_get_fortiview_data_impl", fake_impl)
 
+        # policyid rather than srcip so the assertion survives masked mode:
+        # an IP in a filter is masked on the way through, which is what the
+        # pre-existing test_query_logs_preset_with_filters baseline failure
+        # is about. The (view, field) pair under test is equally measured.
         result = await log_tools.query_logs(
             logtype="traffic",
             time_range=self.CUSTOM_RANGE,
-            group_by="srcip",
-            filters=[FilterCondition(field="srcip", op="eq", value="10.0.0.1")],
+            group_by="policyid",
+            filters=[FilterCondition(field="policyid", op="eq", value=7)],
         )
 
         assert result["status"] == "success"
         assert result["is_exact"] is True
-        assert calls[0]["filter"] == "srcip==10.0.0.1"
+        assert calls[0]["filter"] == "policyid==7"
 
     async def test_group_by_refuses_a_field_the_view_rejects(self) -> None:
         """top-sources accepts srcip; dstport is not in its measured set, and
@@ -842,31 +846,33 @@ class TestQueryLogsGroupByDispatch:
             return {
                 "status": "success",
                 "data": [
-                    {"srcip": "10.0.0.1", "sessions": 4},
-                    {"srcip": "10.0.0.2", "sessions": 1},
+                    {"policyid": 7, "sessions": 4},
+                    {"policyid": 9, "sessions": 1},
                 ],
             }
 
         monkeypatch.setattr(fortiview_tools, "_get_fortiview_data_impl", fake_impl)
 
+        # policyid buckets carry no identifier, so the group rows assert
+        # identically with masking on and off.
         result = await log_tools.query_logs(
-            logtype="traffic", time_range=self.CUSTOM_RANGE, group_by="srcip"
+            logtype="traffic", time_range=self.CUSTOM_RANGE, group_by="policyid"
         )
 
         assert result["status"] == "success"
-        assert result["group_by"] == "srcip"
+        assert result["group_by"] == "policyid"
         assert result["groups"] == [
-            {"srcip": "10.0.0.1", "sessions": 4},
-            {"srcip": "10.0.0.2", "sessions": 1},
+            {"policyid": 7, "sessions": 4},
+            {"policyid": 9, "sessions": 1},
         ]
-        assert result["group_source"] == "fortiview:top-sources"
+        assert result["group_source"] == "fortiview:policy-hits"
         assert result["is_exact"] is True
         assert result["time_range"] == self.RESOLVED_WINDOW
 
         # Exactly the window the response echoes -- not a second, independently
         # re-resolved one -- reached the FortiView call.
         assert len(calls) == 1
-        assert calls[0]["view_name"] == "top-sources"
+        assert calls[0]["view_name"] == "policy-hits"
         assert calls[0]["tr"] == self.RESOLVED_WINDOW
         assert calls[0]["tr"] == result["time_range"]
         assert calls[0]["field_names"] == ["*"]
