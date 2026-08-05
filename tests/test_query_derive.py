@@ -40,6 +40,11 @@ class TestIcmpTypeCodeDimension:
         row = {"proto": "1", "service": "icmp/3/3"}
         assert derive("icmp_type_code", row) == "type=3/code=3"
 
+    def test_icmp_slash_form_is_matched_case_insensitively(self) -> None:
+        """PING two branches up matches any case; an uppercase ICMP/ spelling
+        would have fallen through to type=unknown, a silent misbucket."""
+        assert derive("icmp_type_code", {"proto": "1", "service": "ICMP/3/3"}) == "type=3/code=3"
+
     def test_malformed_icmp_form_does_not_leak_the_raw_string(self) -> None:
         row = {"proto": "1", "service": "icmp/9"}
         assert derive("icmp_type_code", row) == "type=unknown"

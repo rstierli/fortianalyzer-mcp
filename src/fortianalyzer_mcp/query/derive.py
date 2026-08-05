@@ -56,7 +56,7 @@ def _icmp_type_code(row: Mapping[str, Any]) -> str | None:
     service = str(row.get("service", "")).strip()
     if service.upper() == "PING":
         return "type=8/code=0"
-    if service.startswith("icmp/"):
+    if service.lower().startswith("icmp/"):
         parts = service.split("/")
         if len(parts) == 3:
             return f"type={parts[1]}/code={parts[2]}"
