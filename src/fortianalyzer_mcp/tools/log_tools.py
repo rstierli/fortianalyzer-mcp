@@ -9,6 +9,8 @@ import logging
 from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
+from fortianalyzer_mcp.query.derive import is_derived
+from fortianalyzer_mcp.query.fields import resolve_field
 from fortianalyzer_mcp.query.filters import FilterCondition, compile_to_string
 from fortianalyzer_mcp.query.groups import (
     GroupPlan,
@@ -554,6 +556,11 @@ async def query_logs(
             response says so: check is_exact and analysis_mode before quoting
             any number. Derived dimensions work here: "port" is proto/dstport,
             "icmp_type_code" decodes the ICMP pair FAZ hides in `service`.
+            Dimension names accept the same English aliases as fields/filters
+            and the response echoes the canonical spelling ("source_ip" groups
+            srcip, under the key "srcip"); a name outside the known field set
+            passes through with a warning naming get_log_fields, so an empty
+            bucket for it means "unrecognised", not "no values".
         count_only: Return just the total row count for the query.
         top_n: Buckets per dimension for sample_by (default 10). 0 returns
             every bucket.
@@ -760,6 +767,26 @@ async def query_logs(
                         "result as a bounded sample."
                     ),
                 )
+
+        # sample_by dimensions resolve through the same vocabulary as fields
+        # and filters, so an alias ("source_ip") extracts values and the
+        # breakdown key comes back canonical ("srcip"). Both halves matter:
+        # unresolved, the alias did a raw row.get and answered with an empty
+        # bucket; resolved for extraction but echoed as spelled, the key would
+        # sit outside the masking allowlist and the bucket values would leak.
+        if sample_by:
+            resolved_dimensions: list[str] = []
+            for dimension in sample_by:
+                if is_derived(dimension):
+                    resolved_dimensions.append(dimension.strip().lower())
+                    continue
+                canonical, dimension_warning = resolve_field(
+                    logtype, dimension, enforce_complete=False
+                )
+                if dimension_warning is not None:
+                    filter_warnings.append(dimension_warning)
+                resolved_dimensions.append(canonical)
+            sample_by = resolved_dimensions
 
         client = _get_client()
         await client.ensure_connected()

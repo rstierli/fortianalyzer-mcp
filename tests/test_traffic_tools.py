@@ -1200,6 +1200,33 @@ class TestAnalyzePolicyTraffic:
             {"value": "type=8/code=0", "hits": 1}
         ]
 
+    async def test_sample_by_alias_is_canonicalised_before_extraction(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ "source_ip" resolves with no warning, so it passed validation --
+        and then extracted nothing, because the rows spell it "srcip".
+        Asserted on bucket counts, not values, so the masked suite (which
+        tokenises srcip bucket values) holds the same baseline."""
+        rows = [{"proto": "6", "dstport": "443", "srcip": "10.0.0.9"}]
+
+        async def fake_analysis(**kwargs: Any) -> dict[str, Any]:
+            return {
+                "logs": rows,
+                "total_hits": 1,
+                "total_hits_is_known": True,
+                "all_slices_exact": True,
+                "slices_scanned": 1,
+                "truncated_slices": 0,
+            }
+
+        monkeypatch.setattr(traffic_tools, "_run_bounded_policy_analysis", fake_analysis)
+
+        result = await traffic_tools.analyze_policy_traffic(policy_ids=[7], sample_by=["source_ip"])
+
+        breakdowns = result["results"][0]["breakdowns"]
+        assert "source_ip" not in breakdowns
+        assert [b["hits"] for b in breakdowns["srcip"]] == [1]
+
     async def test_the_bounded_contract_is_reported_per_policy(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

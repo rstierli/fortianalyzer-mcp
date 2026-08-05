@@ -515,15 +515,23 @@ async def analyze_policy_traffic(
         # warning instead. That is the right call for a filter field but the
         # wrong one for a breakdown key that would just always come back
         # empty, so a non-None warning here is treated as a hard rejection.
+        # Accepted names are kept in *canonical* spelling: an alias would
+        # extract nothing from the rows, and as a breakdown key it would sit
+        # outside the masking allowlist, so resolution and emission go
+        # together.
+        resolved_dimensions: list[str] = []
         for dimension in dimensions:
             if is_derived(dimension):
+                resolved_dimensions.append(dimension.strip().lower())
                 continue
-            _, warning = resolve_field("traffic", dimension)
+            canonical, warning = resolve_field("traffic", dimension)
             if warning is not None:
                 raise ValidationError(
                     f"Unknown sample_by dimension '{dimension}': not a known traffic "
                     "field and not a derived dimension (port, icmp_type_code)."
                 )
+            resolved_dimensions.append(canonical)
+        dimensions = resolved_dimensions
     except ValidationError as e:
         return error_response(
             error="unknown_field" if "field" in str(e).lower() else "validation_error",

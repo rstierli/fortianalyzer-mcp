@@ -467,9 +467,9 @@ class TestQueryLogsAggregationModes:
 
     CUSTOM_RANGE = "2024-01-01 00:00:00|2024-01-02 00:00:00"
     ROWS = [
-        {"app": "HTTPS", "proto": "6", "dstport": "443"},
-        {"app": "HTTPS", "proto": "6", "dstport": "443"},
-        {"app": "HTTP", "proto": "6", "dstport": "80"},
+        {"app": "HTTPS", "proto": "6", "dstport": "443", "srcip": "10.0.0.1"},
+        {"app": "HTTPS", "proto": "6", "dstport": "443", "srcip": "10.0.0.1"},
+        {"app": "HTTP", "proto": "6", "dstport": "80", "srcip": "10.0.0.2"},
     ]
 
     class _Faz:
@@ -527,6 +527,45 @@ class TestQueryLogsAggregationModes:
         )
 
         assert len(result["breakdowns"]["app"]) == 2
+
+    async def test_sample_by_resolves_an_alias_and_echoes_the_canonical_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """sample_by=["source_ip"] did a raw row.get("source_ip") and answered
+        every row with an empty bucket -- the same spelling `fields` and
+        `filters` canonicalise. The emitted key must be canonical too: an
+        alias-spelled key sits outside the masking allowlist. Asserted on
+        bucket counts, not values: srcip values are exactly what the masked
+        suite tokenises, and this test must hold in both modes."""
+        self._install(monkeypatch)
+
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, sample_by=["source_ip"]
+        )
+
+        assert result["sample_by"] == ["srcip"]
+        assert "source_ip" not in result["breakdowns"]
+        assert [b["hits"] for b in result["breakdowns"]["srcip"]] == [2, 1]
+
+    async def test_sample_by_unknown_dimension_warns_instead_of_answering_with_silence(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._install(monkeypatch)
+
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, sample_by=["notafield"]
+        )
+
+        assert result["breakdowns"]["notafield"] == []
+        assert any("notafield" in w and "get_log_fields" in w for w in result["warnings"])
+
+    async def test_sample_by_rejects_a_name_not_shaped_like_a_field(self) -> None:
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, sample_by=['srcip=="x"']
+        )
+
+        assert result["status"] == "error"
+        assert result["error"] == "validation_error"
 
     async def test_count_only_returns_a_total_and_no_rows(
         self, monkeypatch: pytest.MonkeyPatch
