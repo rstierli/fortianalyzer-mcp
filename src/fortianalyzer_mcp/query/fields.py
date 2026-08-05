@@ -42,6 +42,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from fortianalyzer_mcp.utils.errors import ValidationError
+from fortianalyzer_mcp.utils.validation import (
+    VALID_EVENT_LEVELS,
+    VALID_EVENT_SUBTYPES,
+    VALID_IPS_ACTIONS,
+    VALID_TRAFFIC_ACTIONS,
+)
 
 # What a FortiAnalyzer field name can look like. Everything observed in the
 # logview/dvmdb catalogues is lowercase alphanumerics with underscores; dot and
@@ -998,6 +1004,54 @@ def coerce_value(vocabulary: str, canonical_field: str, value: Any) -> Any:
             f"Invalid value '{value}' for {canonical_field}. Must be one of: {valid}"
         )
     return code
+
+
+#: Known member sets for enum fields FortiAnalyzer stores as STRINGS, per
+#: vocabulary. Distinct from ``Vocabulary.coercions``, which maps enum names to
+#: the integer codes the appliance stores (dvmdb ``conn_status``) and whose
+#: unknown members are a hard error because the code is what goes on the wire.
+#:
+#: These sets came back into use after the #109 review measured the cost of
+#: losing them: the retired search_* wrappers validated these arguments
+#: client-side (``validate_traffic_action`` and friends, which the
+#: consolidation left with zero callers), and ``filters`` validates field names
+#: and operators but passes values through verbatim. So ``action==denied``
+#: compiled clean and returned 0 rows with status success, where
+#: ``action==deny`` returned 5833 -- a loud client-side rejection turned into a
+#: confident empty answer, the exact class this release spends its work
+#: closing.
+_STRING_ENUM_VALUES: Mapping[str, Mapping[str, frozenset[str]]] = {
+    "traffic": {"action": frozenset(VALID_TRAFFIC_ACTIONS)},
+    "attack": {"action": frozenset(VALID_IPS_ACTIONS)},
+    "event": {
+        "level": frozenset(VALID_EVENT_LEVELS),
+        "subtype": frozenset(VALID_EVENT_SUBTYPES),
+    },
+}
+
+
+def enum_value_warning(vocabulary: str, canonical_field: str, value: Any) -> str | None:
+    """Warn -- never reject -- on a value outside a string enum's known set.
+
+    A warning rather than a ValidationError, deliberately, and for the same
+    reason ``resolve_field`` warns on an unrecognised field name instead of
+    refusing it: these sets are this server's knowledge, not the appliance's.
+    ``VALID_TRAFFIC_ACTIONS`` has six members and FortiGate emits others
+    (``client-rst``, ``server-rst``), so rejecting would turn a real value
+    into an unqueryable one -- the failure 8beb7c5 had to undo for field
+    names on the projection path. The caller still learns the value is
+    unrecognised, and still learns the set, which is what turns a silent zero
+    into a diagnosable one.
+    """
+    members = _STRING_ENUM_VALUES.get(vocabulary, {}).get(canonical_field)
+    if members is None or not isinstance(value, str) or value.strip().lower() in members:
+        return None
+    return (
+        f"value '{value}' is not a known '{canonical_field}' value for {vocabulary} "
+        f"({', '.join(sorted(members))}); passing it through to FortiAnalyzer. "
+        f"A value the appliance does not use matches no rows and returns an "
+        f'empty result with status success. Confirm with get_log_fields(logtype="{vocabulary}").'
+    )
 
 
 def enum_names(vocabulary: str, canonical_field: str) -> tuple[str, ...] | None:

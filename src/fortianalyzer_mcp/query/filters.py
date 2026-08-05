@@ -34,7 +34,12 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from fortianalyzer_mcp.query.fields import coerce_value, enum_names, resolve_field
+from fortianalyzer_mcp.query.fields import (
+    coerce_value,
+    enum_names,
+    enum_value_warning,
+    resolve_field,
+)
 from fortianalyzer_mcp.utils.validation import ValidationError, sanitize_filter_value
 
 FilterOp = Literal[
@@ -211,7 +216,13 @@ def compile_to_string(
         _reject_substring_on_enum(vocabulary, field, op)
 
         if op in _MULTI_VALUE_OPS:
-            values = [coerce_value(vocabulary, field, v) for v in _values(condition)]
+            raw_values = list(_values(condition))
+            warnings.extend(
+                w
+                for w in (enum_value_warning(vocabulary, field, v) for v in raw_values)
+                if w is not None
+            )
+            values = [coerce_value(vocabulary, field, v) for v in raw_values]
             if op == "in":
                 inner = " or ".join(f"{field}=={_quote(v, field)}" for v in values)
             else:
@@ -219,7 +230,16 @@ def compile_to_string(
             clauses.append(f"({inner})")
             continue
 
-        value = coerce_value(vocabulary, field, _scalar(condition))
+        raw_scalar = _scalar(condition)
+        # Only for exact comparison: `action contains "den"` is a legitimate
+        # partial match, and warning that "den" is not an action would be
+        # noise about a query that is doing exactly what it says.
+        if op not in _LIKE_OPS:
+            enum_warning = enum_value_warning(vocabulary, field, raw_scalar)
+            if enum_warning:
+                warnings.append(enum_warning)
+
+        value = coerce_value(vocabulary, field, raw_scalar)
         if op in _SYMBOL_OPS:
             clauses.append(f"{field}{_SYMBOL_OPS[op]}{_quote(value, field)}")
         elif op in _LIKE_OPS:

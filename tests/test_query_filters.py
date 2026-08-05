@@ -206,6 +206,78 @@ class TestFieldResolution:
             compile_to_string([_c("srcip or 1", "eq", "x")], "traffic")
 
 
+class TestStringEnumValues:
+    """Enum-valued fields warn on a value outside their known set (#109 review).
+
+    The retired search_* wrappers validated these client-side; the
+    consolidation left validate_traffic_action and friends with zero callers,
+    and `filters` validated field names and operators but passed values
+    through verbatim. Measured on 7.6.7 over one fixed hour: action==deny
+    returned 5833 rows and action==denied returned 0, status success, no
+    error. That is a loud client-side rejection turned into a confident empty
+    answer.
+    """
+
+    def test_a_known_member_is_silent(self) -> None:
+        result, warnings = compile_to_string([_c("action", "eq", "deny")], "traffic")
+        assert result == "action==deny"
+        assert warnings == []
+
+    def test_an_unknown_member_warns_and_names_the_set(self) -> None:
+        result, warnings = compile_to_string([_c("action", "eq", "denied")], "traffic")
+
+        assert result == "action==denied"
+        assert len(warnings) == 1
+        assert "'denied' is not a known 'action' value" in warnings[0]
+        assert "deny" in warnings[0]
+        assert "status success" in warnings[0]
+
+    def test_an_unknown_member_is_NOT_rejected(self) -> None:
+        """Deliberately a warning, not an error. VALID_TRAFFIC_ACTIONS has six
+        members and FortiGate emits others (client-rst, server-rst), so
+        rejecting would make a real value unqueryable -- the failure 8beb7c5
+        had to undo for field names on the projection path."""
+        result, warnings = compile_to_string([_c("action", "eq", "client-rst")], "traffic")
+
+        assert result == "action==client-rst"
+        assert warnings  # told, not blocked
+
+    def test_case_and_whitespace_do_not_trigger_a_false_warning(self) -> None:
+        _, warnings = compile_to_string([_c("action", "eq", " Deny ")], "traffic")
+        assert warnings == []
+
+    def test_a_substring_match_does_not_warn(self) -> None:
+        """`action contains "den"` is a legitimate partial match; warning that
+        "den" is not an action would be noise about a correct query."""
+        _, warnings = compile_to_string([_c("action", "contains", "den")], "traffic")
+        assert warnings == []
+
+    def test_each_member_of_an_in_list_is_checked(self) -> None:
+        _, warnings = compile_to_string([_c("action", "in", ["deny", "denied", "drop"])], "traffic")
+        assert len(warnings) == 1
+        assert "'denied'" in warnings[0]
+
+    def test_event_level_and_subtype_carry_their_own_sets(self) -> None:
+        _, level = compile_to_string([_c("level", "eq", "criticel")], "event")
+        _, subtype = compile_to_string([_c("subtype", "eq", "systemm")], "event")
+
+        assert "critical" in level[0]
+        assert "system" in subtype[0]
+
+    def test_attack_action_uses_the_ips_set_not_the_traffic_one(self) -> None:
+        """`action` means different things per logtype: an IPS action is
+        detected/blocked/dropped/reset, not accept/deny."""
+        _, blocked = compile_to_string([_c("action", "eq", "blocked")], "attack")
+        _, deny = compile_to_string([_c("action", "eq", "deny")], "attack")
+
+        assert blocked == []
+        assert deny and "detected" in deny[0]
+
+    def test_a_vocabulary_with_no_enum_set_is_unaffected(self) -> None:
+        _, warnings = compile_to_string([_c("action", "eq", "anything-at-all")], "webfilter")
+        assert warnings == []
+
+
 class TestArrayDialect:
     """dvmdb/config/task take a list of [field, op, value] entries, ANDed."""
 
