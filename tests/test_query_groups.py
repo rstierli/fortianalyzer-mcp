@@ -18,13 +18,20 @@ from fortianalyzer_mcp.query.groups import (
 DIMENSION_TABLE = [
     ("traffic", "srcip", "top-sources"),
     ("traffic", "dstip", "top-destinations"),
-    ("traffic", "app", "top-applications"),
     ("traffic", "policyid", "policy-hits"),
     ("traffic", "dstcountry", "top-countries"),
-    ("webfilter", "hostname", "top-websites"),
-    ("webfilter", "website", "top-websites"),
+    ("webfilter", "catdesc", "top-websites"),
     ("attack", "attack", "top-threats"),
     ("attack", "threat", "top-threats"),
+]
+
+#: Dimensions whose view does not serve what the name promises, removed from
+#: the table after live probing on 7.6.7/8.0.0 (#109 review). Each must refuse
+#: and name sample_by, not answer with the view's own labelling.
+MISLABELLED_DIMENSIONS = [
+    ("webfilter", "hostname"),
+    ("webfilter", "website"),
+    ("traffic", "app"),
 ]
 
 
@@ -44,6 +51,28 @@ class TestLogDimensions:
         plan = resolve_group_plan("traffic", "source_ip")
         assert plan.target == "top-sources"
         assert plan.dimension == "srcip"
+
+    @pytest.mark.parametrize("logtype,dimension", MISLABELLED_DIMENSIONS)
+    def test_a_mislabelled_dimension_refuses_and_names_sample_by(
+        self, logtype: str, dimension: str
+    ) -> None:
+        """top-websites returns catdesc/catid rows and no hostname column;
+        top-applications labels its rows app_group. Dispatching either would
+        report the view's own buckets under the caller's dimension name with
+        is_exact: true. Refusing is the only honest answer, and the message
+        has to point at the surface that does group by the field."""
+        with pytest.raises(UnsupportedGroupDimension) as excinfo:
+            resolve_group_plan(logtype, dimension)
+
+        assert f"sample_by=['{dimension}']" in str(excinfo.value)
+
+    def test_web_category_is_the_honest_webfilter_dimension(self) -> None:
+        """The exact web-category surface stays reachable -- catdesc is what
+        top-websites actually aggregates, so the label matches the buckets."""
+        plan = resolve_group_plan("webfilter", "web_category")
+
+        assert plan.dimension == "catdesc"
+        assert plan.target == "top-websites"
 
     def test_the_plan_carries_fortiviews_all_devices_group(self) -> None:
         """FortiView spells it All_Device; logview spells it All_FortiGate.

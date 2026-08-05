@@ -536,9 +536,15 @@ async def query_logs(
             rows. Only dimensions the appliance aggregates natively are
             accepted, and each is tied to the logtype whose logs its native
             surface actually reads:
-            - logtype="traffic": srcip, dstip, app, policyid, dstcountry
-            - logtype="webfilter": hostname, website
+            - logtype="traffic": srcip, dstip, policyid, dstcountry
+            - logtype="webfilter": catdesc (alias: web_category)
             - logtype="attack": attack, threat
+            `hostname`/`website`/`app` are deliberately absent: top-websites
+            returns web CATEGORIES and carries no hostname column, and
+            top-applications labels its rows app_group, so grouping on them
+            reported the view's buckets under the caller's dimension name
+            with is_exact=true. sample_by=["hostname"]/["app"] answers those
+            honestly.
             Any other pairing is an error naming sample_by, including a
             dimension that works under a different logtype -- each surface
             aggregates its own log source, so answering across that boundary

@@ -718,26 +718,32 @@ class TestQueryLogsGroupByDispatch:
             calls.append(kwargs)
             return {
                 "status": "success",
-                "data": [{"app": "HTTPS", "sessions": 4}, {"app": "HTTP", "sessions": 1}],
+                "data": [
+                    {"srcip": "10.0.0.1", "sessions": 4},
+                    {"srcip": "10.0.0.2", "sessions": 1},
+                ],
             }
 
         monkeypatch.setattr(fortiview_tools, "_get_fortiview_data_impl", fake_impl)
 
         result = await log_tools.query_logs(
-            logtype="traffic", time_range=self.CUSTOM_RANGE, group_by="app"
+            logtype="traffic", time_range=self.CUSTOM_RANGE, group_by="srcip"
         )
 
         assert result["status"] == "success"
-        assert result["group_by"] == "app"
-        assert result["groups"] == [{"app": "HTTPS", "sessions": 4}, {"app": "HTTP", "sessions": 1}]
-        assert result["group_source"] == "fortiview:top-applications"
+        assert result["group_by"] == "srcip"
+        assert result["groups"] == [
+            {"srcip": "10.0.0.1", "sessions": 4},
+            {"srcip": "10.0.0.2", "sessions": 1},
+        ]
+        assert result["group_source"] == "fortiview:top-sources"
         assert result["is_exact"] is True
         assert result["time_range"] == self.RESOLVED_WINDOW
 
         # Exactly the window the response echoes -- not a second, independently
         # re-resolved one -- reached the FortiView call.
         assert len(calls) == 1
-        assert calls[0]["view_name"] == "top-applications"
+        assert calls[0]["view_name"] == "top-sources"
         assert calls[0]["tr"] == self.RESOLVED_WINDOW
         assert calls[0]["tr"] == result["time_range"]
         assert calls[0]["field_names"] == ["*"]
@@ -757,12 +763,15 @@ class TestQueryLogsGroupByDispatch:
 
         async def fake_impl(**kwargs: object) -> dict[str, object]:
             calls.append(kwargs)
-            return {"status": "success", "data": [{"hostname": "example.test", "sessions": 2}]}
+            return {
+                "status": "success",
+                "data": [{"catdesc": "Information Technology", "sessions": 2}],
+            }
 
         monkeypatch.setattr(fortiview_tools, "_get_fortiview_data_impl", fake_impl)
 
         result = await log_tools.query_logs(
-            logtype="webfilter", time_range=self.CUSTOM_RANGE, group_by="hostname"
+            logtype="webfilter", time_range=self.CUSTOM_RANGE, group_by="catdesc"
         )
 
         assert result["status"] == "success"
@@ -829,7 +838,7 @@ class TestQueryLogsGroupByDispatch:
         monkeypatch.setattr(fortiview_tools, "_get_fortiview_data_impl", fake_impl)
 
         result = await log_tools.query_logs(
-            logtype="traffic", time_range=self.CUSTOM_RANGE, group_by="app"
+            logtype="traffic", time_range=self.CUSTOM_RANGE, group_by="srcip"
         )
 
         assert result["status"] == "error"
@@ -895,7 +904,7 @@ class TestAggregationPathWarnings:
         self._install_view(monkeypatch, group_count=1000)
 
         result = await log_tools.query_logs(
-            logtype="traffic", time_range=self.CUSTOM_RANGE, group_by="app", limit=5000
+            logtype="traffic", time_range=self.CUSTOM_RANGE, group_by="srcip", limit=5000
         )
 
         notice = self._clamp_notice(result["warnings"])
@@ -913,7 +922,7 @@ class TestAggregationPathWarnings:
         self._install_view(monkeypatch, group_count=1000)
 
         result = await log_tools.query_logs(
-            logtype="traffic", time_range=self.CUSTOM_RANGE, group_by="app", limit=5000
+            logtype="traffic", time_range=self.CUSTOM_RANGE, group_by="srcip", limit=5000
         )
 
         cut = next(w for w in result["warnings"] if "top 1000 groups" in w)
@@ -929,7 +938,7 @@ class TestAggregationPathWarnings:
         self._install_view(monkeypatch, group_count=3)
 
         result = await log_tools.query_logs(
-            logtype="traffic", time_range=self.CUSTOM_RANGE, group_by="app", limit=3
+            logtype="traffic", time_range=self.CUSTOM_RANGE, group_by="srcip", limit=3
         )
 
         cut = next(w for w in result["warnings"] if "top 3 groups" in w)
@@ -962,7 +971,7 @@ class TestAggregationPathWarnings:
     @pytest.mark.parametrize(
         "kwargs",
         [
-            {"group_by": "app"},
+            {"group_by": "srcip"},
             {"sample_by": ["app"]},
             {"count_only": True},
         ],
@@ -988,7 +997,7 @@ class TestAggregationPathWarnings:
     @pytest.mark.parametrize(
         "kwargs",
         [
-            {"group_by": "app"},
+            {"group_by": "srcip"},
             {"sample_by": ["app"]},
             {"count_only": True},
         ],

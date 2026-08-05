@@ -349,6 +349,11 @@ _LOG_ALIASES: Mapping[str, str] = {
     "source_country": "srccountry",
     "destination_country": "dstcountry",
     "message": "msg",
+    # top-websites aggregates web categories, not hostnames (#109 review),
+    # so catdesc is the group_by dimension for webfilter. "web_category" is
+    # the English spelling a caller reaches for.
+    "web_category": "catdesc",
+    "category_description": "catdesc",
 }
 
 _DEVICE_FIELDS: frozenset[str] = frozenset(

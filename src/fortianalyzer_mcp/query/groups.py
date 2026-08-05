@@ -84,18 +84,35 @@ class LogGroupSurface:
 #:                                   bandwidth ranking reads traffic logs
 #:   policy-hits                     per-firewall-policy hit counts -> traffic
 #:   top-countries                   destination geo of traffic -> traffic
-#:   top-websites                    visited sites -> webfilter
+#:   top-websites                    web CATEGORIES of webfilter logs
 #:   top-threats                     detected threats -> attack
 #: ``top-cloud-applications`` (app-ctrl, Shadow IT) is deliberately unmapped:
 #: no dimension resolves to it unambiguously, and guessing between it and
 #: top-applications for ``group_by="app"`` is exactly the confusion this table
 #: exists to prevent. Reach it through get_fortiview_data by name.
+#:
+#: Two dimensions were removed here after live probing on 7.6.7 and 8.0.0
+#: (#109 review) showed the view does not serve what the dimension name
+#: promised:
+#:
+#: * ``hostname``/``website`` -> ``top-websites``. The view returns rows keyed
+#:   ``catdesc``/``catid`` and carries no hostname column at all, so the
+#:   response labelled web-category buckets ``group_by: "hostname"`` under
+#:   ``is_exact: true`` -- an exact answer to a question nobody asked, which
+#:   is the one failure an exactness promise cannot survive. ``catdesc`` is
+#:   what the view actually aggregates and is mapped in their place;
+#:   ``hostname`` now refuses, and the refusal recommends
+#:   ``sample_by=["hostname"]``, which genuinely groups webfilter rows.
+#: * ``app`` -> ``top-applications``. The view labels its rows ``app_group``,
+#:   so the buckets are application groups rather than applications. Unlike
+#:   the websites case there is no honest dimension name to swap in
+#:   (``app_group`` is in no vocabulary), so the dimension is refused and
+#:   ``sample_by=["app"]`` or ``get_fortiview_data(view_name=
+#:   "top-applications")`` are the two honest routes.
 LOG_GROUP_SURFACES: Mapping[str, LogGroupSurface] = {
     "srcip": LogGroupSurface("top-sources", frozenset({"traffic"})),
     "dstip": LogGroupSurface("top-destinations", frozenset({"traffic"})),
-    "app": LogGroupSurface("top-applications", frozenset({"traffic"})),
-    "hostname": LogGroupSurface("top-websites", frozenset({"webfilter"})),
-    "website": LogGroupSurface("top-websites", frozenset({"webfilter"})),
+    "catdesc": LogGroupSurface("top-websites", frozenset({"webfilter"})),
     "attack": LogGroupSurface("top-threats", frozenset({"attack"})),
     "threat": LogGroupSurface("top-threats", frozenset({"attack"})),
     "policyid": LogGroupSurface("policy-hits", frozenset({"traffic"})),

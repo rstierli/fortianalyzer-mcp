@@ -154,9 +154,15 @@ guarantee:
 `group_by` only accepts dimensions FortiAnalyzer aggregates natively, and each
 one is tied to the logtype whose logs its native surface reads:
 
-  logtype="traffic"     srcip, dstip, app, policyid, dstcountry
-  logtype="webfilter"   hostname, website
+  logtype="traffic"     srcip, dstip, policyid, dstcountry
+  logtype="webfilter"   catdesc (alias: web_category) -- web CATEGORIES
   logtype="attack"      attack, threat
+
+`hostname`, `website` and `app` are deliberately NOT here. top-websites serves
+web categories and carries no hostname column; top-applications labels its rows
+app_group. Grouping on them would have reported the view's own buckets under
+the caller's dimension name with is_exact: true. Use sample_by=["hostname"] or
+sample_by=["app"] instead -- bounded, and labelled as bounded.
 
 Any other pairing is an error that names sample_by -- including a dimension
 that works under a *different* logtype, because each surface aggregates its own
