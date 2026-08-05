@@ -640,6 +640,38 @@ class TestQueryLogsAggregationModes:
             assert result["status"] == "error", dimension
             assert "sample_by" in result["message"], dimension
 
+    async def test_an_alias_and_its_canonical_name_are_one_dimension(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """They resolve to the same key, so echoing both said the caller got
+        two breakdowns while breakdowns collapsed to one -- and the rows were
+        scanned twice for it (#109 review)."""
+        self._install(monkeypatch)
+
+        result = await log_tools.query_logs(
+            logtype="traffic",
+            time_range=self.CUSTOM_RANGE,
+            sample_by=["srcip", "source_ip"],
+        )
+
+        assert result["sample_by"] == ["srcip"]
+        assert list(result["breakdowns"]) == ["srcip"]
+
+    async def test_a_malformed_dimension_gets_the_same_code_as_the_sibling_tool(
+        self,
+    ) -> None:
+        """analyze_policy_traffic picked its code by sniffing the message for
+        the word "field", so resolve_field's shape rejection came back as
+        unknown_field there and validation_error here -- one malformed input,
+        two machine codes, and machine codes are a contract."""
+        import fortianalyzer_mcp.tools.traffic_tools as traffic_tools
+
+        malformed = ['srcip=="x"']
+        here = await log_tools.query_logs(logtype="traffic", sample_by=malformed)
+        there = await traffic_tools.analyze_policy_traffic(sample_by=malformed)
+
+        assert here["error"] == there["error"] == "validation_error"
+
     async def test_sample_by_reports_what_each_breakdown_left_out(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -519,22 +519,41 @@ async def analyze_policy_traffic(
         # extract nothing from the rows, and as a breakdown key it would sit
         # outside the masking allowlist, so resolution and emission go
         # together.
+        #
+        # The two failure modes get two codes, decided structurally rather
+        # than by sniffing the message for the word "field". The sniff read
+        # resolve_field's shape rejection ("'x' cannot be a FortiAnalyzer
+        # field name") as unknown_field, while query_logs called the identical
+        # input validation_error -- one malformed input, two machine codes,
+        # and machine codes are a contract (#109 review).
         resolved_dimensions: list[str] = []
+        seen_dimensions: set[str] = set()
         for dimension in dimensions:
             if is_derived(dimension):
-                resolved_dimensions.append(dimension.strip().lower())
-                continue
-            canonical, warning = resolve_field("traffic", dimension)
-            if warning is not None:
-                raise ValidationError(
-                    f"Unknown sample_by dimension '{dimension}': not a known traffic "
-                    "field and not a derived dimension (port, icmp_type_code)."
-                )
-            resolved_dimensions.append(canonical)
+                canonical = dimension.strip().lower()
+            else:
+                canonical, warning = resolve_field("traffic", dimension)
+                if warning is not None:
+                    return error_response(
+                        error="unknown_field",
+                        message=(
+                            f"Unknown sample_by dimension '{dimension}': not a known "
+                            "traffic field and not a derived dimension (port, "
+                            "icmp_type_code)."
+                        ),
+                        operation=operation,
+                        adom=adom_value,
+                    )
+            # An alias and its canonical name are one dimension; without this
+            # they were echoed twice and the rows scanned twice for the same
+            # breakdown, which collapsed to one key anyway.
+            if canonical not in seen_dimensions:
+                seen_dimensions.add(canonical)
+                resolved_dimensions.append(canonical)
         dimensions = resolved_dimensions
     except ValidationError as e:
         return error_response(
-            error="unknown_field" if "field" in str(e).lower() else "validation_error",
+            error="validation_error",
             message=str(e),
             operation=operation,
             adom=adom_value,

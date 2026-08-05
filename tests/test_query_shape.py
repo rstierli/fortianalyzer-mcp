@@ -15,6 +15,8 @@ from fortianalyzer_mcp.query.shape import (
 )
 from fortianalyzer_mcp.utils.errors import ValidationError
 
+_TRAFFIC_CURATED = resolve_projection("traffic", None)[0]
+
 
 def _row(**kw: Any) -> dict[str, Any]:
     base = {"srcip": "10.0.0.1", "dstip": "10.0.0.2", "dstport": 443, "noise": "x"}
@@ -165,6 +167,38 @@ class TestProjectPayload:
     """The tool-facing entry: only a row list is projected, everything else
     passes through and reports no fields_returned -- claiming a projection
     that did not happen is worse than reporting none."""
+
+    def test_omitted_fields_applies_the_curated_default(self) -> None:
+        """The shape of every tool call that passes no `fields` -- the default
+        path for all six callers, and the one the class originally skipped."""
+        rows, echoed, warnings = project_payload("traffic", [_row()], None)
+
+        assert "noise" not in rows[0]
+        assert set(echoed) <= set(_TRAFFIC_CURATED)
+        assert "srcip" in echoed
+        assert warnings == []
+
+    def test_star_projects_nothing_but_echoes_the_observed_keys(self) -> None:
+        """`fields=["*"]` resolves to keys=None, which flows into
+        fields_returned(rows, None) -- so the echo is the observed key union,
+        not empty and not ["*"]. A distinct clause worth pinning."""
+        rows, echoed, warnings = project_payload("traffic", [_row()], ["*"])
+
+        assert rows[0] == _row()  # untouched, noise included
+        assert set(echoed) == set(_row())
+        assert warnings == []
+
+    def test_warnings_survive_the_passthrough_branch(self) -> None:
+        """The non-list branch reports no fields_returned but DOES return
+        warnings, and every caller wires them into the response envelope. A
+        regression that dropped them here would go unnoticed if the tests
+        threw the third element away."""
+        payload, echoed, warnings = project_payload("fortiview", {"count": 1}, None)
+
+        assert payload == {"count": 1}
+        assert echoed == []
+        assert len(warnings) == 1
+        assert "fortiview" in warnings[0]
 
     def test_a_row_list_is_projected_and_echoed(self) -> None:
         payload = [_row(), _row(srcip="10.0.0.3")]

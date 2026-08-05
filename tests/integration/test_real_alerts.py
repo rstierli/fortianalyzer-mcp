@@ -84,30 +84,43 @@ async def test_get_alerts_sorted_asc(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_get_alert_incident_stats(
+async def test_get_alert_incident_stats_timescale_changes_the_bucketing(
     faz_client: FortiAnalyzerClient,
     test_adom: str,
     time_range_last_week: dict[str, str],
 ):
-    """Test getting alert-incident statistics in monthly buckets."""
-    result = await faz_client.get_alert_incident_stats(
+    """`timescale` must actually reach the appliance, not merely be accepted.
+
+    This pair used to be two tests asserting `result is not None`, which is
+    exactly how the parameter this replaced stayed broken: `stat_type` was
+    never a real parameter, and a nonsense value and "severity" returned
+    byte-identical responses, so a truthy-only assertion passed throughout.
+    Over a one-week window an hourly bucketing cannot be coarser than a
+    monthly one, so comparing the two proves the argument was applied.
+    """
+    monthly = await faz_client.get_alert_incident_stats(
         test_adom, time_range=time_range_last_week, timescale="month"
     )
-    assert result is not None
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_get_alert_incident_stats_hourly(
-    faz_client: FortiAnalyzerClient,
-    test_adom: str,
-    time_range_last_week: dict[str, str],
-):
-    """Test getting alert-incident statistics in hourly buckets."""
-    result = await faz_client.get_alert_incident_stats(
+    hourly = await faz_client.get_alert_incident_stats(
         test_adom, time_range=time_range_last_week, timescale="hour"
     )
-    assert result is not None
+
+    assert monthly is not None
+    assert hourly is not None
+
+    def _buckets(result: object) -> int:
+        if isinstance(result, dict):
+            data = result.get("data", result)
+            if isinstance(data, list):
+                return len(data)
+            if isinstance(data, dict):
+                return len(data)
+        return 0
+
+    assert _buckets(hourly) >= _buckets(monthly), (
+        "hourly bucketing returned fewer buckets than monthly over the same "
+        "week, so `timescale` is probably not being applied"
+    )
 
 
 @pytest.mark.integration

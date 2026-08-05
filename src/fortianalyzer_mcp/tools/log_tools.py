@@ -823,16 +823,25 @@ async def query_logs(
         # sit outside the masking allowlist and the bucket values would leak.
         if sample_by:
             resolved_dimensions: list[str] = []
+            seen_dimensions: set[str] = set()
             for dimension in sample_by:
                 if is_derived(dimension):
-                    resolved_dimensions.append(dimension.strip().lower())
+                    derived = dimension.strip().lower()
+                    if derived not in seen_dimensions:
+                        seen_dimensions.add(derived)
+                        resolved_dimensions.append(derived)
                     continue
                 canonical, dimension_warning = resolve_field(
                     logtype, dimension, enforce_complete=False
                 )
                 if dimension_warning is not None:
                     filter_warnings.append(dimension_warning)
-                resolved_dimensions.append(canonical)
+                # An alias and its canonical name are one dimension. Without
+                # this they were echoed twice in sample_by and the rows
+                # scanned twice, while breakdowns collapsed to one key anyway.
+                if canonical not in seen_dimensions:
+                    seen_dimensions.add(canonical)
+                    resolved_dimensions.append(canonical)
             sample_by = resolved_dimensions
 
         client = _get_client()
