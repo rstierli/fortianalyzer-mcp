@@ -1,6 +1,67 @@
-# FortiView surface — NOT measured (conservative assumptions)
+# FortiView surface — partially measured
 
-**Probe Status: NOT RUN**
+**Probe Status: MEASURED on 7.6.7 and 8.0.0 (2026-07-31, by @inxbit reviewing #109). NOT measured on 7.6.6.**
+
+> **Update, 2026-08-05.** The sections below marked *not measured* were written on
+> 2026-07-29 when no appliance was reachable. A reviewer subsequently probed 7.6.7
+> and 8.0.0 over fixed one-hour windows and measured **two of the assumptions to be
+> wrong in the direction that mattered**. The original text is kept verbatim below
+> so the reasoning that shipped is still legible; the measured results and their
+> consequences are recorded in "Measured results" immediately after this note.
+>
+> 7.6.6 is a supported version here and was **not** covered by that probe. Where
+> code now depends on the measurement, that residual is stated at the code.
+
+## Measured results (7.6.7 and 8.0.0, fixed one-hour windows)
+
+**1. Unknown filter fields are rejected LOUDLY, not silently ignored.** This is the
+opposite of the central assumption below, and it removes the failure mode the whole
+refusal was built against:
+
+```
+filter='definitelynotafield==1'  -> Invalid params: filter 'definitelynotafield' not supported
+filter='service zzqq DNS'        -> Invalid params: filter 'DNS' not supported
+sort_by='notacolumn'             -> Server error: Missing columns: 'notacolumn'
+```
+
+Per-view filter acceptance, each accepted filter demonstrably narrowing the result
+(`srcip==<ip present in window>` returned exactly that one row against three unfiltered):
+
+| view | accepts | rejects |
+| --- | --- | --- |
+| top-sources | `srcip` | `service`, `dstport` |
+| top-destinations | `dstip` | `service` |
+| policy-hits | `policyid` | |
+| top-countries | `dstcountry` | |
+| top-threats | `threat` | |
+| top-applications | | `app`, `appid` |
+| top-websites | | `hostname` |
+
+Consequence: `query.groups.VIEW_FILTER_FIELDS` forwards the filter for exactly these
+five accepted pairs and keeps refusing everything else. `catdesc` on `top-websites`
+was **not** probed, so it gets no entry either.
+
+**2. Sort columns are rejected loudly too, so the withheld defaults were safe to
+restore.** The "Per-view sort defaults (Task 2)" decision below withholds them on the
+stated grounds that a nonexistent sort column "would be ignored by FortiAnalyzer, not
+rejected". Measured, `sort_by='notacolumn'` returns a loud `Missing columns` error.
+The reason for withholding is therefore gone, and the per-view defaults the retired
+`get_top_*` wrappers carried are restored in `query.groups.VIEW_SORT_DEFAULTS`.
+
+**3. `top-websites` does not serve hostnames at all.** It returns rows keyed
+`catdesc`/`catid` with no hostname or website column, so `group_by="hostname"` was
+reporting web-category buckets under the caller's dimension name with `is_exact:
+true`. `top-applications` labels its rows `app_group`. Both dimensions were removed
+from `LOG_GROUP_SURFACES`; `catdesc` is mapped in their place.
+
+**Still not measured:** 7.6.6 filter and sort acceptance; `catdesc` as a
+`top-websites` filter field; `site-to-site-ipsec` and `policy-line` entirely.
+
+---
+
+## Original document (2026-07-29), kept for the record
+
+**Probe Status at the time: NOT RUN**
 
 Date: 2026-07-29. Reason: No live FortiAnalyzer appliance reachable from this session. The `fortianalyzer-dev` MCP server process is spawned at session start and would exercise code as it existed then, not the code under test. A probe run from this environment would prove nothing about the current implementation.
 

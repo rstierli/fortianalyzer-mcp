@@ -367,15 +367,27 @@ FIELD_TYPES: dict[str, str] = {
 #: plaintext oracle that needs no valid query at all, only a bad one.
 #:
 #: This closes one direction only: token -> plaintext. The opposite,
-#: plaintext -> token, stays open on the same keys, because the now-unresolved
-#: argument reaches the tool body verbatim and its echo is masked on the way
-#: out, so a caller learns ``mask()`` of any value it chooses (guess, mask,
-#: compare -- a chosen-plaintext check against a token it already holds). That
-#: oracle is not new -- an echoed ``filter`` over an untyped field does the
-#: same on every release since masking shipped -- and it is not closable from
-#: here: only a keyed tag on tokens (#40's authenticated envelope) makes a
-#: chosen-plaintext token distinguishable from a real one. Recorded so the
-#: docstring does not overclaim.
+#: plaintext -> token, stays open on ``fields`` alone -- measured, not
+#: assumed. Its echo ``fields_returned`` is typed TEXT and is therefore
+#: scanned by pass 2, so an unresolved argument reaches the tool body
+#: verbatim and comes back masked, and a caller learns ``mask()`` of any value
+#: it chooses (guess, mask, compare -- a chosen-plaintext check against a
+#: token it already holds). ``fields`` being a *list* is what makes it worth
+#: naming: N guesses per call rather than one.
+#:
+#: The other four echo verbatim and are never scanned -- ``group_by``,
+#: ``sample_by``, ``sort_by`` and ``view_name`` have no ``FIELD_TYPES`` entry,
+#: so the direction is closed there today. Closed incidentally, though, not by
+#: design: typing any of those echoes would open it, which is the thing to
+#: remember when adding one.
+#:
+#: The oracle itself is not new and not closable from here -- an echoed
+#: ``filter`` over an untyped field does the same on every release since
+#: masking shipped (verified against main, not inferred: ``dstport=="<ip>"``
+#: comes back with the token substituted). Only a keyed tag on tokens (#40's
+#: authenticated envelope) makes a chosen-plaintext token distinguishable from
+#: a real one. Recorded so the docstring neither overclaims safety nor
+#: overclaims exposure.
 FIELD_NAME_ARGS = ("fields", "group_by", "sample_by", "sort_by", "view_name")
 
 #: Composite keys whose value is a single string holding one or more

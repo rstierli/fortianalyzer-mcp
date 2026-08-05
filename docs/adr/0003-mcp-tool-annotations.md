@@ -6,7 +6,9 @@
 
 Every tool was declared with a bare `@mcp.tool()`, so all 89 declaration sites — the 86 registered in
 full mode (85 raw tools plus the `faz_skill` dispatcher) and the 3 dynamic-mode discovery tools —
-shipped without `ToolAnnotations`. On the wire that is not neutral. The MCP spec's defaults are `readOnlyHint=false`,
+shipped without `ToolAnnotations`. (Counts as of 2.11.0; the 2.12.0 consolidation took the raw tool
+surface to 73, so the equivalent figures are 77 / 74. The decision below is unaffected — it is about
+what every declaration site carries, not how many there are.) On the wire that is not neutral. The MCP spec's defaults are `readOnlyHint=false`,
 `destructiveHint=true`, `idempotentHint=false` — so an unannotated `get_system_status` advertises
 *"may modify its environment, possibly destructively, and is not safe to repeat"*. A client that gates
 auto-approval on those hints has no way to distinguish a status read from `delete_device`, and the
