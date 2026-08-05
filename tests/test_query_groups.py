@@ -103,6 +103,72 @@ class TestLogDimensions:
         for view in VIEW_SORT_DEFAULTS:
             assert view in VALID_FORTIVIEW_VIEWS, f"sort default for unknown view {view}"
 
+    def test_residuals_count_rows_the_dimension_did_not_apply_to(self) -> None:
+        """_ABSENT values and missing fields are excluded from the buckets by
+        design -- an "unknown" bucket would inflate the total -- but the
+        exclusion was silent, so a caller could not tell it happened."""
+        from fortianalyzer_mcp.query.groups import aggregate_breakdowns_with_residuals
+
+        rows = [
+            {"app": "HTTPS"},
+            {"app": "unknown"},  # _ABSENT
+            {"app": ""},  # _ABSENT
+            {"proto": "6"},  # field absent entirely
+        ]
+
+        breakdowns, residuals = aggregate_breakdowns_with_residuals(rows, ["app"], top_n=10)
+
+        assert breakdowns["app"] == [{"value": "HTTPS", "hits": 1}]
+        assert residuals["app"]["excluded_rows"] == 3
+        assert residuals["app"]["buckets_truncated"] is False
+
+    def test_residuals_distinguish_a_top_n_cut_from_an_exclusion(self) -> None:
+        """The whole point: a bucket list alone reads the same whether four
+        values existed or four hundred did."""
+        from fortianalyzer_mcp.query.groups import aggregate_breakdowns_with_residuals
+
+        rows = [{"app": f"app-{n}"} for n in range(25)]
+
+        breakdowns, residuals = aggregate_breakdowns_with_residuals(rows, ["app"], top_n=10)
+
+        assert len(breakdowns["app"]) == 10
+        assert residuals["app"]["buckets_truncated"] is True
+        assert residuals["app"]["distinct_values"] == 25
+        assert residuals["app"]["excluded_rows"] == 0
+        assert residuals["app"]["hits_shown"] == 10
+        assert residuals["app"]["hits_total"] == 25
+
+    def test_top_n_zero_truncates_nothing(self) -> None:
+        from fortianalyzer_mcp.query.groups import aggregate_breakdowns_with_residuals
+
+        rows = [{"app": f"app-{n}"} for n in range(25)]
+
+        _, residuals = aggregate_breakdowns_with_residuals(rows, ["app"], top_n=0)
+
+        assert residuals["app"]["buckets_truncated"] is False
+
+    def test_residuals_carry_counts_only(self) -> None:
+        """Nothing in the residual block needs masking, and that has to stay
+        true: it is the one part of the response the masking layer does not
+        type by dimension."""
+        from fortianalyzer_mcp.query.groups import aggregate_breakdowns_with_residuals
+
+        _, residuals = aggregate_breakdowns_with_residuals(
+            [{"srcip": "10.1.2.3"}], ["srcip"], top_n=10
+        )
+
+        for value in residuals["srcip"].values():
+            assert isinstance(value, int | bool)
+
+    def test_the_plain_helper_still_returns_only_breakdowns(self) -> None:
+        """aggregate_breakdowns keeps its signature; the residual variant is
+        the same computation, so the two can never disagree."""
+        rows = [{"app": "HTTPS"}, {"app": "unknown"}]
+
+        assert aggregate_breakdowns(rows, ["app"], top_n=10) == {
+            "app": [{"value": "HTTPS", "hits": 1}]
+        }
+
     def test_web_category_is_the_honest_webfilter_dimension(self) -> None:
         """The exact web-category surface stays reachable -- catdesc is what
         top-websites actually aggregates, so the label matches the buckets."""

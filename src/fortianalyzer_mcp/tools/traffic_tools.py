@@ -6,7 +6,7 @@ per-dimension breakdowns (port, service, app, ...) for each. It replaces three
 tools that differed only in which breakdowns they produced
 (`get_policy_traffic_profile`, `get_policy_port_analysis`,
 `get_policy_protocol_summary`); that difference is now the `sample_by`
-parameter, and the aggregation itself is `query.groups.aggregate_breakdowns`
+parameter, and the aggregation itself is `query.groups.aggregate_breakdowns_with_residuals`
 over `query.derive.dimension_value` rather than a bespoke Counter per tool.
 
 It queries FortiAnalyzer traffic logs filtered by policy ID and aggregates
@@ -21,7 +21,7 @@ from typing import Any, cast
 
 from fortianalyzer_mcp.query.derive import is_derived
 from fortianalyzer_mcp.query.fields import resolve_field
-from fortianalyzer_mcp.query.groups import aggregate_breakdowns
+from fortianalyzer_mcp.query.groups import aggregate_breakdowns_with_residuals
 from fortianalyzer_mcp.server import get_faz_client, mcp
 from fortianalyzer_mcp.tool_annotations import READ_ONLY
 from fortianalyzer_mcp.tools.log_tools import (
@@ -590,9 +590,16 @@ async def analyze_policy_traffic(
 
             policy_result = cast(dict[str, Any], result)
             logs = policy_result["logs"]
+            policy_breakdowns, policy_residuals = aggregate_breakdowns_with_residuals(
+                logs, dimensions, top_n=top_n
+            )
             entry: dict[str, Any] = {
                 "policy_id": pid,
-                "breakdowns": aggregate_breakdowns(logs, dimensions, top_n=top_n),
+                "breakdowns": policy_breakdowns,
+                # The retired get_policy_* tools reported this as
+                # top_ports_residual / top_services_residual /
+                # top_applications_residual; it came back with #109's review.
+                "breakdown_residuals": policy_residuals,
             }
             entry.update(
                 _bounded_metadata(

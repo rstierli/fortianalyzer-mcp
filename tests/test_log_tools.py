@@ -640,6 +640,37 @@ class TestQueryLogsAggregationModes:
             assert result["status"] == "error", dimension
             assert "sample_by" in result["message"], dimension
 
+    async def test_sample_by_reports_what_each_breakdown_left_out(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A top_n cut and an exclusion read identically in a bucket list."""
+        self._install(monkeypatch)
+
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, sample_by=["app"], top_n=1
+        )
+
+        residual = result["breakdown_residuals"]["app"]
+        assert residual["buckets_truncated"] is True
+        assert residual["distinct_values"] == 2
+        assert residual["excluded_rows"] == 0
+
+    async def test_total_hits_never_drops_below_observed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """total_hits is documented as a floor. analyze_policy_traffic has
+        clamped this since v2.4.1; this path had no equivalent, so an
+        appliance that under-reported total-count published a floor that sat
+        below the rows it had just returned (#109 review)."""
+        self._install(monkeypatch, total=1)  # 3 rows come back, appliance says 1
+
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, sample_by=["app"]
+        )
+
+        assert result["observed_hits"] == 3
+        assert result["total_hits"] >= result["observed_hits"]
+
     async def test_group_by_forwards_a_filter_the_view_was_measured_to_accept(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

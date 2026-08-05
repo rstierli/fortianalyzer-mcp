@@ -373,24 +373,72 @@ def aggregate_breakdowns(
         ``{dimension: [{"value": str, "hits": int}, ...]}``, each list ordered
         by hits descending then value ascending, so equal counts come back in
         a stable order rather than one that depends on scan order.
+
+    See :func:`aggregate_breakdowns_with_residuals` for the same computation
+    plus the accounting of what each breakdown left out.
+    """
+    return aggregate_breakdowns_with_residuals(rows, dimensions, top_n)[0]
+
+
+def aggregate_breakdowns_with_residuals(
+    rows: list[Any],
+    dimensions: list[str],
+    top_n: int = 10,
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]:
+    """:func:`aggregate_breakdowns`, plus what each breakdown did not show.
+
+    A bucket list alone cannot distinguish three different things, and the
+    retired policy tools reported the difference through
+    ``top_ports_residual``/``top_services_residual``/
+    ``top_applications_residual`` (#109 review):
+
+    * rows excluded because the dimension was absent or unusable for them
+      (``dimension_value`` returned None -- an absent field, a portless
+      protocol, or a value in ``_ABSENT``), and
+    * values that existed but fell below the ``top_n`` cut.
+
+    Without the counts a caller cannot tell "nothing else matched" from "I
+    only showed you ten of four hundred", and both read as a complete answer.
+
+    Returns:
+        ``(breakdowns, residuals)`` where residuals is
+        ``{dimension: {"excluded_rows": int, "distinct_values": int,
+        "buckets_truncated": bool, "hits_shown": int, "hits_total": int}}``.
+        Counts only -- no values -- so the residual block carries nothing that
+        needs masking.
     """
     breakdowns: dict[str, list[dict[str, Any]]] = {}
+    residuals: dict[str, dict[str, Any]] = {}
 
     for dimension in dimensions:
         counter: Counter[str] = Counter()
+        excluded = 0
         for row in rows:
             if not isinstance(row, dict):
+                excluded += 1
                 continue
             value = dimension_value(dimension, row)
             # None means the row does not belong in this breakdown -- an
             # absent field or a portless protocol -- rather than belonging in
-            # an "unknown" bucket that would inflate the total.
-            if value is not None:
+            # an "unknown" bucket that would inflate the total. Counted, so
+            # the exclusion is visible rather than silent.
+            if value is None:
+                excluded += 1
+            else:
                 counter[value] += 1
 
         ordered = sorted(counter.items(), key=lambda item: (-item[1], item[0]))
+        distinct = len(ordered)
         if top_n > 0:
             ordered = ordered[:top_n]
         breakdowns[dimension] = [{"value": value, "hits": hits} for value, hits in ordered]
+        shown = sum(hits for _, hits in ordered)
+        residuals[dimension] = {
+            "excluded_rows": excluded,
+            "distinct_values": distinct,
+            "buckets_truncated": distinct > len(ordered),
+            "hits_shown": shown,
+            "hits_total": sum(counter.values()),
+        }
 
-    return breakdowns
+    return breakdowns, residuals

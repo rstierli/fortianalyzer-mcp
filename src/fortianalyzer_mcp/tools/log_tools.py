@@ -18,7 +18,7 @@ from fortianalyzer_mcp.query.groups import (
     GroupPlan,
     GroupSurfacePopulationMismatch,
     UnsupportedGroupDimension,
-    aggregate_breakdowns,
+    aggregate_breakdowns_with_residuals,
     resolve_group_plan,
 )
 from fortianalyzer_mcp.query.shape import fields_returned, project_rows, resolve_projection
@@ -1034,15 +1034,33 @@ async def query_logs(
             # left behind, so nothing here may claim exactness.
             truncated = observed >= limit
             is_exact = total_known and not truncated and total == observed
+            breakdowns, breakdown_residuals = aggregate_breakdowns_with_residuals(
+                rows, list(sample_by), top_n=top_n
+            )
+            # total_hits is documented as a floor, so it can never sit below
+            # the rows actually observed. analyze_policy_traffic has carried
+            # this shim since v2.4.1; this path had no equivalent, so an
+            # appliance that under-reported total-count published a floor that
+            # was not one (#109 review).
+            resolved_total = max(total, observed) if total_known and total is not None else observed
+            if total_known and total is not None and total < observed:
+                logger.warning(
+                    f"logsearch total-count {total} below observed rows {observed}; "
+                    "clamping to observed"
+                )
             return {
                 "status": "success",
                 "adom": adom,
                 "logtype": logtype,
                 "sample_by": list(sample_by),
-                "breakdowns": aggregate_breakdowns(rows, list(sample_by), top_n=top_n),
+                "breakdowns": breakdowns,
+                # What each breakdown left out: rows the dimension did not
+                # apply to, and values cut by top_n. Without them a top_n cut
+                # is indistinguishable from "nothing else matched" (#109).
+                "breakdown_residuals": breakdown_residuals,
                 "is_exact": is_exact,
                 "analysis_mode": "exact" if is_exact else "bounded_sample",
-                "total_hits": total if total_known else observed,
+                "total_hits": resolved_total,
                 "total_hits_is_known": total_known,
                 "total_hit_source": "logsearch_total_count" if total_known else "observed_rows",
                 "observed_hits": observed,
