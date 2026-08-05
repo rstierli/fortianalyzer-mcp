@@ -119,6 +119,37 @@ LOG_GROUP_SURFACES: Mapping[str, LogGroupSurface] = {
     "dstcountry": LogGroupSurface("top-countries", frozenset({"traffic"})),
 }
 
+#: The sort column each FortiView view is ranked by when the caller asks for
+#: none. Every retired ``get_top_*`` wrapper hard-coded one of these, and the
+#: consolidation dropped them: the ``group_by`` dispatch sent ``sort_by=None``
+#: and the migrated skill call sites sent nothing, while the responses still
+#: said "top N groups" and set ``groups_truncated`` -- ranking claims about a
+#: sort that was never requested (#109 review).
+#:
+#: ``docs/probes/2026-07-fortiview-surface.md`` withheld these on the belief
+#: that an unknown sort column "would be ignored by FortiAnalyzer, not
+#: rejected", which would have made a wrong entry silently reorder results.
+#: That was measured the other way on 7.6.7 and 8.0.0 --
+#: ``sort_by='notacolumn'`` returns a loud ``Missing columns: 'notacolumn'``
+#: -- so a wrong name here fails visibly rather than silently, and restoring
+#: the defaults is safe.
+#:
+#: ``top-countries`` is absent deliberately: no retired wrapper served it, so
+#: there is no measured default to restore and the appliance's own ordering
+#: stands. Callers of ``get_fortiview_data`` are unaffected -- that tool is
+#: the generic passthrough and keeps ``sort_by=None``; these defaults belong
+#: to the dispatch and skill layers that replaced named wrappers.
+VIEW_SORT_DEFAULTS: Mapping[str, str] = {
+    "top-sources": "bandwidth",
+    "top-destinations": "bandwidth",
+    "top-applications": "bandwidth",
+    "top-websites": "bandwidth",
+    "top-threats": "threatweight",
+    "top-cloud-applications": "sessions",
+    "policy-hits": "counts",
+}
+
+
 #: Alert dimensions served by /eventmgmt/adom/{adom}/alert-incident/stats.
 ALERT_GROUP_DIMENSIONS: frozenset[str] = frozenset({"severity", "status"})
 

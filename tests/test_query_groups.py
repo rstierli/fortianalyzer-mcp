@@ -66,6 +66,43 @@ class TestLogDimensions:
 
         assert f"sample_by=['{dimension}']" in str(excinfo.value)
 
+    @pytest.mark.parametrize(
+        "view,column",
+        [
+            ("top-sources", "bandwidth"),
+            ("top-destinations", "bandwidth"),
+            ("top-applications", "bandwidth"),
+            ("top-websites", "bandwidth"),
+            ("top-threats", "threatweight"),
+            ("top-cloud-applications", "sessions"),
+            ("policy-hits", "counts"),
+        ],
+    )
+    def test_each_view_keeps_its_retired_wrappers_sort_default(
+        self, view: str, column: str
+    ) -> None:
+        """Every removed get_top_* wrapper hard-coded one of these. Dropping
+        them left responses claiming "top N groups" over appliance-default
+        ordering (#109 review). Pinned per view so a silent change to one
+        cannot pass as a change to the table."""
+        from fortianalyzer_mcp.query.groups import VIEW_SORT_DEFAULTS
+
+        assert VIEW_SORT_DEFAULTS[view] == column
+
+    def test_top_countries_has_no_default_to_restore(self) -> None:
+        """No retired wrapper served it, so there is no measured default and
+        the appliance's own ordering stands rather than an invented one."""
+        from fortianalyzer_mcp.query.groups import VIEW_SORT_DEFAULTS
+
+        assert "top-countries" not in VIEW_SORT_DEFAULTS
+
+    def test_every_defaulted_view_is_a_view_the_repo_accepts(self) -> None:
+        from fortianalyzer_mcp.query.groups import VIEW_SORT_DEFAULTS
+        from fortianalyzer_mcp.utils.validation import VALID_FORTIVIEW_VIEWS
+
+        for view in VIEW_SORT_DEFAULTS:
+            assert view in VALID_FORTIVIEW_VIEWS, f"sort default for unknown view {view}"
+
     def test_web_category_is_the_honest_webfilter_dimension(self) -> None:
         """The exact web-category surface stays reachable -- catdesc is what
         top-websites actually aggregates, so the label matches the buckets."""

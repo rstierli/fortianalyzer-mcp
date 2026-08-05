@@ -13,6 +13,7 @@ from fortianalyzer_mcp.query.derive import is_derived
 from fortianalyzer_mcp.query.fields import resolve_field
 from fortianalyzer_mcp.query.filters import FilterCondition, compile_to_string
 from fortianalyzer_mcp.query.groups import (
+    VIEW_SORT_DEFAULTS,
     GroupPlan,
     GroupSurfacePopulationMismatch,
     UnsupportedGroupDimension,
@@ -854,7 +855,10 @@ async def query_logs(
                 filter=filter,
                 limit=limit,
                 timeout=30,
-                sort_by=None,
+                # The retired get_top_* wrapper for this view hard-coded a
+                # sort; without it the response claimed "top N groups" over
+                # appliance-default ordering (#109 review).
+                sort_by=VIEW_SORT_DEFAULTS.get(group_plan.target),
                 sort_order="desc",
                 field_names=["*"],
             )

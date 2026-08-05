@@ -24,6 +24,7 @@ from collections.abc import Awaitable, Coroutine
 from datetime import datetime
 from typing import Any
 
+from fortianalyzer_mcp.query.groups import VIEW_SORT_DEFAULTS
 from fortianalyzer_mcp.skills.models import (
     AlertEvidence,
     AlertRuleHandler,
@@ -860,6 +861,7 @@ async def run_incident_summary(params: IncidentSummaryParams) -> IncidentSummary
         threats_res, err = await _call(
             get_fortiview_data,
             view_name="top-threats",
+            sort_by=VIEW_SORT_DEFAULTS["top-threats"],
             adom=params.adom,
             time_range=params.time_range,
             limit=10,
@@ -1397,6 +1399,7 @@ async def run_threat_intel(params: ThreatIntelParams) -> ThreatIntelResult:
         threats_res, err = await _call(
             get_fortiview_data,
             view_name="top-threats",
+            sort_by=VIEW_SORT_DEFAULTS["top-threats"],
             adom=params.adom,
             time_range=params.time_range or "24-hour",
             limit=10,
@@ -1551,6 +1554,7 @@ async def run_app_usage(params: AppUsageParams) -> AppUsageResult:
             _call(
                 get_fortiview_data,
                 view_name="top-applications",
+                sort_by=VIEW_SORT_DEFAULTS["top-applications"],
                 adom=params.adom,
                 device=params.device,
                 time_range=params.time_range,
@@ -1560,6 +1564,7 @@ async def run_app_usage(params: AppUsageParams) -> AppUsageResult:
             _call(
                 get_fortiview_data,
                 view_name="top-websites",
+                sort_by=VIEW_SORT_DEFAULTS["top-websites"],
                 adom=params.adom,
                 device=params.device,
                 time_range=params.time_range,
@@ -1569,6 +1574,7 @@ async def run_app_usage(params: AppUsageParams) -> AppUsageResult:
             _call(
                 get_fortiview_data,
                 view_name="top-cloud-applications",
+                sort_by=VIEW_SORT_DEFAULTS["top-cloud-applications"],
                 adom=params.adom,
                 device=params.device,
                 time_range=params.time_range,
@@ -1714,8 +1720,20 @@ async def run_network_context(params: NetworkContextParams) -> NetworkContextRes
 
     attempted = ["top_destinations", "top_sources"]
     coros = [
-        _call(get_fortiview_data, view_name="top-destinations", fields=["*"], **common),
-        _call(get_fortiview_data, view_name="top-sources", fields=["*"], **common),
+        _call(
+            get_fortiview_data,
+            view_name="top-destinations",
+            sort_by=VIEW_SORT_DEFAULTS["top-destinations"],
+            fields=["*"],
+            **common,
+        ),
+        _call(
+            get_fortiview_data,
+            view_name="top-sources",
+            sort_by=VIEW_SORT_DEFAULTS["top-sources"],
+            fields=["*"],
+            **common,
+        ),
     ]
     if params.include_geo:
         attempted.append("top_countries")
@@ -1900,6 +1918,7 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
         threats_res, err = await _call(
             get_fortiview_data,
             view_name="top-threats",
+            sort_by=VIEW_SORT_DEFAULTS["top-threats"],
             adom=params.adom,
             time_range=params.time_range,
             filter=entity_filter,
