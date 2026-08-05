@@ -572,7 +572,7 @@ request retries `client._execute_resilient` performed (0 on non-retry paths).
 `message` is redacted (secrets masked) and length-bounded.
 
 `analyze_policy_traffic` (which replaced `get_policy_traffic_profile`,
-`get_policy_port_analysis` and `get_policy_protocol_summary` in 2.11.0) adds
+`get_policy_port_analysis` and `get_policy_protocol_summary` in 2.12.0) adds
 top-level `adom`/`time_range`/`timezone` and a
 per-policy `filter`, plus per-policy `total_hits`, `total_hits_is_known`, and
 `total_hit_source` (`"logsearch_total-count"` when every slice reported a total,

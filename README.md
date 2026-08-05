@@ -3,7 +3,7 @@
 [![CI](https://github.com/rstierli/fortianalyzer-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/rstierli/fortianalyzer-mcp/actions/workflows/ci.yml)
 [![Python Version](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-2.11.0-green)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.12.0-green)](CHANGELOG.md)
 [![FortiAnalyzer](https://img.shields.io/badge/FortiAnalyzer-7.0%20%7C%207.2%20%7C%207.4%20%7C%207.6%20%7C%208.0-red)](README.md)
 
 A Model Context Protocol (MCP) server for FortiAnalyzer JSON-RPC API. This server enables AI assistants like Claude to interact with FortiAnalyzer for log analysis, reporting, security monitoring, and SOC operations.
@@ -385,7 +385,7 @@ networks:
 ## Available Tools
 
 **73 tools across 12 categories** (74 with the optional skills dispatcher —
-see "Skills Layer" below). The 2.11.0 release consolidated thirteen tools into
+see "Skills Layer" below). The 2.12.0 release consolidated thirteen tools into
 three; see CHANGELOG.md for the migration table.
 
 ### System Tools (11 tools)
