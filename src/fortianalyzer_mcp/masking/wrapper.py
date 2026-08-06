@@ -354,9 +354,12 @@ class OutputMasker:
         ``referralurl``, ``http_url``, ``link``, ``devvds`` have no entry
         there -- and passed them through in clear beside the token the same
         host carried elsewhere in the response, with ``hits`` as the join key.
-        The ``keep`` check stays wrapped around the call: ``_mask_entry`` does
-        not consult the keep set on its typed-scalar path, and a value left
-        clear under one key must never be masked under another.
+        The ``keep`` check stays wrapped around the call. Since #112
+        ``_mask_entry`` refuses a kept value on its typed-scalar path itself,
+        so for a typed dimension the two agree; the wrapper is load-bearing
+        for a *composite* dimension, whose handlers still do not consult the
+        keep set, and a value left clear under one key must never be masked
+        under another.
 
         A shape this handler cannot type -- a non-dict bucket, or a
         ``buckets`` that is not a list -- burns when the dimension IS typed or

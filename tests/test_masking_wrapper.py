@@ -998,6 +998,27 @@ class TestKeepSetAcrossBothPasses:
         assert masked["devname"] == name
         assert masked["msg"] == f"seen on {name}"
 
+    def test_kept_name_stays_clear_in_a_breakdown_bucket(self, masker: OutputMasker):
+        # The pass-2 breakdown handler (#109) is a second route into prose, and
+        # it only became constructible once #112 landed: it needs the flag off,
+        # a composite putting the name into the mapping, and a TEXT dimension
+        # echoing it. Resolve the merge without threading ``keep`` into that
+        # handler and every gate still passes while the bucket prints a token
+        # for the name ``devname`` shows in clear, two keys away.
+        name = "fgt-branch-01"
+        masked = masker.mask_result(
+            {
+                "devname": name,
+                "url": f"https://{name}/admin",
+                "msg": f"seen on {name} overnight",
+                "breakdowns": {"msg": [{"value": f"seen on {name} overnight", "count": 3}]},
+            }
+        )
+
+        assert masked["devname"] == name
+        assert masked["msg"] == f"seen on {name} overnight"
+        assert masked["breakdowns"]["msg"][0]["value"] == f"seen on {name} overnight"
+
     def test_unrelated_identifier_still_masks_when_keep_set_is_present(self, masker: OutputMasker):
         # The keep set must not become a blanket exemption: a different
         # identifier in the same response still masks normally.
