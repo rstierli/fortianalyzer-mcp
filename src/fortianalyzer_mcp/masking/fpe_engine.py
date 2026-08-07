@@ -82,6 +82,7 @@ this module never includes key material in exceptions.
 
 import base64
 import hashlib
+import hmac
 import ipaddress
 import os
 import re
@@ -123,6 +124,26 @@ _TWEAK_LABELS = {
     "email_local": "faz-mcp-fpe:v1:email-local",
     "url_tail": "faz-mcp-fpe:v1:url-tail",
 }
+
+
+#: Width of the v2 envelope's authentication tag, in hex characters.
+#: 8 hex = 32 bits = one in 4.3 billion per blind forgery attempt, and every
+#: attempt costs an attacker one tool call, so forgery is strictly online.
+#: Settled on #40; it is part of the format shared with fortimanager-mcp and
+#: cannot be changed on one side alone.
+V2_TAG_HEX = 8
+
+#: Value types that may appear in a v2 envelope.
+#:
+#: Pinned, and asserted colon-free, because the tag is computed over
+#: ``faz-mcp-fpe:v2:tag:<type>:<ct>`` and that string is only injective while
+#: no type name contains a colon. Ciphertexts DO contain colons today (IPv6,
+#: MAC), so the first colon after the fixed prefix is what delimits the type.
+#: Add a type with a colon in it and two different (type, ciphertext) pairs
+#: could authenticate each other's tokens.
+V2_TYPES = frozenset(
+    {"ipv4", "ipv6", "mac", "serial", "hostname", "username", "domain", "email_local", "url_tail"}
+)
 
 
 class MaskingError(Exception):
@@ -191,6 +212,11 @@ class FPEEngine:
             for vtype in self._str_ciphers
         }
         self._tweak_labels = dict(_TWEAK_LABELS)
+        # Separate subkey for the v2 authentication tag, derived from the same
+        # secret rather than reusing the AES key as an HMAC key. Two
+        # primitives, two keys, and the raw key is not retained on the
+        # instance. The derivation string is part of the shared format.
+        self._v2_tag_key = hashlib.sha256(f"faz-mcp-fpe:v2:tagkey:{key.lower()}".encode()).digest()
 
     @classmethod
     def from_env(cls, mask_suffix: str = DEFAULT_MASK_SUFFIX) -> "FPEEngine":
@@ -213,6 +239,36 @@ class FPEEngine:
     def key_id(self) -> str:
         """4-hex-char one-way fingerprint of the key, embedded in marked tokens."""
         return self._key_id
+
+    # ------------------------------------------------------------------ #
+    # v2 envelope authentication tag (#40)                                #
+    # ------------------------------------------------------------------ #
+
+    def v2_tag(self, vtype: str, ct: str) -> str:
+        """Authentication tag for a v2 envelope payload.
+
+        Keyed and domain-separated per type, so a token cannot be lifted from
+        one value type to another and still verify. Truncated to
+        :data:`V2_TAG_HEX`.
+
+        Raises:
+            MaskingError: If ``vtype`` is not a pinned v2 type. A type
+                carrying a colon would break the injectivity the tag input
+                relies on, so this is enforced rather than documented.
+        """
+        if vtype not in V2_TYPES:
+            raise MaskingError(f"unknown v2 value type: {vtype!r}")
+        message = f"faz-mcp-fpe:v2:tag:{vtype}:{ct}".encode()
+        return hmac.new(self._v2_tag_key, message, hashlib.sha256).hexdigest()[:V2_TAG_HEX]
+
+    def v2_tag_ok(self, vtype: str, ct: str, tag: str) -> bool:
+        """Is ``tag`` the authentic tag for this payload?
+
+        Constant-time comparison: a timing signal on the tag check would let
+        an attacker recover a valid tag byte by byte and reduce forgery from
+        2**32 attempts to a few hundred.
+        """
+        return hmac.compare_digest(tag, self.v2_tag(vtype, ct))
 
     # ------------------------------------------------------------------ #
     # IP addresses                                                       #
