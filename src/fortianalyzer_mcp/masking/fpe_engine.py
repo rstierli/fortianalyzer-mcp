@@ -133,7 +133,8 @@ _TWEAK_LABELS = {
 #: cannot be changed on one side alone.
 V2_TAG_HEX = 8
 
-#: A well-formed tag: exactly V2_TAG_HEX lowercase hex characters.
+#: A well-formed tag: exactly V2_TAG_HEX hex characters, checked after
+#: case folding.
 #: Checked before comparison because ``hmac.compare_digest`` raises on a
 #: non-ASCII string instead of returning False, and the tag reaches us
 #: from inside a token a model hands back.
@@ -264,20 +265,41 @@ class FPEEngine:
         """
         if vtype not in V2_TYPES:
             raise MaskingError(f"unknown v2 value type: {vtype!r}")
-        message = f"faz-mcp-fpe:v2:tag:{vtype}:{ct}".encode()
+        message = f"faz-mcp-fpe:v2:tag:{vtype}:{self._v2_canonical_ct(vtype, ct)}".encode()
         return hmac.new(self._v2_tag_key, message, hashlib.sha256).hexdigest()[:V2_TAG_HEX]
+
+    @staticmethod
+    def _v2_canonical_ct(vtype: str, ct: str) -> str:
+        """Canonical spelling of a payload, for tag purposes.
+
+        The tag has to tolerate exactly what decryption tolerates, no more
+        and no less. Every type but ``username`` is case-insensitive here and
+        its payload is lowercased before decryption, so an upper- or
+        title-cased token still round-trips; tagging the verbatim spelling
+        would make a re-cased token fail verification, stop being recognised
+        as ours, and be handed to the appliance as a literal.
+
+        ``username`` is excluded because its cipher alphabet is mixed-case
+        and ``Admin`` and ``admin`` can be different principals. Folding case
+        there would let two distinct principals' tokens authenticate each
+        other's payloads.
+        """
+        return ct if vtype == "username" else ct.lower()
 
     def v2_tag_ok(self, vtype: str, ct: str, tag: str) -> bool:
         """Is ``tag`` the authentic tag for this payload?
 
         Total over the tag, which arrives inside a token a model hands back
         and is therefore untrusted: anything that is not exactly
-        :data:`V2_TAG_HEX` lowercase hex characters is False, never an
-        exception. ``compare_digest`` raises TypeError on a non-ASCII string
-        rather than returning False, so the shape check has to come first.
-        Rejecting uppercase here is deliberate too: tags are minted
-        lowercase, and treating a re-cased tag as valid would widen what
-        counts as authentic for no benefit.
+        :data:`V2_TAG_HEX` hex characters is False, never an exception.
+        ``compare_digest`` raises TypeError on a non-ASCII string rather
+        than returning False, so the shape check has to come first.
+
+        The tag is case-folded before comparison, and the payload is folded
+        by :meth:`_v2_canonical_ct`, so a re-cased token verifies exactly
+        where a re-cased token still decrypts. Being stricter than the
+        decrypt path would not be safer: it would turn a token we minted
+        into one we no longer recognise, and hand it onward as a literal.
 
         ``vtype`` is NOT untrusted, and an unknown one still raises. It comes
         from this repo's own field table, so it is a bug here rather than
@@ -289,9 +311,10 @@ class FPEEngine:
         leak nothing, since both are fixed and public.
         """
         expected = self.v2_tag(vtype, ct)
-        if len(tag) != V2_TAG_HEX or not _V2_TAG_RE.match(tag):
+        candidate = tag.strip().lower()
+        if not _V2_TAG_RE.match(candidate):
             return False
-        return hmac.compare_digest(tag, expected)
+        return hmac.compare_digest(candidate, expected)
 
     # ------------------------------------------------------------------ #
     # IP addresses                                                       #

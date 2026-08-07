@@ -102,6 +102,29 @@ class TestVerification:
         ):
             assert engine.v2_tag_ok("ipv4", "248.194.94.248", bad) is False
 
+    def test_a_recased_token_still_verifies(self, engine: FPEEngine):
+        # The engine already tolerates re-casing for every type except
+        # username: unmask_hostname round-trips an upper- or title-cased
+        # token. The tag has to tolerate exactly as much, or a model that
+        # re-cases a token in prose turns it into something we no longer
+        # recognise as ours and hand to the appliance as a literal.
+        ct = "xwekcqanzm"
+        tag = engine.v2_tag("hostname", ct)
+
+        assert engine.v2_tag_ok("hostname", ct, tag.upper())
+        assert engine.v2_tag_ok("hostname", ct.upper(), tag)
+        assert engine.v2_tag_ok("hostname", ct.upper(), tag.upper())
+
+    def test_username_tags_stay_case_sensitive(self, engine: FPEEngine):
+        # Usernames are the documented exception: Admin and admin can be
+        # different principals, the cipher is mixed-case, and re-casing a
+        # username token already corrupts it. Folding case here would make
+        # two distinct principals' tokens authenticate each other.
+        ct = "AbCdEfGh"
+
+        assert engine.v2_tag("username", ct) != engine.v2_tag("username", ct.lower())
+        assert not engine.v2_tag_ok("username", ct, engine.v2_tag("username", ct.lower()))
+
     def test_an_unknown_type_still_raises_on_verify(self, engine: FPEEngine):
         # Deliberately NOT swallowed. The value type comes from our own field
         # table, never from the wire, so an unknown one is a bug in this
