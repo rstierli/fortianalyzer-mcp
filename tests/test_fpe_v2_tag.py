@@ -87,6 +87,28 @@ class TestVerification:
         for bad in ("", "  ", "zzzzzzzz", "deadbeef0", "deadbee"):
             assert not engine.v2_tag_ok("ipv4", "248.194.94.248", bad)
 
+    def test_verification_is_total_over_untrusted_tags(self, engine: FPEEngine):
+        # The tag arrives inside a token a model hands back, so it is
+        # untrusted input and verification must be a predicate, not a
+        # hazard. compare_digest raises TypeError on non-ASCII rather than
+        # returning False, and uppercase hex is a plausible re-casing, so
+        # both have to be handled before the comparison.
+        for bad in (
+            "déadbeef",  # non-ASCII: compare_digest would raise
+            "DEADBEEF",  # re-cased hex
+            "dead beef",
+            "\n",
+            "0x1234ab",
+        ):
+            assert engine.v2_tag_ok("ipv4", "248.194.94.248", bad) is False
+
+    def test_an_unknown_type_still_raises_on_verify(self, engine: FPEEngine):
+        # Deliberately NOT swallowed. The value type comes from our own field
+        # table, never from the wire, so an unknown one is a bug in this
+        # repo and should be loud. Only the tag itself is untrusted.
+        with pytest.raises(MaskingError, match="unknown v2 value type"):
+            engine.v2_tag_ok("not-a-type", "abc", "deadbeef")
+
 
 class TestSpecPin:
     """The tag is the shared contract with fortimanager-mcp, so its

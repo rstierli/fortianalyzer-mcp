@@ -133,6 +133,12 @@ _TWEAK_LABELS = {
 #: cannot be changed on one side alone.
 V2_TAG_HEX = 8
 
+#: A well-formed tag: exactly V2_TAG_HEX lowercase hex characters.
+#: Checked before comparison because ``hmac.compare_digest`` raises on a
+#: non-ASCII string instead of returning False, and the tag reaches us
+#: from inside a token a model hands back.
+_V2_TAG_RE = re.compile(rf"^[0-9a-f]{{{V2_TAG_HEX}}}$")
+
 #: Value types that may appear in a v2 envelope.
 #:
 #: Pinned, and asserted colon-free, because the tag is computed over
@@ -264,11 +270,28 @@ class FPEEngine:
     def v2_tag_ok(self, vtype: str, ct: str, tag: str) -> bool:
         """Is ``tag`` the authentic tag for this payload?
 
+        Total over the tag, which arrives inside a token a model hands back
+        and is therefore untrusted: anything that is not exactly
+        :data:`V2_TAG_HEX` lowercase hex characters is False, never an
+        exception. ``compare_digest`` raises TypeError on a non-ASCII string
+        rather than returning False, so the shape check has to come first.
+        Rejecting uppercase here is deliberate too: tags are minted
+        lowercase, and treating a re-cased tag as valid would widen what
+        counts as authentic for no benefit.
+
+        ``vtype`` is NOT untrusted, and an unknown one still raises. It comes
+        from this repo's own field table, so it is a bug here rather than
+        something a caller can influence, and swallowing it would hide that.
+
         Constant-time comparison: a timing signal on the tag check would let
         an attacker recover a valid tag byte by byte and reduce forgery from
-        2**32 attempts to a few hundred.
+        2**32 attempts to a few hundred. The length and shape checks above
+        leak nothing, since both are fixed and public.
         """
-        return hmac.compare_digest(tag, self.v2_tag(vtype, ct))
+        expected = self.v2_tag(vtype, ct)
+        if len(tag) != V2_TAG_HEX or not _V2_TAG_RE.match(tag):
+            return False
+        return hmac.compare_digest(tag, expected)
 
     # ------------------------------------------------------------------ #
     # IP addresses                                                       #
