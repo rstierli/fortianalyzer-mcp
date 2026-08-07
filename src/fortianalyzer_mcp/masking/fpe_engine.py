@@ -158,6 +158,12 @@ _V2_TAG_RE = re.compile(rf"^[0-9a-f]{{{V2_TAG_HEX}}}$")
 #: MAC), so the first colon after the fixed prefix is what delimits the type.
 #: Add a type with a colon in it and two different (type, ciphertext) pairs
 #: could authenticate each other's tokens.
+#: ``serial`` has no entry in ``_TWEAK_LABELS`` yet, on purpose: it is a
+#: forward declaration of the type the envelope work adds, and nothing can
+#: mint a serial ciphertext today (serials currently ride HOSTNAME). It is
+#: named here so the shared vocabulary is pinned once rather than changed
+#: twice. Whether a ``serialno`` field ends up emitting ``serial`` or
+#: ``hostname`` is still open on #40.
 V2_TYPES = frozenset(
     {"ipv4", "ipv6", "mac", "serial", "hostname", "username", "domain", "email_local", "url_tail"}
 )
@@ -311,8 +317,12 @@ class FPEEngine:
     def v2_tag_ok(self, vtype: str, ct: str, tag: str) -> bool:
         """Is ``tag`` the authentic tag for this payload?
 
-        Total over the tag, which arrives inside a token a model hands back
-        and is therefore untrusted: anything that is not exactly
+        Total over BOTH untrusted inputs, the tag and the payload, since the
+        envelope parser slices both out of token text a model supplied.
+        Minting (:meth:`v2_tag`) still raises on an unencodable payload,
+        because there the ciphertext is one we produced.
+
+        Total over the tag: anything that is not exactly
         :data:`V2_TAG_HEX` hex characters is False, never an exception.
         ``compare_digest`` raises TypeError on a non-ASCII string rather
         than returning False, so the shape check has to come first.
@@ -332,7 +342,15 @@ class FPEEngine:
         2**32 attempts to a few hundred. The length and shape checks above
         leak nothing, since both are fixed and public.
         """
-        expected = self.v2_tag(vtype, ct)
+        try:
+            expected = self.v2_tag(vtype, ct)
+        except UnicodeEncodeError:
+            # A payload that is not encodable UTF-8 (a lone surrogate, which
+            # json.loads produces from a "\\ud800" escape) cannot be a
+            # ciphertext we minted, and the parser slices it out of token text
+            # a model supplied. Same class as an unencodable tag: refuse,
+            # rather than raise out of the inbound path.
+            return False
         candidate = tag.lower()
         if not _V2_TAG_RE.match(candidate):
             return False

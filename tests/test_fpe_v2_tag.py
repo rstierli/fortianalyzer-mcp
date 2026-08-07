@@ -158,6 +158,17 @@ class TestVerification:
         # would silently tag two different unparseable strings the same way.
         assert engine.v2_tag("ipv6", "not-an-address") != engine.v2_tag("ipv6", "also-not-one")
 
+    def test_an_unencodable_payload_does_not_verify(self, engine: FPEEngine):
+        # A lone surrogate is not valid UTF-8, so building the tag input
+        # raises UnicodeEncodeError. json.loads produces exactly this from a
+        # "\\ud800" escape, and the envelope parser will slice its payload
+        # out of token text a model supplied, so this is the same crash class
+        # as the tag one, a parameter over. Verification refuses it.
+        import json
+
+        surrogate = json.loads('"\\ud800abc"')
+        assert engine.v2_tag_ok("hostname", surrogate, "deadbeef") is False
+
     def test_an_unknown_type_still_raises_on_verify(self, engine: FPEEngine):
         # Deliberately NOT swallowed. The value type comes from our own field
         # table, never from the wire, so an unknown one is a bug in this
@@ -186,12 +197,17 @@ class TestConstantTimeComparison:
         import inspect
 
         source = inspect.getsource(FPEEngine.v2_tag_ok)
-        assert "compare_digest" in source, (
+        # Against the BODY, not the whole source: the docstring says the word
+        # "compare_digest" too, so checking the source let a body that had
+        # dropped the call still pass. Demonstrated with
+        # ``return candidate in (expected,)``, which is timing-variable,
+        # contains no "==", and satisfied both asserts.
+        body = source.split('"""')[-1]
+        assert "compare_digest" in body, (
             "v2_tag_ok must compare the tag with hmac.compare_digest; "
             "a plain == is functionally identical and no behavioural test "
             "will catch the swap"
         )
-        body = source.split('"""')[-1]
         assert "==" not in body.replace("!=", ""), (
             "v2_tag_ok compares something with == outside its docstring; "
             "if that is the tag comparison it is a timing leak"
@@ -221,3 +237,12 @@ class TestSpecPin:
         # mirrors the implementation drifts with it; a literal is the thing
         # fortimanager-mcp has to reproduce, so it is the actual contract.
         assert engine.v2_tag("ipv4", "248.194.94.248") == "53eecc82"
+
+        # The ipv4 literal above pins the plain path. These pin the two
+        # halves of _v2_canonical_ct, which is shared-format surface too:
+        # fortimanager-mcp has to canonicalise identically or the same value
+        # authenticates on one server and not the other. Both spellings of
+        # the address must give the SAME literal; the username must not fold.
+        assert engine.v2_tag("ipv6", "abcd::1") == "ff087aef"
+        assert engine.v2_tag("ipv6", "abcd:0000:0000:0000:0000:0000:0000:0001") == "ff087aef"
+        assert engine.v2_tag("username", "AbCdEfGh") == "b830a7c4"
