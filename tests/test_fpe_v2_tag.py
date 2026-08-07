@@ -30,7 +30,9 @@ def engine() -> FPEEngine:
 class TestTagShape:
     def test_tag_is_eight_lowercase_hex(self, engine: FPEEngine):
         # 32 bits, the size settled on #40: one in 4.3 billion per blind
-        # forgery attempt, and every attempt costs the attacker a tool call.
+        # forgery attempt. Per VERIFICATION, not per tool call -- one call
+        # can carry thousands of tokens, so the per-call cap is the envelope
+        # layer's job, not the tag size's.
         tag = engine.v2_tag("ipv4", "248.194.94.248")
         assert V2_TAG_HEX == 8
         assert len(tag) == V2_TAG_HEX
@@ -58,9 +60,12 @@ class TestDomainSeparation:
         for vtype in V2_TYPES:
             assert ":" not in vtype, f"type {vtype!r} would break tag injectivity"
 
-    def test_a_colon_bearing_type_is_rejected(self, engine: FPEEngine):
-        # The guard above is only worth having if the code enforces it.
-        with pytest.raises(MaskingError, match="type"):
+    def test_a_type_outside_the_pinned_set_is_rejected(self, engine: FPEEngine):
+        # This does not pin the colon property on its own: "ip:v4" is refused
+        # for being unknown, and there is no colon-specific branch. It is the
+        # pair that carries the property -- the set is closed here, and every
+        # member of it is asserted colon-free above.
+        with pytest.raises(MaskingError, match="unknown v2 value type"):
             engine.v2_tag("ip:v4", "abc")
 
 
@@ -125,6 +130,34 @@ class TestVerification:
         assert engine.v2_tag("username", ct) != engine.v2_tag("username", ct.lower())
         assert not engine.v2_tag_ok("username", ct, engine.v2_tag("username", ct.lower()))
 
+    def test_whitespace_padding_does_not_verify(self, engine: FPEEngine):
+        # Tolerance has to be justified by what decryption tolerates, and
+        # decryption tolerates no padding inside a token. A tag is sliced out
+        # of a token by the parser, so outer whitespace means the parse was
+        # wrong, not that the token was re-spelled.
+        ct = "248.194.94.248"
+        tag = engine.v2_tag("ipv4", ct)
+
+        assert not engine.v2_tag_ok("ipv4", ct, f" {tag}")
+        assert not engine.v2_tag_ok("ipv4", ct, f"{tag} ")
+
+    def test_a_respelled_ipv6_payload_still_verifies(self, engine: FPEEngine):
+        # Same principle as the re-casing fix: ipaddress treats abcd::1 and
+        # its fully expanded form as one address, so decryption tolerates
+        # both spellings and the tag must too. Otherwise a model that
+        # expands a token in prose produces something that decrypts fine and
+        # fails verification, and gets handed to the appliance as a literal.
+        compressed = "abcd::1"
+        expanded = "abcd:0000:0000:0000:0000:0000:0000:0001"
+
+        assert engine.v2_tag("ipv6", compressed) == engine.v2_tag("ipv6", expanded)
+        assert engine.v2_tag_ok("ipv6", expanded, engine.v2_tag("ipv6", compressed))
+
+    def test_a_non_address_ipv6_payload_is_left_alone(self, engine: FPEEngine):
+        # Canonicalisation must not swallow a payload it cannot parse: that
+        # would silently tag two different unparseable strings the same way.
+        assert engine.v2_tag("ipv6", "not-an-address") != engine.v2_tag("ipv6", "also-not-one")
+
     def test_an_unknown_type_still_raises_on_verify(self, engine: FPEEngine):
         # Deliberately NOT swallowed. The value type comes from our own field
         # table, never from the wire, so an unknown one is a bug in this
@@ -183,3 +216,8 @@ class TestSpecPin:
             tag_key, b"faz-mcp-fpe:v2:tag:ipv4:248.194.94.248", hashlib.sha256
         ).hexdigest()[:8]
         assert engine.v2_tag("ipv4", "248.194.94.248") == expected
+
+        # And stated outright, not only recomputed. A recomputation that
+        # mirrors the implementation drifts with it; a literal is the thing
+        # fortimanager-mcp has to reproduce, so it is the actual contract.
+        assert engine.v2_tag("ipv4", "248.194.94.248") == "53eecc82"

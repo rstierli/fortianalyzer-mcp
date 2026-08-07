@@ -127,8 +127,18 @@ _TWEAK_LABELS = {
 
 
 #: Width of the v2 envelope's authentication tag, in hex characters.
-#: 8 hex = 32 bits = one in 4.3 billion per blind forgery attempt, and every
-#: attempt costs an attacker one tool call, so forgery is strictly online.
+#: 8 hex = 32 bits = one in 4.3 billion per blind forgery attempt. Forgery is
+#: strictly online, because nothing lets an attacker test a guessed tag
+#: locally.
+#:
+#: The bound is per VERIFICATION, not per tool call, and the difference
+#: matters: one call can carry many tokens (measured, 5000 in a single
+#: ``filters`` list, each resolved independently), so 2**31 expected
+#: verifications is on the order of 10**5 calls rather than 10**9. Making
+#: that cost real is the caller's job, not this function's -- the envelope
+#: layer has to cap tokens verified per call and alarm on repeated
+#: verification failures. Sizing alone does not buy the guarantee.
+#:
 #: Settled on #40; it is part of the format shared with fortimanager-mcp and
 #: cannot be changed on one side alone.
 V2_TAG_HEX = 8
@@ -284,7 +294,19 @@ class FPEEngine:
         there would let two distinct principals' tokens authenticate each
         other's payloads.
         """
-        return ct if vtype == "username" else ct.lower()
+        if vtype == "username":
+            return ct
+        if vtype == "ipv6":
+            # ``abcd::1`` and its fully expanded form are one address, and
+            # decryption accepts either, so the tag has to as well. An
+            # unparseable payload is left exactly as written rather than
+            # coerced: collapsing two different unparseable strings to one
+            # canonical form would let them authenticate each other.
+            try:
+                return str(ipaddress.IPv6Address(ct.strip()))
+            except ValueError:
+                return ct.lower()
+        return ct.lower()
 
     def v2_tag_ok(self, vtype: str, ct: str, tag: str) -> bool:
         """Is ``tag`` the authentic tag for this payload?
@@ -311,7 +333,7 @@ class FPEEngine:
         leak nothing, since both are fixed and public.
         """
         expected = self.v2_tag(vtype, ct)
-        candidate = tag.strip().lower()
+        candidate = tag.lower()
         if not _V2_TAG_RE.match(candidate):
             return False
         return hmac.compare_digest(candidate, expected)
