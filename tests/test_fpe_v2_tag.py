@@ -133,6 +133,38 @@ class TestVerification:
             engine.v2_tag_ok("not-a-type", "abc", "deadbeef")
 
 
+class TestConstantTimeComparison:
+    """The one property behaviour cannot express.
+
+    Swapping ``hmac.compare_digest`` for ``==`` changes nothing observable:
+    same answer for every input, and a mutation test over the whole file
+    leaves it alive. The difference is timing, and a timing assertion in a
+    unit test is flaky by construction. So the property is pinned
+    structurally instead, which is honest about what it checks: not that the
+    comparison IS constant-time, but that the code still calls the function
+    that makes it so.
+
+    It matters because the alternative is not a slower check, it is a
+    different threat model: a byte-by-byte timing signal takes forgery from
+    2**32 blind attempts down to a few hundred measured ones.
+    """
+
+    def test_verification_uses_compare_digest(self):
+        import inspect
+
+        source = inspect.getsource(FPEEngine.v2_tag_ok)
+        assert "compare_digest" in source, (
+            "v2_tag_ok must compare the tag with hmac.compare_digest; "
+            "a plain == is functionally identical and no behavioural test "
+            "will catch the swap"
+        )
+        body = source.split('"""')[-1]
+        assert "==" not in body.replace("!=", ""), (
+            "v2_tag_ok compares something with == outside its docstring; "
+            "if that is the tag comparison it is a timing leak"
+        )
+
+
 class TestSpecPin:
     """The tag is the shared contract with fortimanager-mcp, so its
     derivation is pinned here as a literal rather than recomputed the way
