@@ -13,7 +13,7 @@ Design constraints (RFC #44):
 
 Tool modules are imported lazily inside each handler: importing them at
 module scope would register every raw tool as a side effect (they attach
-to the shared FastMCP instance on import), which must not happen before
+to the shared MCPServer instance on import), which must not happen before
 the server's tool-mode branch has run.
 """
 

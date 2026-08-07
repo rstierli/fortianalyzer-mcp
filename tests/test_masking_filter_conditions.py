@@ -121,7 +121,7 @@ class TestAliasFieldNames:
 
 
 class TestFilterConditionModels:
-    """The model form, which is what FastMCP passes to the tool."""
+    """The model form, which is what MCPServer passes to the tool."""
 
     def test_model_instance_is_resolved_and_stays_a_model(self) -> None:
         engine = _engine()
@@ -176,7 +176,7 @@ class TestCompilerRequiresModelsNotDicts:
     meet. The compilers below it cannot consume one -- both use attribute
     access -- so the dict form is supported at one layer and rejected at the
     next. That is harmless in production only because every boundary coerces
-    before a tool body runs: FastMCP validates into models in full mode, and
+    before a tool body runs: MCPServer validates into models in full mode, and
     ``server._coerce_model_list`` does the same for dynamic mode's
     direct dispatch (``tests/test_dynamic_mode_filters.py``). It is worth
     pinning so the two layers are not mistaken for having the same contract.
@@ -191,7 +191,7 @@ class TestCompilerRequiresModelsNotDicts:
             compiler([{"field": "name", "op": "eq", "value": "x"}], vocabulary)  # type: ignore[operator]
 
     def test_the_model_form_of_the_same_condition_compiles(self) -> None:
-        """Control: the shape FastMCP actually hands over works fine."""
+        """Control: the shape MCPServer actually hands over works fine."""
         result, _ = compile_to_array([FilterCondition(field="name", op="eq", value="x")], "device")
         assert result == [["name", "==", "x"]]
 

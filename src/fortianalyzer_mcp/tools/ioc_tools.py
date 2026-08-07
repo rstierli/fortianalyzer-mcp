@@ -27,7 +27,7 @@ class IocEventRef(BaseModel):
     endpoint it fired on (``endpoint-id`` and/or ``source-ip``) plus the
     ``timestamp`` it fired at -- so an acknowledgement needs the identity
     triple, not an opaque handle. A Pydantic model rather than a dict so
-    FastMCP publishes a real JSON schema and a caller cannot silently omit
+    MCPServer publishes a real JSON schema and a caller cannot silently omit
     the whole identity.
 
     Take the values straight off an IOC event row rather than composing

@@ -1,6 +1,6 @@
 """Contract tests for the server-level ``instructions`` block.
 
-``FastMCP(instructions=...)`` is the only text this server ships that a
+``MCPServer(instructions=...)`` is the only text this server ships that a
 client reads *before* choosing a tool. Per-tool docstrings cannot carry a
 cross-cutting fact, because a caller holding one tool's docstring has no
 reason to suspect a neighbouring tool disagrees -- and here several do.
@@ -67,10 +67,10 @@ STRUCTURED_FILTER_OPS = (
 
 @pytest.fixture(scope="module")
 def instructions() -> str:
-    """The live ``instructions`` string off the module-global FastMCP."""
+    """The live ``instructions`` string off the module-global MCPServer."""
     server = importlib.import_module("fortianalyzer_mcp.server")
     text = server.mcp.instructions
-    assert text is not None, "FastMCP was constructed without instructions="
+    assert text is not None, "MCPServer was constructed without instructions="
     return text
 
 

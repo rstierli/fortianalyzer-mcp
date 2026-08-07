@@ -8,7 +8,10 @@ authors = [
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "mcp>=1.0.0,<2",  # 2.0 removed mcp.server.fastmcp (our whole API); pin to 1.x until a deliberate migration
+    # Upper bound is deliberate: this server leans on framework internals
+    # (the tool-registration monkeypatch and ToolAnnotations field names),
+    # and 2.0 renamed read_only_hint out from under us on a major bump.
+    "mcp>=2.0.0,<3",  # ported to the MCPServer API in #103; 1.x lacks mcp.server.mcpserver
     "pydantic>=2.0.0",
     "pydantic-settings>=2.3.0",
     "httpx>=0.27.0",
