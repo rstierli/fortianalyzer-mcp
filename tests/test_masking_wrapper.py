@@ -986,10 +986,11 @@ class TestKeepSetAcrossBothPasses:
     def test_kept_name_stays_clear_in_prose_even_when_a_composite_masked_it(
         self, masker: OutputMasker
     ):
-        # A URL host reaches the masker through the composite path, which does
-        # not consult the keep set, so the name can still land in the mapping.
-        # Pass 2 must refuse it anyway, or the prose prints a token for a name
-        # the response shows in clear.
+        # Written when the URL composite still masked a kept host, which put
+        # the name into the mapping for pass 2 to substitute. Pass 1 no longer
+        # does that, so this now pins the composed result rather than the
+        # pass-2 guard alone; ``TestPassTwoRefusesKeptValues`` pins the guard
+        # itself, which stays as the layer under this one.
         name = "fgt-branch-01"
         masked = masker.mask_result(
             {"devname": name, "url": f"https://{name}/admin", "msg": f"seen on {name}"}
@@ -999,12 +1000,12 @@ class TestKeepSetAcrossBothPasses:
         assert masked["msg"] == f"seen on {name}"
 
     def test_kept_name_stays_clear_in_a_breakdown_bucket(self, masker: OutputMasker):
-        # The pass-2 breakdown handler (#109) is a second route into prose, and
-        # it only became constructible once #112 landed: it needs the flag off,
-        # a composite putting the name into the mapping, and a TEXT dimension
-        # echoing it. Resolve the merge without threading ``keep`` into that
-        # handler and every gate still passes while the bucket prints a token
-        # for the name ``devname`` shows in clear, two keys away.
+        # The pass-2 breakdown handler (#109) is a second route into prose.
+        # Written against the #112 merge, where a composite still seeded the
+        # mapping and dropping ``keep`` from this handler printed a token for
+        # the name ``devname`` showed in clear. Pass 1 no longer seeds it, so
+        # like the test above this now pins the composed result; the handler's
+        # own ``keep`` argument is pinned by ``TestPassTwoRefusesKeptValues``.
         name = "fgt-branch-01"
         masked = masker.mask_result(
             {
@@ -1019,6 +1020,158 @@ class TestKeepSetAcrossBothPasses:
         assert masked["msg"] == f"seen on {name} overnight"
         assert masked["breakdowns"]["msg"][0]["value"] == f"seen on {name} overnight"
 
+    def test_kept_name_stays_clear_under_a_list_valued_typed_key(self, masker: OutputMasker):
+        # #112 put the keep guard on the typed-scalar STRING branch only. The
+        # list branch beside it masks each element straight through
+        # ``_mask_scalar``, so a device named in a list-valued typed field
+        # tokenises beside its own clear ``devname`` -- item 5 again, one
+        # branch across.
+        name = "fgt-branch-01"
+        masked = masker.mask_result({"devname": name, "srcname": [name]})
+
+        assert masked["devname"] == name
+        assert masked["srcname"] == [name]
+
+    def test_kept_name_stays_clear_in_a_prefixed_group_by(self, masker: OutputMasker):
+        # ``groupby1`` types its value by the field name it carries. A
+        # device-identity field name drops out of the type table with the flag
+        # off, but any other typed name still resolves and masked the value.
+        name = "fgt-branch-01"
+        masked = masker.mask_result({"devname": name, "groupby1": f"hostname:{name}"})
+
+        assert masked["groupby1"] == f"hostname:{name}"
+
+    def test_kept_name_stays_clear_inside_a_json_blob(self, masker: OutputMasker):
+        # The incident ``grpby`` blob is re-walked by pass 1, and the walk was
+        # started without the keep set: the same key and the same string form
+        # stayed clear at the top level and tokenised one level in.
+        name = "fgt-branch-01"
+        masked = masker.mask_result({"devname": name, "grpby": f'{{"srcname": "{name}"}}'})
+
+        assert masked["grpby"] == f'{{"srcname": "{name}"}}'
+
+    def test_kept_name_stays_clear_whatever_case_it_is_written_in(self, masker: OutputMasker):
+        # Device names are routinely uppercase live, and two things fold case
+        # before the value is compared: urlsplit lowercases the host it
+        # returns, and a sibling field may simply spell the name differently
+        # from the key the keep set was built from. The engine already folds
+        # case for every type except USERNAME, so both spellings mask to one
+        # token -- which is exactly what makes the mismatch a leak rather
+        # than a cosmetic difference: the reader sees the name in clear under
+        # ``devname`` and its token beside it.
+        name = "FW-BRANCH-01"
+        masked = masker.mask_result(
+            {
+                "devname": name,
+                "url": f"https://{name}/admin",
+                "http_url": f"https://{name}/x",
+                "srcname": name.lower(),
+            }
+        )
+
+        assert masked["devname"] == name
+        assert masked["srcname"] == name.lower()
+        # Both URL handlers hand back the response's own spelling. Letting the
+        # value fall through to the scalar path instead would keep it out of a
+        # token but return urlsplit's lowercased copy, so the host would no
+        # longer match the ``devname`` printed beside it.
+        assert masked["url"].startswith(f"https://{name}/")
+        assert masked["http_url"] == f"https://{name}/x"
+
+    def test_a_kept_username_still_respects_case(self, masker: OutputMasker):
+        # The engine does NOT fold case for usernames, so two spellings are
+        # two principals and the case-insensitive match must not reach them.
+        # A device named ADMIN must not exempt a user called admin.
+        masked = masker.mask_result({"devname": "ADMIN", "user": "admin"})
+
+        assert masked["devname"] == "ADMIN"
+        assert masked["user"] != "admin"
+
+    def test_kept_name_stays_clear_in_a_url_host(self, masker: OutputMasker):
+        # The URL handlers mask the host component through the same scalar
+        # path every typed field uses, so a device reached as a URL host
+        # tokenised beside its own clear ``devname``.
+        name = "fgt-branch-01"
+        masked = masker.mask_result(
+            {"devname": name, "url": f"https://{name}/admin", "http_url": f"https://{name}/x"}
+        )
+
+        assert masked["url"].startswith(f"https://{name}/")
+        assert masked["http_url"].startswith(f"https://{name}/")
+
+    def test_kept_name_stays_clear_in_the_unparseable_fallbacks(self, masker: OutputMasker):
+        # Both keep-less ``mask_text`` fallbacks (a ``grpby`` that is not JSON
+        # after all, a ``http_url`` with no parseable host) substitute from
+        # the pass-1 mapping, so they leaked as soon as any route seeded a
+        # kept value into it.
+        name = "fgt-branch-01"
+        masked = masker.mask_result(
+            {
+                "devname": name,
+                "srcname": [name],
+                "grpby": f"not json at all: {name}",
+                "http_url": f"::: {name} :::",
+            }
+        )
+
+        assert masked["grpby"] == f"not json at all: {name}"
+        assert masked["http_url"] == f"::: {name} :::"
+
+    def test_kept_name_stays_clear_in_the_sibling_typed_pairs(self, masker: OutputMasker):
+        # The four sibling-typed handlers run before the allowlist walk and
+        # took no keep set at all, so a device reached as an enriched
+        # indicator, a beaconing destination or a reporting principal masked
+        # while ``devname`` showed it in clear on the same record. How likely
+        # each shape is varies; the keep contract does not, which is why #73
+        # item 5 was decided per value rather than per key.
+        name = "fgt-branch-01.corp.example.com"
+
+        assert masker.mask_result({"devname": name, "value": name, "type": "domain"})["value"] == (
+            name
+        )
+        assert masker.mask_result({"devname": name, "value": f"https://{name}/x", "type": "url"})[
+            "value"
+        ].startswith(f"https://{name}/")
+        assert (
+            masker.mask_result({"devname": name, "incident_reporter": name, "reporter": name})[
+                "incident_reporter"
+            ]
+            == name
+        )
+        assert masker.mask_result({"devname": name, "threat": name, "obf_url": name})["threat"] == (
+            name
+        )
+
+    def test_kept_name_stays_clear_in_a_compiled_filter_entry(self, masker: OutputMasker):
+        # ``filter_applied`` echoes the compiled filter back. Its handler
+        # receives the keep set but typed each entry's value through
+        # ``_mask_scalar`` without passing it on, so the echo printed a token
+        # for the name ``devname`` shows in clear on the same record. Missed
+        # twice: once when this route was written, once when every other
+        # route was threaded, because ``_mask_scalar`` still had a default
+        # that made the omission silent. It no longer has one.
+        name = "fgt-branch-01"
+        masked = masker.mask_result({"devname": name, "filter_applied": [["srcname", "==", name]]})
+
+        assert masked["devname"] == name
+        assert masked["filter_applied"] == [["srcname", "==", name]]
+
+    def test_kept_names_stay_clear_inside_a_comma_joined_value(self, masker: OutputMasker):
+        # FAZ joins aggregated device names into one value, and the keep set
+        # is built by splitting that form -- so it holds the parts, never the
+        # join. An ``x in keep`` test at a call site therefore misses the
+        # joined string; only the per-part check inside ``_mask_scalar`` sees
+        # it. ``target`` is the shape that carries both forms live.
+        joined = "fgt-branch-01,fgt-branch-02"
+        masked = masker.mask_result(
+            {
+                "fortigate": joined,
+                "target": [{"name": "device", "value": joined}],
+            }
+        )
+
+        assert masked["target"][0]["value"] == joined
+
     def test_unrelated_identifier_still_masks_when_keep_set_is_present(self, masker: OutputMasker):
         # The keep set must not become a blanket exemption: a different
         # identifier in the same response still masks normally.
@@ -1032,3 +1185,54 @@ class TestKeepSetAcrossBothPasses:
 
         assert "nas-branch.example.com" not in str(masked)
         assert masked["msg"] == f"seen on {masked['hostname']}"
+
+
+class TestPassTwoRefusesKeptValues:
+    """Pass 2's ``keep`` guard, pinned at the pass rather than end to end.
+
+    Every pass-1 route now refuses kept values, so no whole-response input
+    can put one into the mapping any more -- which means an end-to-end test
+    can no longer distinguish a pass 2 that honours ``keep`` from one that
+    ignores it. The guard is still wanted: it is the layer that caught the
+    #112/#109 composition trap, and pass 1 gaining a new composite handler
+    is exactly the change that would seed the mapping again.
+
+    Calling the pass directly is deliberate, and the only place this file
+    does it. The alternative was leaving five handlers' ``keep`` arguments
+    unpinned and removable without a failing test.
+    """
+
+    KEPT = "fgt-branch-01"
+    TOKEN = "host-2a85-1uk-r2r2yn0nv"
+
+    def _pass_two(self, masker: OutputMasker, obj: object) -> object:
+        # A mapping that would substitute the kept name, as a pass-1 handler
+        # that forgot the keep set would have left it.
+        return masker._mask_free_text(obj, {self.KEPT: self.TOKEN}, frozenset({self.KEPT}))
+
+    def test_prose_keeps_it(self, masker: OutputMasker):
+        out = self._pass_two(masker, {"msg": f"seen on {self.KEPT} overnight"})
+
+        assert out == {"msg": f"seen on {self.KEPT} overnight"}
+
+    def test_breakdown_bucket_keeps_it(self, masker: OutputMasker):
+        out = self._pass_two(
+            masker, {"breakdowns": {"msg": [{"value": f"seen on {self.KEPT}", "count": 3}]}}
+        )
+
+        assert out["breakdowns"]["msg"][0]["value"] == f"seen on {self.KEPT}"
+
+    def test_filter_entries_keep_it(self, masker: OutputMasker):
+        out = self._pass_two(masker, {"filter_applied": [f"devname=={self.KEPT}"]})
+
+        assert out["filter_applied"] == [f"devname=={self.KEPT}"]
+
+    def test_an_unkept_value_still_substitutes(self, masker: OutputMasker):
+        # Negative control: the same call path with an empty keep set must
+        # still replace the mapped value, or these tests would pass against a
+        # pass 2 that had simply stopped substituting anything.
+        out = masker._mask_free_text(
+            {"msg": f"seen on {self.KEPT} overnight"}, {self.KEPT: self.TOKEN}, frozenset()
+        )
+
+        assert out == {"msg": f"seen on {self.TOKEN} overnight"}
