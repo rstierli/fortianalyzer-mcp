@@ -6,7 +6,7 @@ import logging
 from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import BaseModel
 from pydantic import ValidationError as PydanticValidationError
@@ -45,15 +45,21 @@ if settings.MCP_ALLOWED_HOSTS:
         allowed_hosts=settings.MCP_ALLOWED_HOSTS,
     )
 
-# Create FastMCP server.
+# Create the MCP server.
 #
 # Lifecycle ownership of the process-global ``faz_client`` is deliberately held
 # by exactly one path: ``run_http``'s ``app_lifespan`` in HTTP mode and
-# ``run_stdio`` in stdio mode. We do NOT pass a FastMCP ``lifespan`` here: with
+# ``run_stdio`` in stdio mode. We do NOT pass a ``lifespan`` here: with
 # ``stateless_http=True`` that lifespan runs per request/session, so it would
 # connect and then *disconnect* the shared client around every call, dropping the
 # session out from under concurrent requests.
-mcp = FastMCP(
+#
+# ``stateless_http`` and ``transport_security`` are NOT constructor arguments on
+# mcp 2.x -- they moved to the transport layer, so they are passed to
+# ``streamable_http_app()`` in ``run_http`` instead. Both still have to be set:
+# dropping them here without setting them there would silently make the HTTP
+# deployment stateful and unbound by the allowed-hosts list.
+mcp = MCPServer(
     "FortiAnalyzer API Server",
     # Cross-cutting usage guidance that no single tool docstring can carry --
     # chiefly that ``tid`` means five incompatible things across the async
@@ -61,8 +67,6 @@ mcp = FastMCP(
     # section is appended only when masking is on, so a default deployment does
     # not pay handshake tokens for advice about tokens it will never emit.
     instructions=build_instructions(masking_enabled=settings.MASKING_ENABLED),
-    stateless_http=True,  # Stateless for Docker deployment
-    transport_security=_transport_security,
 )
 
 if settings.MASKING_ENABLED:
@@ -95,7 +99,7 @@ def health_check() -> str:
 def _coerce_model_list(
     raw: object, model: type[BaseModel], param: str, shape: str
 ) -> list[BaseModel]:
-    """Validate a caller's list-of-models parameter, as FastMCP would have.
+    """Validate a caller's list-of-models parameter, as MCPServer would have.
 
     ``execute_advanced_tool`` invokes tool functions directly, so the protocol
     layer that turns JSON arguments into typed parameters never runs and a
@@ -108,7 +112,7 @@ def _coerce_model_list(
 
     Any tool parameter typed ``list[SomeModel]`` needs an entry in
     ``_STRUCTURED_PARAMS`` or it breaks in dynamic mode only — full mode keeps
-    working because FastMCP coerces there, which is what made this class of bug
+    working because MCPServer coerces there, which is what made this class of bug
     easy to ship.
 
     Raises:
@@ -282,7 +286,7 @@ _CATEGORY_DESCRIPTIONS: Mapping[str, str] = {
 
 
 # Dynamic mode: lightweight discovery tools
-def register_dynamic_tools(mcp_server: FastMCP) -> None:
+def register_dynamic_tools(mcp_server: MCPServer) -> None:
     """Register discovery tools for dynamic mode only."""
 
     @mcp_server.tool(annotations=READ_ONLY_LOCAL)
@@ -511,7 +515,7 @@ def run_stdio() -> None:
             logger.warning(f"FortiAnalyzer connection failed: {e}. Server will still start.")
 
         try:
-            # Run FastMCP in stdio mode
+            # Run MCPServer in stdio mode
             await mcp.run_stdio_async()
         finally:
             # Cleanup
@@ -660,7 +664,15 @@ def run_http() -> None:
     app = Starlette(
         routes=[
             Route("/health", health_endpoint, methods=["GET"]),
-            Mount("/", app=mcp.streamable_http_app()),
+            # stateless_http/transport_security live here on mcp 2.x; see the
+            # MCPServer construction above.
+            Mount(
+                "/",
+                app=mcp.streamable_http_app(
+                    stateless_http=True,  # Stateless for Docker deployment
+                    transport_security=_transport_security,
+                ),
+            ),
         ],
         lifespan=app_lifespan,
         middleware=middleware,

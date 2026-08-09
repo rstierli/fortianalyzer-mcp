@@ -3,7 +3,7 @@
 Masks every tool result before it leaves the MCP toward the LLM. There is
 no central tool-registration function to hook (tool modules self-register
 with module-level ``@mcp.tool(...)`` at import time), so ``install_masking``
-patches ``mcp.tool`` on the shared FastMCP instance BEFORE the tool
+patches ``mcp.tool`` on the shared MCPServer instance BEFORE the tool
 modules are imported; every subsequently registered tool is wrapped.
 
 Masking runs in two passes over the result, because a value is only safe
@@ -1385,12 +1385,21 @@ def install_masking(mcp: Any) -> tuple[OutputMasker, ArgUnmasker]:
         # dict-shaped annotations object is honored too; anything else
         # (positional, absent, unrecognized) computes read_only=False and
         # the tool loses restoration rather than gaining a write path.
+        # Both attribute spellings are read because mcp 2.x renamed the
+        # python-side field to snake_case while keeping the camelCase
+        # constructor alias and the camelCase wire form. Reading only
+        # ``readOnlyHint`` there is not an error -- ``getattr`` returns the
+        # default -- so every read-only tool would silently lose restoration.
+        # The dict branch stays camelCase: a dict is the wire spelling.
         annotations = kwargs.get("annotations")
         if isinstance(annotations, dict):
             read_only = bool(annotations.get("readOnlyHint", False))
+        elif annotations is None:
+            read_only = False
         else:
             read_only = bool(
-                annotations is not None and getattr(annotations, "readOnlyHint", False)
+                getattr(annotations, "read_only_hint", None)
+                or getattr(annotations, "readOnlyHint", None)
             )
 
         def register(fn: Any) -> Any:

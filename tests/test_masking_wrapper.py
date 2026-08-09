@@ -513,10 +513,10 @@ class TestInstallMasking:
     async def test_tools_registered_after_install_are_wrapped(
         self, monkeypatch: pytest.MonkeyPatch
     ):
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.mcpserver import MCPServer
 
         monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
-        mcp = FastMCP("test")
+        mcp = MCPServer("test")
         install_masking(mcp)
 
         @mcp.tool()
@@ -529,7 +529,7 @@ class TestInstallMasking:
         assert result["logs"][0]["user"].startswith("user-")
 
     def test_install_without_key_fails_loud(self, monkeypatch: pytest.MonkeyPatch):
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.mcpserver import MCPServer
 
         import fortianalyzer_mcp.utils.config as config_mod
         from fortianalyzer_mcp.masking.fpe_engine import MaskingError
@@ -542,7 +542,7 @@ class TestInstallMasking:
             config_mod, "get_settings", lambda: _settings_with(FAZ_MASKING_KEY=None)
         )
         with pytest.raises(MaskingError, match="FAZ_MASKING_KEY"):
-            install_masking(FastMCP("test"))
+            install_masking(MCPServer("test"))
 
     def test_key_resolves_from_settings_when_not_in_environment(
         self, monkeypatch: pytest.MonkeyPatch
@@ -551,13 +551,13 @@ class TestInstallMasking:
         reads FAZ_MASKING_KEY from os.environ. If the key lives only in .env
         (as the README documents), install_masking must bridge it or the
         server crashes fail-closed on startup. A real env var still wins."""
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.mcpserver import MCPServer
 
         import fortianalyzer_mcp.utils.config as config_mod
 
         monkeypatch.delenv("FAZ_MASKING_KEY", raising=False)
         monkeypatch.setattr(config_mod, "get_settings", lambda: _settings_with(FAZ_MASKING_KEY=KEY))
-        masker, _ = install_masking(FastMCP("test"))
+        masker, _ = install_masking(MCPServer("test"))
         assert masker is not None
         # the bridge exported it so the engine and placeholder key both see it
         import os
@@ -708,10 +708,10 @@ class TestMutatingToolGate:
     """
 
     def _install(self, monkeypatch: pytest.MonkeyPatch):
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.mcpserver import MCPServer
 
         monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
-        mcp = FastMCP("test-gate")
+        mcp = MCPServer("test-gate")
         install_masking(mcp)
         return mcp
 

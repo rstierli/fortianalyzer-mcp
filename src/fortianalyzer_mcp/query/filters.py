@@ -92,7 +92,7 @@ _MULTI_VALUE_OPS = frozenset({"in", "not_in"})
 class FilterCondition(BaseModel):
     """One field/operator/value condition, independent of dialect.
 
-    A Pydantic model rather than a dict so FastMCP publishes a real JSON schema
+    A Pydantic model rather than a dict so MCPServer publishes a real JSON schema
     for it -- including the ``op`` enum, which is what stops an invalid operator
     at the protocol boundary instead of at the appliance.
     """

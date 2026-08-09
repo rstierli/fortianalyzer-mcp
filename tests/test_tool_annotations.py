@@ -91,7 +91,10 @@ EXPECTED_DYNAMIC_SURFACE = {
     "list_fortianalyzer_categories",
 }
 
-HINT_FIELDS = ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint")
+#: Python-side attribute names. mcp 2.x renamed these to snake_case while
+#: keeping the camelCase constructor aliases and the camelCase wire form,
+#: so the CATEGORIES below still spell them camelCase when constructing.
+HINT_FIELDS = ("read_only_hint", "destructive_hint", "idempotent_hint", "open_world_hint")
 
 #: Env vars the loader sets. Snapshotted and restored around the fixture.
 _TOUCHED_ENV = (
@@ -287,7 +290,7 @@ def test_full_mode_registers_the_whole_surface(full_tools: dict[str, Any]) -> No
 def test_full_mode_mutating_set_is_frozen(full_tools: dict[str, Any]) -> None:
     """The write surface is exactly EXPECTED_MUTATING -- no more, no less."""
     actual = {
-        name for name, tool in full_tools.items() if tool.annotations.readOnlyHint is not True
+        name for name, tool in full_tools.items() if tool.annotations.read_only_hint is not True
     }
     expected = set(EXPECTED_MUTATING)
 
@@ -314,7 +317,7 @@ def test_full_mode_mutating_categories_match(full_tools: dict[str, Any]) -> None
 def test_dynamic_mode_mutating_set_is_frozen(dynamic_tools: dict[str, Any]) -> None:
     """Dynamic mode's write surface is execute_advanced_tool alone."""
     actual = {
-        name for name, tool in dynamic_tools.items() if tool.annotations.readOnlyHint is not True
+        name for name, tool in dynamic_tools.items() if tool.annotations.read_only_hint is not True
     }
     assert actual == set(EXPECTED_MUTATING_DYNAMIC), (
         f"dynamic-mode write surface changed: {sorted(actual)}"
@@ -331,7 +334,7 @@ def test_open_world_is_false_only_for_the_local_catalogue_tools(
         name
         for tools in (full_tools, dynamic_tools)
         for name, tool in tools.items()
-        if tool.annotations.openWorldHint is False
+        if tool.annotations.open_world_hint is False
     }
     assert closed == EXPECTED_LOCAL, (
         f"openWorldHint=False set changed: {sorted(closed)}; a tool that queries "

@@ -326,12 +326,12 @@ class TestRoundTrip:
     async def test_wrapped_tool_unmasks_args_and_masks_output(
         self, monkeypatch: pytest.MonkeyPatch, engine: FPEEngine
     ):
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.mcpserver import MCPServer
 
         from fortianalyzer_mcp.tool_annotations import READ_ONLY
 
         monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
-        mcp = FastMCP("test")
+        mcp = MCPServer("test")
         install_masking(mcp)
         seen: dict[str, str] = {}
 
@@ -357,10 +357,10 @@ class TestRoundTrip:
         token) and a second pass over a first-pass token can fail closed
         into a placeholder. Found by the flag-on live round: 8 of 8
         fortiview threat rows arrived double-masked, 2 as placeholders."""
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.mcpserver import MCPServer
 
         monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
-        mcp = FastMCP("test")
+        mcp = MCPServer("test")
         install_masking(mcp)
 
         @mcp.tool()

@@ -67,7 +67,7 @@ skip_if_dynamic_mode = pytest.mark.skipif(
 def _registered_tool_names() -> set[str]:
     """Every tool name registered in full mode, minus the one deliberate exception.
 
-    Read from FastMCP, not from `tools.__all__`: that list holds the ten tool
+    Read from MCPServer, not from `tools.__all__`: that list holds the ten tool
     *modules*, never the tool functions, so using it here would compare the
     catalogue against the wrong thing and pass while saying nothing.
 

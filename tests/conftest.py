@@ -37,7 +37,7 @@ def import_dispatcher_isolated(*names: str) -> tuple[Any, ...]:
     ``test_tool_catalogue_parity.py``), and doing so in a way that depended
     on which of the eleven files happened to collect first.
 
-    A throwaway ``FastMCP`` substitute for the duration of the import would
+    A throwaway ``MCPServer`` substitute for the duration of the import would
     also stop the registration leak, but changes ``faz_skill``'s own
     *behavior*: ``install_masking()`` (``masking/wrapper.py``) patches
     ``mcp.tool`` on the real, process-global singleton to wrap every
@@ -46,7 +46,7 @@ def import_dispatcher_isolated(*names: str) -> tuple[Any, ...]:
     ``MASKING_ENABLED=true``, silently testing a differently-behaved
     function than a real deployment (or ``FAZ_SKILLS_ENABLED=true``) would
     have. (This is exactly what the first version of this fix, isolating via
-    a substitute ``FastMCP``, got wrong: it made a masked-suite failure that
+    a substitute ``MCPServer``, got wrong: it made a masked-suite failure that
     predates this plan -- ``test_skills_network_context.py``'s
     ``test_success_envelope_with_serialized_gap`` -- disappear depending on
     which test file happened to import the dispatcher first, rather than

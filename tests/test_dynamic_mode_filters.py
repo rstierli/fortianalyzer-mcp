@@ -1,6 +1,6 @@
 """Structured ``filters`` must survive the dynamic-mode dispatch path.
 
-Full mode gets dict-to-model coercion for free: FastMCP validates a caller's
+Full mode gets dict-to-model coercion for free: MCPServer validates a caller's
 JSON into ``FilterCondition`` models before a tool body runs, which is the
 assumption ``TestCompilerRequiresModelsNotDicts`` pins. Dynamic mode's
 ``execute_advanced_tool`` bypasses that layer -- it invokes the raw tool
@@ -10,7 +10,7 @@ buried it in a generic ``faz_operation_failed``. Structured filters were
 silently unusable on the whole dynamic surface (``query_logs``,
 ``search_devices``, ``list_tasks``); found in review of #94.
 
-The dispatch path therefore has to perform the validation FastMCP would
+The dispatch path therefore has to perform the validation MCPServer would
 have: dicts become models before the tool runs, and a malformed condition
 is rejected with the standard ``validation_error`` envelope instead of
 reaching a compiler.
@@ -27,7 +27,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from fortianalyzer_mcp.query.filters import FilterCondition
 from fortianalyzer_mcp.server import register_dynamic_tools
@@ -36,13 +36,13 @@ from fortianalyzer_mcp.tools import dvm_tools, ioc_tools
 
 @pytest.fixture(scope="module")
 def execute_advanced_tool() -> Any:
-    """The dispatcher off a private FastMCP instance, not the global one.
+    """The dispatcher off a private MCPServer instance, not the global one.
 
     ``register_dynamic_tools`` only needs a server to hang tools on; using a
     fresh instance keeps this module independent of ``FAZ_TOOL_MODE`` in the
     test environment.
     """
-    server = FastMCP("dynamic-filters-test")
+    server = MCPServer("dynamic-filters-test")
     register_dynamic_tools(server)
     tools = {tool.name: tool for tool in server._tool_manager.list_tools()}
     return tools["execute_advanced_tool"].fn

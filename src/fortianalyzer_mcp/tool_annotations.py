@@ -48,31 +48,31 @@ from mcp.types import ToolAnnotations
 #: ``fetch_*``, the TID-creating queries, the local-file writers and the
 #: ``faz_skill`` dispatcher (whose skills are all readers by contract).
 READ_ONLY = ToolAnnotations(
-    readOnlyHint=True,
-    destructiveHint=False,
-    idempotentHint=True,
-    openWorldHint=True,
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=True,
 )
 
 #: Reads nothing outside this process. Only the dynamic-mode discovery
 #: tools, which answer from an in-process catalogue and never reach the
-#: network -- hence ``openWorldHint=False``, the one place in this server
+#: network -- hence ``open_world_hint=False``, the one place in this server
 #: where that field is not true.
 READ_ONLY_LOCAL = ToolAnnotations(
-    readOnlyHint=True,
-    destructiveHint=False,
-    idempotentHint=True,
-    openWorldHint=False,
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=False,
 )
 
 #: Adds new state to FortiAnalyzer. Additive, so not destructive; a
 #: repeat call adds again (a second device, a second comment, a second
 #: rescan job), so not idempotent.
 CREATES = ToolAnnotations(
-    readOnlyHint=False,
-    destructiveHint=False,
-    idempotentHint=False,
-    openWorldHint=True,
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=False,
+    open_world_hint=True,
 )
 
 #: Flips a reversible flag on existing FortiAnalyzer state. Not
@@ -80,10 +80,10 @@ CREATES = ToolAnnotations(
 #: undoes it -- and idempotent because acknowledging an acknowledged
 #: alert is a no-op.
 UPDATES = ToolAnnotations(
-    readOnlyHint=False,
-    destructiveHint=False,
-    idempotentHint=True,
-    openWorldHint=True,
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=True,
 )
 
 #: Removes FortiAnalyzer state, or replaces it with no recovery path.
@@ -91,10 +91,10 @@ UPDATES = ToolAnnotations(
 #: value is unrecoverable afterwards, which is what "destructive update"
 #: means in the spec as opposed to "additive only".
 DESTRUCTIVE = ToolAnnotations(
-    readOnlyHint=False,
-    destructiveHint=True,
-    idempotentHint=True,
-    openWorldHint=True,
+    read_only_hint=False,
+    destructive_hint=True,
+    idempotent_hint=True,
+    open_world_hint=True,
 )
 
 #: Dispatches to an arbitrary tool chosen by name at call time, so its
@@ -104,10 +104,10 @@ DESTRUCTIVE = ToolAnnotations(
 #: the server: one tool that advertises "changes nothing" while exposing
 #: every mutating operation behind a string argument.
 UNCONSTRAINED = ToolAnnotations(
-    readOnlyHint=False,
-    destructiveHint=True,
-    idempotentHint=False,
-    openWorldHint=True,
+    read_only_hint=False,
+    destructive_hint=True,
+    idempotent_hint=False,
+    open_world_hint=True,
 )
 
 #: Every approved category, by name. The annotation contract test asserts
