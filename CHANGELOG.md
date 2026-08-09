@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.13.0] - 2026-08-09
+
+Minor release: the output masker now honours the keep set on every pass-1 route, and the server runs on the mcp 2.0 API with the `<2` pin lifted.
+
+### Fixed
+- **Keep set honoured on every pass-1 route (#113, closes #73 item 5).** With `FAZ_MASK_DEVICE_IDENTITY` off, a device-identity value stays readable under every key, so a response never shows a token beside the cleartext it stands for. That guarantee was enforced on one pass-1 route plus pass 2; the other routes bypassed it, and a name that appeared under `devname` could still tokenise two keys away. The check now lives in `_mask_scalar`, which every pass-1 route reaches, and folds case for every type except usernames: the engine normalises case before encrypting, so two spellings of a hostname are one identity, whereas usernames are not folded and two spellings are two principals. `keep` is now a required keyword argument, so omitting it on a new route is a type error rather than a silent leak.
+
+### Changed
+- **Ported to the mcp 2.0 `MCPServer` API; the `<2` pin is lifted to `>=2,<3` (#114).** The read-only tool-annotation gate now reads `read_only_hint`, the 2.0 field name, alongside the older `readOnlyHint` that a 1.x-only read would have taken as false on 2.0. The wire format stays camelCase and the HTTP mount path is unchanged, so clients see no difference.
+
 ## [2.12.0] - 2026-08-06
 
 Minor release, breaking change to the tool surface: honest server-side aggregation on `query_logs` (`group_by`, `sample_by`, `count_only`) and a thirteen-tool consolidation into three (85 → 73) now that every removed tool's parameters are expressible on its replacement.
