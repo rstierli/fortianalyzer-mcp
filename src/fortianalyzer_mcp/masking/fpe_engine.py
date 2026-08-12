@@ -84,10 +84,18 @@ import base64
 import hashlib
 import hmac
 import ipaddress
+import logging
 import os
 import re
 
 from ff3 import FF3Cipher
+
+# The only logging this module does is the v2 tag-verification failure. It
+# is the one signal that separates a forgery grind from ordinary traffic,
+# and the 32-bit tag size is only defensible while repeated failures are
+# visible (#40). Nothing else here logs, and no value, token or key
+# material is ever passed to it.
+logger = logging.getLogger(__name__)
 
 # Alphabet for string-typed values (hostnames, domains, email parts).
 # 40 chars -> FF3-1 bounds are minLen 4 / maxLen 36. ``~`` is the pad
@@ -174,6 +182,54 @@ _V2_TAG_RE = re.compile(rf"^[0-9a-f]{{{V2_TAG_HEX}}}$")
 #: named here so the shared vocabulary is pinned once rather than changed
 #: twice. Whether a ``serialno`` field ends up emitting ``serial`` or
 #: ``hostname`` is still open on #40.
+#: Envelope marker per value type. ``ip4``/``ip6``/``mac``/``sn`` are the
+#: spellings that already shipped in fortimanager-mcp's reserved vocabulary
+#: (``masking/tokens.py``, ``PREFIX_MARKERS``), and ``host``/``user``/``url``
+#: are this server's existing v1 prefixes, reused so a v1 and a v2 token of
+#: the same type share a marker and the shape gate below is what separates
+#: them.
+#:
+#: Suffix-marked types (``domain``, ``email_local``) are deliberately absent.
+#: Their v2 spelling puts the tag inside a dotted label rather than after a
+#: hyphen, which is a different parse, and they already carry a marker and a
+#: key id today, so they are not what the marked-IP work is blocked on.
+V2_MARKERS: dict[str, str] = {
+    "ipv4": "ip4",
+    "ipv6": "ip6",
+    "mac": "mac",
+    "serial": "sn",
+    "hostname": "host",
+    "username": "user",
+    "url_tail": "url",
+}
+
+#: Structural shape of a v2 envelope: ``<marker>-<kid>-<ct>-<tag>``.
+#:
+#: A ciphertext legitimately contains hyphens (the string alphabet has one),
+#: so the payload/tag boundary has to be unambiguous. What makes it so is the
+#: ``$`` anchor plus the fixed width of the tag group, NOT the greediness of
+#: the payload: the tag is the last 8 characters or the match fails, and the
+#: payload is whatever lies between the key id and that.
+#:
+#: Measured, because the obvious reading is that greediness carries it:
+#: making the payload lazy changes nothing on any input, including a
+#: ciphertext that itself ends in a hyphen and 8 hex. That mutant survives
+#: the whole suite and is meant to -- it is equivalent, not uncovered.
+#:
+#: Matching is case-insensitive because a model may re-case a token in prose,
+#: but only the marker, key id and tag are folded afterwards: the username
+#: payload is case-sensitive and is kept exactly as written.
+#: IGNORECASE covers the marker and the hex groups. It does NOT weaken the
+#: username payload: the flag changes what matches, not what is captured, and
+#: ``.+`` matches any character either way, so ``ct`` comes back exactly as
+#: written. Without the flag an upper-cased ``IP4-`` failed the shape match
+#: entirely, which sent a re-cased token to the appliance as a literal.
+_V2_SHAPE_RE = re.compile(
+    r"^(?P<marker>ip4|ip6|mac|sn|url|host|user)-(?P<kid>[0-9a-f]{4})-"
+    r"(?P<ct>.+)-(?P<tag>[0-9a-f]{8})$",
+    re.IGNORECASE,
+)
+
 V2_TYPES = frozenset(
     {"ipv4", "ipv6", "mac", "serial", "hostname", "username", "domain", "email_local", "url_tail"}
 )
@@ -370,6 +426,107 @@ class FPEEngine:
         if not _V2_TAG_RE.match(candidate):
             return False
         return hmac.compare_digest(candidate, expected)
+
+    # ------------------------------------------------------------------ #
+    # v2 envelope: mint, shape, open (#40)                                #
+    # ------------------------------------------------------------------ #
+
+    def v2_token(self, vtype: str, ct: str) -> str:
+        """Wrap a ciphertext in a v2 envelope: ``<marker>-<kid>-<ct>-<tag>``.
+
+        ``ct`` is the v1 ciphertext for ``vtype``, unchanged: the cipher,
+        chunking and alphabets are untouched by v2, which only adds the
+        envelope around them.
+        """
+        try:
+            marker = V2_MARKERS[vtype]
+        except KeyError:
+            raise MaskingError(f"no v2 envelope for value type: {vtype!r}") from None
+        payload = self._v2_payload_out(vtype, ct)
+        return f"{marker}-{self._key_id}-{payload}-{self.v2_tag(vtype, payload)}"
+
+    @staticmethod
+    def is_v2_shaped(token: str) -> bool:
+        """Does this text have the full shape of a v2 envelope?
+
+        The shape gate settled on #40 rests on this predicate: a token that
+        LOOKS like v2 is committed to v2 and never falls back to the v1
+        path, whatever happens next. Without that, a v2 token with a flipped
+        tag is still a byte-valid v1 token (the tag's hex and hyphen are both
+        inside the v1 alphabet), so the v1 path would decrypt it to plausible
+        garbage and forgery refusal would not hold for any of the prefix
+        types until the deprecation window closed.
+
+        The measured cost is a false refusal for a v1 token whose ciphertext
+        happens to end in a hyphen plus 8 lowercase hex: 1.6e-5 per token,
+        (1/40) * (16/40)**8 over the 40-character alphabet. It fails closed
+        and loudly, which is the trade Roland took.
+        """
+        return _V2_SHAPE_RE.match(token.strip()) is not None
+
+    def v2_open(self, token: str) -> str:
+        """Verify and decrypt a v2 envelope, returning the real value.
+
+        Total over untrusted text: this is handed token-shaped strings a
+        model supplied.
+
+        Raises:
+            MaskingError: If the shape, key id, tag or payload is wrong. The
+                caller must NOT retry such a token on the v1 path -- see
+                :meth:`is_v2_shaped`. Refusal is the point; a refused token
+                is recoverable in a way a silent wrong decrypt is not.
+        """
+        match = _V2_SHAPE_RE.match(token.strip())
+        if match is None:
+            raise MaskingError("not a v2 token")
+        marker = match.group("marker").lower()
+        vtype = next(t for t, m in V2_MARKERS.items() if m == marker)
+        # Username ciphertext is case-sensitive; every other payload is
+        # lowercase by construction and folding tolerates a re-cased token.
+        payload = match.group("ct") if vtype == "username" else match.group("ct").lower()
+        self._check_key_id(match.group("kid").lower(), token)
+        if not self.v2_tag_ok(vtype, payload, match.group("tag")):
+            # Deliberately loud: this is the only signal that distinguishes a
+            # forgery grind from ordinary traffic, and the 32-bit tag is only
+            # safe if repeated failures are visible. The token is not logged,
+            # since it is attacker-influenced text.
+            logger.warning("v2 token failed tag verification (type=%s); refused", vtype)
+            raise MaskingError("tag mismatch: forged or corrupted token")
+        return self._v2_decrypt(vtype, payload)
+
+    def _v2_decrypt(self, vtype: str, payload: str) -> str:
+        """Decrypt a verified v2 payload through the existing v1 ciphers."""
+        if vtype == "ipv4":
+            return self.unmask_ip(payload)
+        if vtype == "ipv6":
+            return self.unmask_ip(str(ipaddress.IPv6Address(int(payload, 16))))
+        if vtype == "mac":
+            return self.unmask_mac(":".join(payload[i : i + 2] for i in range(0, 12, 2)))
+        if vtype == "serial":
+            return self.unmask_serial(f"sn-{self._key_id}-{payload}")
+        if vtype == "hostname":
+            return self._decrypt_str("hostname", payload)
+        if vtype == "username":
+            return self._decrypt_str("username", payload)
+        return self.unmask_url_tail(f"url-{self._key_id}-{payload}")
+
+    @staticmethod
+    def _v2_payload_out(vtype: str, ct: str) -> str:
+        """Spell a ciphertext for the envelope. Colon-free, settled on #40.
+
+        IPv6 and MAC ciphertexts are addresses in v1 and become plain hex
+        here. Colons inside a token broke three things at once: ``urlsplit``
+        raises on a v2 IPv6 token used as a URL host (measured on 3.12), so a
+        re-masked echo burned to an irreversible placeholder; the mint sites
+        re-bracket on a colon; and the free-text ``_MAC_RE`` matched the
+        address sitting inside a ``mac-`` envelope. Hex closes all three, and
+        v2 gave up looking like an address the moment it grew a marker.
+        """
+        if vtype == "ipv6":
+            return format(int(ipaddress.IPv6Address(ct.strip())), "032x")
+        if vtype == "mac":
+            return ct.replace(":", "").replace("-", "").lower()
+        return ct
 
     # ------------------------------------------------------------------ #
     # IP addresses                                                       #
