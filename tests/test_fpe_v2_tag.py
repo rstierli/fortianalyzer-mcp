@@ -141,22 +141,50 @@ class TestVerification:
         assert not engine.v2_tag_ok("ipv4", ct, f" {tag}")
         assert not engine.v2_tag_ok("ipv4", ct, f"{tag} ")
 
-    def test_a_respelled_ipv6_payload_still_verifies(self, engine: FPEEngine):
-        # Same principle as the re-casing fix: ipaddress treats abcd::1 and
-        # its fully expanded form as one address, so decryption tolerates
-        # both spellings and the tag must too. Otherwise a model that
-        # expands a token in prose produces something that decrypts fine and
-        # fails verification, and gets handed to the appliance as a literal.
+    def test_two_spellings_of_one_ipv6_address_no_longer_tag_alike(self, engine: FPEEngine):
+        # This test previously asserted the opposite, and the reversal is the
+        # point. While v2 payloads were spelled as addresses, "abcd::1" and
+        # its expanded form were one value that both decrypted, so the tag
+        # canonicalised through `ipaddress` to tolerate both.
+        #
+        # #40 settled that a v2 payload carries no colons: an IPv6 ciphertext
+        # is plain hex inside the envelope. Neither string below can be a v2
+        # payload any more, so there is nothing left to reconcile, and the
+        # canonicalisation is gone rather than dormant. They tag differently
+        # now because they are simply different strings, which is what the
+        # rest of the types have always done.
         compressed = "abcd::1"
         expanded = "abcd:0000:0000:0000:0000:0000:0000:0001"
 
-        assert engine.v2_tag("ipv6", compressed) == engine.v2_tag("ipv6", expanded)
-        assert engine.v2_tag_ok("ipv6", expanded, engine.v2_tag("ipv6", compressed))
+        assert engine.v2_tag("ipv6", compressed) != engine.v2_tag("ipv6", expanded)
+
+    def test_a_colon_free_ipv6_payload_tolerates_recasing_and_nothing_else(self, engine: FPEEngine):
+        # What a real v2 IPv6 payload looks like after the format decision,
+        # and the only tolerance it needs: case, because the envelope parser
+        # lowercases and a model may title-case a token in prose.
+        hex_payload = "20010db8000000000000000000000005"
+
+        assert engine.v2_tag_ok("ipv6", hex_payload.upper(), engine.v2_tag("ipv6", hex_payload))
+        # One hex digit different is a different payload, not a respelling.
+        assert not engine.v2_tag_ok(
+            "ipv6", hex_payload[:-1] + "6", engine.v2_tag("ipv6", hex_payload)
+        )
 
     def test_a_non_address_ipv6_payload_is_left_alone(self, engine: FPEEngine):
-        # Canonicalisation must not swallow a payload it cannot parse: that
-        # would silently tag two different unparseable strings the same way.
+        # Two payloads that are not addresses must not collapse onto one tag.
+        # This held via the parse-failure branch before; it now holds because
+        # nothing canonicalises at all.
         assert engine.v2_tag("ipv6", "not-an-address") != engine.v2_tag("ipv6", "also-not-one")
+
+    def test_a_serial_payload_folds_case_like_the_other_string_types(self, engine: FPEEngine):
+        # Serial is the type added with the envelope work, and it is the one
+        # where case looks like it should matter. It does not, here: the
+        # serial's own case is preserved inside the base32 shield, one layer
+        # down, so the ciphertext this tag covers is lowercase by
+        # construction and folding matches what decryption tolerates.
+        ct = engine.mask_serial("FGT60FTK20000001").rsplit("-", 1)[-1]
+
+        assert engine.v2_tag_ok("serial", ct.upper(), engine.v2_tag("serial", ct))
 
     def test_an_unencodable_payload_does_not_verify(self, engine: FPEEngine):
         # A lone surrogate is not valid UTF-8, so building the tag input
@@ -238,11 +266,28 @@ class TestSpecPin:
         # fortimanager-mcp has to reproduce, so it is the actual contract.
         assert engine.v2_tag("ipv4", "248.194.94.248") == "53eecc82"
 
-        # The ipv4 literal above pins the plain path. These pin the two
-        # halves of _v2_canonical_ct, which is shared-format surface too:
-        # fortimanager-mcp has to canonicalise identically or the same value
-        # authenticates on one server and not the other. Both spellings of
-        # the address must give the SAME literal; the username must not fold.
-        assert engine.v2_tag("ipv6", "abcd::1") == "ff087aef"
-        assert engine.v2_tag("ipv6", "abcd:0000:0000:0000:0000:0000:0000:0001") == "ff087aef"
+        # The ipv4 literal above pins the plain path. These pin the rest of
+        # the shared surface: fortimanager-mcp has to reproduce every one of
+        # them or the same value authenticates on one server and not the
+        # other.
+        #
+        # The ipv6 and mac literals changed with #40's colon-free decision.
+        # They used to be spelled as addresses, and the ipv6 pair used to
+        # assert that "abcd::1" and its expanded form gave the SAME literal,
+        # because _v2_canonical_ct reconciled them. A v2 payload carries no
+        # colons now, so these are the hex spellings, there is nothing to
+        # reconcile, and the canonicalisation is gone. Anyone porting must
+        # take the new literals, not the ones in this file's history.
+        assert engine.v2_tag("ipv6", "20010db8000000000000000000000005") == "6bced6a2"
+        assert engine.v2_tag("mac", "54018174f5ef") == "ff5ead5b"
+
+        # serial is new in v2 and is the one type whose ciphertext is base32
+        # under the string cipher, so it can contain the pad character. Its
+        # tag covers that ciphertext verbatim, pad char included.
+        assert engine.v2_tag("serial", "dokfzo5t1y~mpe2dum68pmvf8s") == "5ebba096"
+
+        # The one surviving half of _v2_canonical_ct: username does not fold,
+        # every other type does. Both literals, so a port that folds the
+        # wrong way fails here rather than in production.
         assert engine.v2_tag("username", "AbCdEfGh") == "b830a7c4"
+        assert engine.v2_tag("username", "abcdefgh") == "64ff0357"

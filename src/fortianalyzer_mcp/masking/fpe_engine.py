@@ -123,6 +123,16 @@ _TWEAK_LABELS = {
     "domain": "faz-mcp-fpe:v1:domain",
     "email_local": "faz-mcp-fpe:v1:email-local",
     "url_tail": "faz-mcp-fpe:v1:url-tail",
+    # Serials are uppercase alphanumerics, sometimes hyphenated, which the
+    # lowercase string alphabet cannot round-trip: masking one as a hostname
+    # returns it lowercased, so it is not the serial any more. They take the
+    # url-tail construction (base32 shield + string cipher) under their own
+    # label, so serial and URL ciphertext domains stay separate.
+    #
+    # Byte-identical to the label that shipped on fortimanager-mcp
+    # (feat/fpe-masking at 06c968b), because the token format is shared and
+    # a token minted by one server is resolved by the other. Settled on #40.
+    "serial": "faz-mcp-fpe:v1:serial",
 }
 
 
@@ -299,19 +309,24 @@ class FPEEngine:
         and ``Admin`` and ``admin`` can be different principals. Folding case
         there would let two distinct principals' tokens authenticate each
         other's payloads.
+
+        ``ipv6`` had a branch here that canonicalised through
+        ``ipaddress.IPv6Address``, because two spellings of one address both
+        decrypted and so both had to tag alike. #40 settled that v2 payloads
+        carry no colons: an IPv6 payload is plain hex inside the envelope,
+        which has exactly one spelling up to case. The branch is gone rather
+        than kept as insurance, because it would silently start canonicalising
+        again the moment a colon-bearing payload appeared, which is the thing
+        the format now forbids.
+
+        ``serial`` needs no exception either. Its ciphertext is base32 run
+        through the lowercase string cipher, so it is lowercase by
+        construction and folding matches what decryption tolerates. The
+        serial's own case survives inside the base32 shield, below this
+        layer.
         """
         if vtype == "username":
             return ct
-        if vtype == "ipv6":
-            # ``abcd::1`` and its fully expanded form are one address, and
-            # decryption accepts either, so the tag has to as well. An
-            # unparseable payload is left exactly as written rather than
-            # coerced: collapsing two different unparseable strings to one
-            # canonical form would let them authenticate each other.
-            try:
-                return str(ipaddress.IPv6Address(ct.strip()))
-            except ValueError:
-                return ct.lower()
         return ct.lower()
 
     def v2_tag_ok(self, vtype: str, ct: str, tag: str) -> bool:
@@ -497,6 +512,35 @@ class FPEEngine:
         encoded = base64.b32encode(value.encode()).decode("ascii").lower().rstrip("=")
         return f"url-{self._key_id}-{self._encrypt_str('url_tail', encoded)}"
 
+    def mask_serial(self, value: str) -> str:
+        """Mask a device serial into an ``sn-<kid>-<ct>`` token.
+
+        Same construction as :meth:`mask_url_tail`, under the ``serial``
+        label: base32-shield the raw bytes, then run the string cipher.
+        Case survives exactly, which a hostname token cannot manage.
+        Measured before this existed: ``FGT60FTK20000001`` masked as a
+        hostname came back ``fgt60ftk20000001``.
+
+        Named ``seal_serial`` on fortimanager-mcp, which follows a different
+        method convention; the token both produce is the same.
+
+        Residual, inherited from the construction: the token length reveals
+        the serial's length.
+        """
+        if not value.strip():
+            raise MaskingError("cannot mask an empty serial")
+        encoded = base64.b32encode(value.strip().encode()).decode("ascii").lower().rstrip("=")
+        return f"sn-{self._key_id}-{self._encrypt_str('serial', encoded)}"
+
+    def unmask_serial(self, token: str) -> str:
+        """Reverse :meth:`mask_serial`, returning the exact original serial."""
+        payload = self._strip_prefix(token, "sn-")
+        encoded = self._decrypt_str("serial", self._split_key_id(payload, token))
+        try:
+            return base64.b32decode(encoded.upper() + "=" * (-len(encoded) % 8)).decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise MaskingError(f"cannot unmask serial token: {exc}") from exc
+
     def unmask_url_tail(self, token: str) -> str:
         """Reverse :meth:`mask_url_tail`, returning the exact original tail."""
         payload = self._strip_prefix(token, "url-")
@@ -546,6 +590,8 @@ class FPEEngine:
             return self.unmask_username(stripped)
         if candidate.startswith("url-"):
             return self.unmask_url_tail(candidate)
+        if candidate.startswith("sn-"):
+            return self.unmask_serial(candidate)
         return None
 
     # ------------------------------------------------------------------ #
