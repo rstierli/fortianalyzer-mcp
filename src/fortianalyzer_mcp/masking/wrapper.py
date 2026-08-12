@@ -88,6 +88,7 @@ from fortianalyzer_mcp.masking.fields import (
     IP_OR_HOST,
     MAC,
     OBF_URL_KEY,
+    SERIAL,
     SKIP_VALUES,
     TARGET_NAME_TYPES,
     TEXT,
@@ -129,7 +130,11 @@ _COMPOSITE_DIMENSIONS: frozenset[str] = frozenset(
 
 #: Structural shape of a prefix-marked token: ``<marker>-<4-hex-kid>-``.
 #: "host-fw01" has no kid group and is a legitimate name, not a token.
-_TOKEN_PREFIX_SHAPE_RE = re.compile(r"^(?:host|user|url)-[0-9a-f]{4}-")
+#: ``sn`` joined the markers with the serial type (#40). It has to be here
+#: and not only in the engine: this shape is what the mutating-tool gate
+#: (#108) recognises, so leaving it out would silently stop that gate
+#: covering serial tokens.
+_TOKEN_PREFIX_SHAPE_RE = re.compile(r"^(?:host|user|url|sn)-[0-9a-f]{4}-")
 
 
 #: Keys that prove a dict is a dvmdb device object, so its ``name`` is the
@@ -232,6 +237,8 @@ class OutputMasker:
                 return self._mask_ip_or_host(value)
             if vtype == HOSTNAME:
                 return self._engine.mask_hostname(value)
+            if vtype == SERIAL:
+                return self._engine.mask_serial(value)
             if vtype == USERNAME:
                 return self._engine.mask_username(value)
             if vtype == DOMAIN:

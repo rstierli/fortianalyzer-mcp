@@ -134,6 +134,12 @@ HOSTNAME = "hostname"
 USERNAME = "username"
 DOMAIN = "domain"
 EMAIL = "email"
+#: Device serials. Separate from HOSTNAME because the string alphabet is
+#: lowercase and a serial is not: masked as a hostname, ``FGT60FTK20000001``
+#: comes back ``fgt60ftk20000001``, which is no longer the serial. The serial
+#: cipher base32-shields the value first, so case and the hyphen survive.
+#: Settled on #40; matches the type that shipped on fortimanager-mcp.
+SERIAL = "serial"
 TEXT = "text"  # free text: embedded IOCs are masked in place
 #: Holds either an address or a name depending on the record. Masks as
 #: whichever it parses as; the two token forms stay distinguishable on the
@@ -467,11 +473,20 @@ COMPOSITE_DEVICE_VDOM = ("devvds",)
 DEVICE_IDENTITY_TYPES: dict[str, str] = {
     "devname": HOSTNAME,
     "devid": HOSTNAME,
-    "sn": HOSTNAME,
-    "serialno": HOSTNAME,
-    "csf": HOSTNAME,
-    "sndetected": HOSTNAME,
-    "snclosest": HOSTNAME,
+    # The serial-carrying keys take SERIAL rather than HOSTNAME, so they
+    # round-trip byte-exact. Only keys already in this table move; the
+    # spelling variants found in #80 (module_sn, tunnel_sn) are not added
+    # here, because which table they belong in is still Roland's call.
+    #
+    # Safe even where one of these turns out to carry something that is not
+    # a serial: the serial cipher shields arbitrary bytes through base32, so
+    # it accepts strictly more than the hostname alphabet does. The visible
+    # change is the token prefix, sn- instead of host-.
+    "sn": SERIAL,
+    "serialno": SERIAL,
+    "csf": HOSTNAME,  # Security Fabric name, a label rather than a serial
+    "sndetected": SERIAL,
+    "snclosest": SERIAL,
     "fortigate": HOSTNAME,  # fortiview: reporting device, comma-joined when aggregated
     "detectkey": HOSTNAME,  # ueba endpoints: serial of the detecting appliance
     # eventmgmt alert subject_details: {alertid, devs, epids, euids}. Same
