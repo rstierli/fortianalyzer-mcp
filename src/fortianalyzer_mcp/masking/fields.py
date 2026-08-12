@@ -488,7 +488,11 @@ DEVICE_IDENTITY_TYPES: dict[str, str] = {
     "sndetected": SERIAL,
     "snclosest": SERIAL,
     "fortigate": HOSTNAME,  # fortiview: reporting device, comma-joined when aggregated
-    "detectkey": HOSTNAME,  # ueba endpoints: serial of the detecting appliance
+    # This table's own comment called it a serial, and it was still typed as
+    # a hostname, so it kept the exact round-trip bug the serial type was
+    # added to fix. Found by review after the first pass moved only the
+    # sn-spelled keys.
+    "detectkey": SERIAL,  # ueba endpoints: serial of the detecting appliance
     # eventmgmt alert subject_details: {alertid, devs, epids, euids}. Same
     # class as devname, and until it was listed here it defeated the flag
     # rather than following it: the device stayed clear under "devs" while

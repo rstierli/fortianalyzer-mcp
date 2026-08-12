@@ -172,16 +172,19 @@ _V2_TAG_RE = re.compile(rf"^[0-9a-f]{{{V2_TAG_HEX}}}$")
 #:
 #: Pinned, and asserted colon-free, because the tag is computed over
 #: ``faz-mcp-fpe:v2:tag:<type>:<ct>`` and that string is only injective while
-#: no type name contains a colon. Ciphertexts DO contain colons today (IPv6,
-#: MAC), so the first colon after the fixed prefix is what delimits the type.
-#: Add a type with a colon in it and two different (type, ciphertext) pairs
-#: could authenticate each other's tokens.
-#: ``serial`` has no entry in ``_TWEAK_LABELS`` yet, on purpose: it is a
-#: forward declaration of the type the envelope work adds, and nothing can
-#: mint a serial ciphertext today (serials currently ride HOSTNAME). It is
-#: named here so the shared vocabulary is pinned once rather than changed
-#: twice. Whether a ``serialno`` field ends up emitting ``serial`` or
-#: ``hostname`` is still open on #40.
+#: no type name contains a colon. Add a type with a colon in it and two
+#: different (type, ciphertext) pairs could authenticate each other's tokens.
+#:
+#: A v2 payload no longer contains a colon either, since #40 settled on hex
+#: for IPv6 and MAC, so the type is not the only thing keeping the input
+#: unambiguous any more. The assertion stays regardless: it costs nothing and
+#: it is the property the construction actually depends on.
+#:
+#: ``serial`` is a full type now, with a tweak label and a cipher, and the
+#: serial-carrying fields route to it. This comment previously described it
+#: as a forward declaration with no cipher behind it, and described payloads
+#: as colon-bearing; both were true when the tag primitive landed and neither
+#: survived the same branch.
 #: Envelope marker per value type. ``ip4``/``ip6``/``mac``/``sn`` are the
 #: spellings that already shipped in fortimanager-mcp's reserved vocabulary
 #: (``masking/tokens.py``, ``PREFIX_MARKERS``), and ``host``/``user``/``url``
@@ -499,7 +502,15 @@ class FPEEngine:
         if vtype == "ipv4":
             return self.unmask_ip(payload)
         if vtype == "ipv6":
-            return self.unmask_ip(str(ipaddress.IPv6Address(int(payload, 16))))
+            # Only reachable behind a valid tag, so a non-hex payload here
+            # means our own minting is broken rather than that someone forged
+            # something. Still converted, because v2_open is documented total
+            # over untrusted text and a bare ValueError out of it would make
+            # that false the moment the assumption stops holding.
+            try:
+                return self.unmask_ip(str(ipaddress.IPv6Address(int(payload, 16))))
+            except ValueError as exc:
+                raise MaskingError("not a valid IPv6 payload") from exc
         if vtype == "mac":
             return self.unmask_mac(":".join(payload[i : i + 2] for i in range(0, 12, 2)))
         if vtype == "serial":
@@ -523,7 +534,20 @@ class FPEEngine:
         v2 gave up looking like an address the moment it grew a marker.
         """
         if vtype == "ipv6":
-            return format(int(ipaddress.IPv6Address(ct.strip())), "032x")
+            try:
+                address = ipaddress.IPv6Address(ct.strip())
+            except ValueError as exc:
+                # Mint side, so this is our own ciphertext and a bug here
+                # rather than hostile input. It still leaves as a MaskingError,
+                # because every caller of the mint path handles that and none
+                # handles AddressValueError, and the raw ct is not echoed.
+                raise MaskingError("not a valid IPv6 ciphertext") from exc
+            # The width is load-bearing and part of the shared format: 32 hex
+            # digits, zero-padded. One in sixteen ciphertexts has a leading
+            # zero nibble, and a port that drops the padding round-trips
+            # against itself perfectly while its tokens fail verification on
+            # the other server and are logged as forgeries.
+            return format(int(address), "032x")
         if vtype == "mac":
             return ct.replace(":", "").replace("-", "").lower()
         return ct

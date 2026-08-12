@@ -27,7 +27,7 @@ from fortianalyzer_mcp.masking.fpe_engine import (
     FPEEngine,
     MaskingError,
 )
-from fortianalyzer_mcp.masking.wrapper import _MAC_RE
+from fortianalyzer_mcp.masking.wrapper import _MAC_RE, _TOKEN_PREFIX_SHAPE_RE
 
 KEY = "2DE79D232DF5585D68CE47882AE256D6"
 OTHER_KEY = "00112233445566778899AABBCCDDEEFF"
@@ -201,11 +201,33 @@ class TestColonFreePayloads:
 
 class TestKeyId:
     def test_a_token_from_another_key_is_refused_on_the_key_id(self, engine: FPEEngine):
+        # Asserting only "refused" cannot see the key-id check at all: the
+        # tag key derives from the engine key, so a foreign token fails the
+        # tag too and the test passes with the key-id check deleted.
+        # Measured, before this assertion was tightened.
+        #
+        # Which one refuses matters. The key-id check says "rotated key",
+        # which is diagnosable and ordinary. The tag failure says "forged or
+        # corrupted" and fires the warning that is meant to be the only
+        # signal separating a forgery grind from normal traffic. Letting a
+        # key rotation trip that alarm poisons it.
         foreign = FPEEngine(OTHER_KEY)
         token = foreign.v2_token("hostname", _ct(foreign.mask_hostname("fw-hq-01")))
 
-        with pytest.raises(MaskingError):
+        with pytest.raises(MaskingError) as caught:
             engine.v2_open(token)
+
+        assert "forged or corrupted" not in str(caught.value)
+
+    def test_a_key_rotation_does_not_fire_the_forgery_alarm(self, engine: FPEEngine, caplog):
+        foreign = FPEEngine(OTHER_KEY)
+        token = foreign.v2_token("hostname", _ct(foreign.mask_hostname("fw-hq-01")))
+
+        with caplog.at_level("WARNING"):
+            with pytest.raises(MaskingError):
+                engine.v2_open(token)
+
+        assert "failed tag verification" not in caplog.text
 
 
 class TestWhatIsNotCoveredYet:
@@ -229,11 +251,42 @@ class TestWhatIsNotCoveredYet:
         assert set(V2_MARKERS.values()) == {"ip4", "ip6", "mac", "sn", "url", "host", "user"}
 
 
+class TestTheMutatingToolGateCoversEveryEnvelope:
+    def test_the_shape_recogniser_knows_every_v2_marker(self, engine: FPEEngine):
+        # _TOKEN_PREFIX_SHAPE_RE is what the mutating-tool gate (#108) uses
+        # to tell a token from a legitimate value. ip4/ip6/mac had no marked
+        # form before v2, so they were never in it, and the gate would have
+        # gone on passing while covering none of the three types the envelope
+        # exists to make detectable. That is the failure direction that does
+        # not announce itself.
+        for vtype, ct, _ in _all_types(engine):
+            token = engine.v2_token(vtype, ct)
+            assert _TOKEN_PREFIX_SHAPE_RE.match(token), vtype
+
+    def test_it_still_does_not_flag_ordinary_values(self):
+        # The markers are only half of it: a real value that merely starts
+        # with one is not a token, because it has no 4-hex key id.
+        for ordinary in ("ip4-lan", "mac-table", "sn-abc", "host-fw01"):
+            assert not _TOKEN_PREFIX_SHAPE_RE.match(ordinary), ordinary
+
+
 class TestSpecPin:
     def test_the_envelope_grammar_is_pinned(self, engine: FPEEngine):
         # A literal, because the grammar is the shared contract and a test
         # that rebuilds it from the implementation drifts with it.
         assert engine.v2_token("ipv4", "248.194.94.248") == "ip4-2a85-248.194.94.248-53eecc82"
+
+        # An IPv6 token whose ciphertext has a LEADING ZERO nibble, chosen on
+        # purpose. The zero padding is part of the shared format and nothing
+        # else pins its width: the tag literals in test_fpe_v2_tag.py are fed
+        # hex directly and never cross _v2_payload_out, so dropping "032x"
+        # for "x" round-trips against itself and passes the whole suite.
+        # Measured. About one in sixteen ciphertexts starts with a zero, and
+        # for those a port that dropped the padding would mint tokens the
+        # other server refuses and logs as forgeries.
+        v6 = engine.v2_token("ipv6", engine.mask_ip("2001:db8::16"))
+        assert v6 == "ip6-2a85-0a1baadc502f122e379b90efd546b435-93e5818b"
+        assert len(v6.split("-")[2]) == 32
 
         # And the shape, stated independently of any one token.
         assert re.fullmatch(

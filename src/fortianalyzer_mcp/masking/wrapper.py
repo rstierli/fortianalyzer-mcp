@@ -134,7 +134,13 @@ _COMPOSITE_DIMENSIONS: frozenset[str] = frozenset(
 #: and not only in the engine: this shape is what the mutating-tool gate
 #: (#108) recognises, so leaving it out would silently stop that gate
 #: covering serial tokens.
-_TOKEN_PREFIX_SHAPE_RE = re.compile(r"^(?:host|user|url|sn)-[0-9a-f]{4}-")
+#: ``ip4``/``ip6``/``mac`` are here for the v2 envelope, which is the first
+#: form those three have ever had: v1 emits them bare, so there was nothing
+#: to recognise. Adding them at the same time as the format, rather than at
+#: the cutover, because the failure is silent in exactly the direction that
+#: matters -- the gate would keep passing while covering none of the three
+#: types the envelope exists to make detectable.
+_TOKEN_PREFIX_SHAPE_RE = re.compile(r"^(?:host|user|url|sn|ip4|ip6|mac)-[0-9a-f]{4}-")
 
 
 #: Keys that prove a dict is a dvmdb device object, so its ``name`` is the

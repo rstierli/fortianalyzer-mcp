@@ -103,11 +103,25 @@ class TestTheTypeTable:
     def test_every_serial_carrying_key_takes_the_serial_type(self):
         # csf is deliberately excluded: the Security Fabric name is an
         # operator label, not a serial.
-        assert DEVICE_IDENTITY_TYPES["sn"] == SERIAL
-        assert DEVICE_IDENTITY_TYPES["serialno"] == SERIAL
-        assert DEVICE_IDENTITY_TYPES["sndetected"] == SERIAL
-        assert DEVICE_IDENTITY_TYPES["snclosest"] == SERIAL
+        #
+        # detectkey is here because the first pass missed it. It was typed
+        # HOSTNAME while this very table's comment on it read "serial of the
+        # detecting appliance", so it kept the round-trip bug the type was
+        # added to fix. Matching on the sn- spelling was not enough.
+        for key in ("sn", "serialno", "sndetected", "snclosest", "detectkey"):
+            assert DEVICE_IDENTITY_TYPES[key] == SERIAL, key
         assert DEVICE_IDENTITY_TYPES["csf"] != SERIAL
+
+    # There is deliberately NO automated check that a key whose comment says
+    # "serial" is typed SERIAL, though detectkey is exactly the miss such a
+    # check would be for. One was written and thrown away: it reported devid,
+    # whose entry has no comment at all, because \s* matched a newline into
+    # the next entry's comment block; and once that was fixed it reported
+    # csf, whose comment reads "a label rather than a serial". Two runs, two
+    # fabricated findings. A grep over prose cannot tell an assertion from a
+    # negation, and a self-check that invents findings costs more than the
+    # one real miss it would have caught. Review caught detectkey; the
+    # explicit list above is what holds the line.
 
     def test_the_token_shape_recogniser_knows_sn_tokens(self, engine: FPEEngine):
         # This regex is what the mutating-tool gate (#108) uses to tell a
