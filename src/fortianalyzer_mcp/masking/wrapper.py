@@ -101,6 +101,70 @@ from fortianalyzer_mcp.masking.unmask import ArgUnmasker
 logger = logging.getLogger(__name__)
 
 _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+
+#: The two halves of a v2 envelope, matched around an address the IOC scan
+#: found, so the scan can recognise its own output and step over it.
+#:
+#: A v2 IPv4 token carries its ciphertext as a dotted quad, because a masked
+#: IPv4 has to stay a valid IPv4. The free-text scan therefore matches the
+#: payload INSIDE the token and re-encrypts it, which leaves the tag bound to
+#: a payload that is no longer there: the token stops opening at all and the
+#: address is unrecoverable, by us included. IPv6 and MAC payloads went
+#: colon-free hex on #40, so neither the IPv4 nor the MAC scan can see them;
+#: IPv4 is the one exposed type, and that asymmetry is why this guard is
+#: positional rather than a general token pattern.
+#:
+#: Checked around the match rather than by scanning the text for tokens
+#: first: a serial or url ciphertext can itself contain a hyphen, so a
+#: lazily-bounded token pattern can end at the wrong hyphen and leave the
+#: tail unprotected. Position has no such ambiguity.
+#:
+#: Residual, and it is the same trade the shape gate already takes: a real
+#: address that happens to sit between a marker plus key id and a hyphen
+#: plus eight hex digits is left in clear. It has to look exactly like a v2
+#: envelope to get there.
+#:
+#: Three things here are load-bearing, and the first version of this guard
+#: got all three wrong. An adversarial pass measured each one.
+#:
+#: ``(?<![0-9A-Za-z])`` is the left boundary. Without it, any WORD ending in
+#: a marker opens an envelope, because the head is only searched for:
+#: ``myhost-1234-10.0.0.1-deadbeef`` returned with the address in clear, and
+#: so did ``localhost``, ``poweruser``, ``gossip4``, ``tarmac`` and ``unsn``.
+#: That is a leak, and it also put this guard at odds with
+#: :meth:`FPEEngine.is_v2_shaped`, which rejects all of those. Two
+#: definitions of "looks like v2" drifting apart is the bug class this
+#: project keeps hitting, so a test pins them equal on whole strings.
+#:
+#: ``\Z`` rather than ``$``, because ``$`` also matches just before a
+#: trailing newline: ``ip4-2a85-\n10.0.0.1-deadbeef`` leaked while the CRLF
+#: spelling did not, which is that difference exactly. A genuine token can
+#: never contain a newline, so there was nothing to gain from the laxer
+#: anchor.
+#:
+#: Both halves are matched against a BOUNDED window rather than a slice of
+#: the text. ``text[:start]`` and ``text[end:]`` each copy the input on
+#: every IPv4 match, so a quad-dense log line went quadratic: 3.5 seconds
+#: for four thousand addresses, per-match cost doubling on every doubling.
+#: Free text is attacker-supplied, so that was a remote CPU-exhaustion
+#: primitive rather than a tuning matter. The head is at most ten
+#: characters, so a fixed window is all it can ever need.
+_V2_ENVELOPE_HEAD_RE = re.compile(
+    r"(?<![0-9A-Za-z])(?:ip4|ip6|mac|sn|url|host|user)-[0-9a-f]{4}-\Z", re.IGNORECASE
+)
+_V2_ENVELOPE_TAIL_RE = re.compile(r"-[0-9a-f]{8}(?![0-9a-f])", re.IGNORECASE)
+
+#: Longest possible head, plus one character for the boundary check to see:
+#: marker (up to 4) + "-" + key id (4) + "-" is ten.
+_V2_HEAD_WINDOW = 11
+
+
+def _inside_v2_envelope(text: str, start: int, end: int) -> bool:
+    """Is ``text[start:end]`` the payload of a v2 token?"""
+    head = text[max(0, start - _V2_HEAD_WINDOW) : start]
+    return bool(_V2_ENVELOPE_HEAD_RE.search(head) and _V2_ENVELOPE_TAIL_RE.match(text, end))
+
+
 _MAC_RE = re.compile(r"\b[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}\b")
 _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _DEVVDS_RE = re.compile(r"^(?P<dev>[^\[\]]+)\[(?P<vdom>[^\[\]]*)\]$")
@@ -600,6 +664,10 @@ class OutputMasker:
 
         def ip_sub(m: re.Match[str]) -> str:
             candidate = m.group(0)
+            if _inside_v2_envelope(text, m.start(), m.end()):
+                # Our own output. Re-encrypting the payload would leave the
+                # tag signing a value that is no longer there.
+                return candidate
             try:
                 ipaddress.IPv4Address(candidate)
             except ValueError:
