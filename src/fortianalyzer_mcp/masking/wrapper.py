@@ -372,6 +372,24 @@ class OutputMasker:
         """
         if value.strip() in SKIP_VALUES:
             return value
+        if self._engine.is_v2_shaped(value):
+            # Already this layer's own output. Masking it again destroys
+            # it, loudly on a typed route that cannot parse a token (an IP
+            # field fails closed to an irreversible placeholder) and
+            # quietly on one that can (a string cipher wraps the token in
+            # another token, which opens to the wrong value). Both are
+            # silent to the caller.
+            #
+            # By SHAPE, matching the gate decision on #40: a value that
+            # looks like v2 is committed to v2. Verifying the tag instead
+            # would be a third definition of v2-ness in this codebase, and
+            # two definitions drifting apart has already produced one leak
+            # in the free-text guard above.
+            #
+            # This funnel is the whole point: every pass-1 route ends here,
+            # so the check cannot be forgotten by a new caller the way the
+            # keep set was twice.
+            return value
         if self._is_kept(vtype, value, keep):
             # A value the deployment chose to leave readable stays readable
             # under every key (#73 item 5). The check lives here rather than
