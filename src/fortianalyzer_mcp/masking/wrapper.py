@@ -1437,7 +1437,7 @@ def install_masking(mcp: Any) -> tuple[OutputMasker, ArgUnmasker]:
     if settings.FAZ_MASKING_KEY and not os.environ.get(MASKING_KEY_ENV):
         os.environ[MASKING_KEY_ENV] = settings.FAZ_MASKING_KEY
 
-    engine = FPEEngine.from_env()
+    engine = FPEEngine.from_env(accept_v1_tokens=settings.FAZ_MASKING_ACCEPT_V1_TOKENS)
     masker = OutputMasker(engine, mask_device_identity=settings.FAZ_MASK_DEVICE_IDENTITY)
     unmasker = ArgUnmasker(engine)
     original_tool = mcp.tool

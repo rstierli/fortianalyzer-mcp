@@ -270,6 +270,18 @@ class MaskingError(Exception):
     """Raised when a value cannot be masked or a token cannot be unmasked."""
 
 
+class VerificationBudgetExhausted(MaskingError):
+    """The per-call tag-verification budget is spent.
+
+    Its own type because the boundary must treat it differently from an
+    ordinary unmask failure. A single token that will not decrypt is
+    passed through so the downstream validator rejects it; doing that with
+    budget exhaustion turns the cap into partial resolution, where the
+    first tokens resolve and the rest ride out as literals with nothing
+    told to the caller. That is the outcome the cap exists to prevent.
+    """
+
+
 def _derive_tweak(label: str, chunk_index: int = 0) -> str:
     """Derive a 56-bit FF3-1 tweak (14 hex chars) from a stable label.
 
@@ -350,7 +362,11 @@ class FPEEngine:
         self._v2_tag_key = hashlib.sha256(f"faz-mcp-fpe:v2:tagkey:{key.lower()}".encode()).digest()
 
     @classmethod
-    def from_env(cls, mask_suffix: str = DEFAULT_MASK_SUFFIX) -> "FPEEngine":
+    def from_env(
+        cls,
+        mask_suffix: str = DEFAULT_MASK_SUFFIX,
+        accept_v1_tokens: bool = True,
+    ) -> "FPEEngine":
         """Build an engine from the ``FAZ_MASKING_KEY`` environment variable.
 
         Raises:
@@ -359,7 +375,7 @@ class FPEEngine:
         key = os.environ.get(MASKING_KEY_ENV, "")
         if not key:
             raise MaskingError(f"{MASKING_KEY_ENV} is not set")
-        return cls(key, mask_suffix=mask_suffix)
+        return cls(key, mask_suffix=mask_suffix, accept_v1_tokens=accept_v1_tokens)
 
     @property
     def mask_suffix(self) -> str:
@@ -577,7 +593,7 @@ class FPEEngine:
             # since it is attacker-influenced text.
             failures = _V2_FAILURE_COUNT.get(0) + 1
             _V2_FAILURE_COUNT.set(failures)
-            if failures >= V2_FAILURE_ALARM:
+            if failures == V2_FAILURE_ALARM:
                 # The alarm, distinct from the per-failure line: a handful of
                 # failures in one call is not a corrupted token being echoed
                 # back, it is someone trying tags.
@@ -611,7 +627,15 @@ class FPEEngine:
                     "v2 verification budget of %d exhausted in one call; refusing the rest",
                     V2_VERIFY_BUDGET,
                 )
-            raise MaskingError("v2 verification budget for this call is exhausted")
+            raise VerificationBudgetExhausted("v2 verification budget for this call is exhausted")
+
+    @staticmethod
+    def _b32_decode(encoded: str, what: str) -> str:
+        """Undo the base32 shield the serial and url-tail forms share."""
+        try:
+            return base64.b32decode(encoded.upper() + "=" * (-len(encoded) % 8)).decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise MaskingError(f"cannot unmask {what} token: {exc}") from exc
 
     def _v2_decrypt(self, vtype: str, payload: str) -> str:
         """Decrypt a verified v2 payload through the existing v1 ciphers."""
@@ -630,12 +654,18 @@ class FPEEngine:
         if vtype == "mac":
             return self.unmask_mac(":".join(payload[i : i + 2] for i in range(0, 12, 2)))
         if vtype == "serial":
-            return self.unmask_serial(f"sn-{self._key_id}-{payload}")
+            # Decrypted directly rather than by rebuilding a v1 token and
+            # calling unmask_serial. That round trip sent a v2 payload
+            # through _split_key_id, which is v1 deprecation machinery:
+            # closing the window would have refused the engine's OWN v2
+            # serial and url tokens, and v2 traffic latched the "v1 token
+            # seen" signal so it could never go quiet.
+            return self._b32_decode(self._decrypt_str("serial", payload), "serial")
         if vtype == "hostname":
             return self._decrypt_str("hostname", payload)
         if vtype == "username":
             return self._decrypt_str("username", payload)
-        return self.unmask_url_tail(f"url-{self._key_id}-{payload}")
+        return self._b32_decode(self._decrypt_str("url_tail", payload), "url")
 
     @staticmethod
     def _v2_payload_out(vtype: str, ct: str) -> str:

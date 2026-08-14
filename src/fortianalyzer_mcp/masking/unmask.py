@@ -62,7 +62,11 @@ from fortianalyzer_mcp.masking.fields import (
     MAC,
     SKIP_VALUES,
 )
-from fortianalyzer_mcp.masking.fpe_engine import FPEEngine, MaskingError
+from fortianalyzer_mcp.masking.fpe_engine import (
+    FPEEngine,
+    MaskingError,
+    VerificationBudgetExhausted,
+)
 from fortianalyzer_mcp.query.fields import canonical_log_field
 from fortianalyzer_mcp.utils.validation import sanitize_filter_value
 
@@ -117,6 +121,8 @@ class ArgUnmasker:
                 return self._engine.unmask_ip(value)
             if vtype == MAC:
                 return self._engine.unmask_mac(value)
+        except VerificationBudgetExhausted:
+            raise
         except MaskingError:
             # Very likely a real address the operator typed, not a token.
             return value
@@ -129,6 +135,8 @@ class ArgUnmasker:
         candidate = value.strip()
         try:
             marked = self._unmask_marked(candidate)
+        except VerificationBudgetExhausted:
+            raise
         except MaskingError:
             # Marker present but payload will not decrypt: leave it alone so
             # the downstream validator rejects it instead of us guessing.
@@ -172,6 +180,8 @@ class ArgUnmasker:
             return self.resolve_scalar(value)
         try:
             marked_host = self._unmask_marked(host)
+        except VerificationBudgetExhausted:
+            raise
         except MaskingError:
             # Marker present but the payload will not decrypt: leave the whole
             # URL alone rather than sending FAZ a half-resolved one that can
@@ -206,6 +216,8 @@ class ArgUnmasker:
                 # drop the whole URL. None means no marker matched, which
                 # leaves the tail as it was.
                 resolved_tail = self._engine.unmask_token(tail[1:]) or tail
+            except VerificationBudgetExhausted:
+                raise
             except MaskingError:
                 # Marker present but the payload will not decrypt: leave the
                 # whole URL alone so the downstream validator rejects it.

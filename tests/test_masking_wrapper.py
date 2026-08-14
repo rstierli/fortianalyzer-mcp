@@ -22,7 +22,15 @@ def _settings_with(**overrides: object) -> object:
     """
     from types import SimpleNamespace
 
-    fields = {"FAZ_MASK_DEVICE_IDENTITY": False, "FAZ_MASKING_KEY": None}
+    fields = {
+        "FAZ_MASK_DEVICE_IDENTITY": False,
+        "FAZ_MASKING_KEY": None,
+        # Mirrors the real default. A stub that omits a field the composition
+        # point reads fails with an AttributeError rather than silently
+        # exercising a different configuration, which is why this is listed
+        # here instead of being defaulted away with getattr in production.
+        "FAZ_MASKING_ACCEPT_V1_TOKENS": True,
+    }
     fields.update(overrides)
     return SimpleNamespace(**fields)
 
