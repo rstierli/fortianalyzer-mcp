@@ -263,7 +263,12 @@ class FPEEngine:
     with their casing preserved.
     """
 
-    def __init__(self, key: str, mask_suffix: str = DEFAULT_MASK_SUFFIX) -> None:
+    def __init__(
+        self,
+        key: str,
+        mask_suffix: str = DEFAULT_MASK_SUFFIX,
+        accept_v1_tokens: bool = True,
+    ) -> None:
         """Initialize the engine.
 
         Args:
@@ -277,6 +282,12 @@ class FPEEngine:
             # Deliberately does not echo the offending value: the key is a secret.
             raise MaskingError("masking key must be 32, 48 or 64 hex characters (AES-128/192/256)")
         self._mask_suffix = mask_suffix.lower().lstrip(".")
+        # The v1 deprecation window. Open by default for one release:
+        # tokens already sitting in a live conversation have to keep
+        # resolving, or closing the window silently breaks every session
+        # that was mid-flight when the server restarted.
+        self._accept_v1_tokens = accept_v1_tokens
+        self._seen_v1_token = False
         # One-way key fingerprint carried in marked tokens so a token minted
         # under a different key fails loudly instead of decrypting to a
         # plausible wrong value. Key hex is case-normalized first: it is the
@@ -873,6 +884,95 @@ class FPEEngine:
             raise MaskingError(f"token does not carry the {suffix!r} marker: {token!r}")
         return candidate[: -len(suffix)]
 
+    #: v1 minting method per enveloped type whose token is prefix-marked.
+    _V1_MINTERS = {
+        "hostname": "mask_hostname",
+        "username": "mask_username",
+        "url_tail": "mask_url_tail",
+        "serial": "mask_serial",
+    }
+
+    @staticmethod
+    def _v1_payload(token: str) -> str:
+        """Bare ciphertext out of a ``<marker>-<kid>-<ct>`` token.
+
+        Split from the LEFT, because a ciphertext legitimately contains
+        hyphens: the string alphabet has one, and a serial payload reliably
+        does. Splitting from the right truncates those silently.
+        """
+        return token.split("-", 2)[2]
+
+    def mint(self, vtype: str, value: str) -> str:
+        """Mask ``value`` and return it in the format this server emits.
+
+        One mint point, on purpose. Every ``mask_*`` primitive formats its
+        own v1 token inline, so switching the emitted format at each of
+        them would be one decision copied seven times, and this codebase
+        has already paid for that pattern twice. It also has to stay that
+        way: the v1 primitives are pinned by golden vectors shared with
+        fortimanager-mcp, so their output cannot change.
+
+        ``domain`` and ``email_local`` come back v1 by an explicit branch
+        rather than by falling off the end. They are suffix-marked, so
+        their v2 spelling would be a different parse rather than a
+        different envelope, and #40 deliberately left them for later. A
+        test pins their absence; this branch is what keeps that a decision
+        instead of an oversight.
+
+        Raises:
+            MaskingError: If the value cannot be masked, unchanged from the
+                primitive it delegates to.
+        """
+        if vtype in ("ipv4", "ipv6"):
+            # A masked IP is a valid IP, so the primitive's output IS the
+            # bare ciphertext. This is also the type whose v2 payload stays
+            # dotted, which is why the free-text scan needs its guard.
+            return self.v2_token(vtype, self.mask_ip(value))
+        if vtype == "mac":
+            return self.v2_token(vtype, self.mask_mac(value))
+        minter = self._V1_MINTERS.get(vtype)
+        if minter is not None:
+            return self.v2_token(vtype, self._v1_payload(getattr(self, minter)(value)))
+        if vtype == "domain":
+            return self.mask_domain(value)
+        if vtype == "email_local":
+            return self.mask_email(value)
+        raise MaskingError(f"no minting route for value type: {vtype!r}")
+
+    def _refuse_v1_if_window_closed(self, form: str) -> None:
+        """Enforce the v1 deprecation window, or record that v1 is still in use.
+
+        Placed on the two key-id splits rather than on ``unmask_token``'s
+        dispatch, because the dispatch is bypassable: ``ArgUnmasker``
+        resolves a URL tail by calling ``unmask_url_tail`` directly. Every
+        marked v1 token has to pass through one of the splits, so this is
+        the choke point that cannot be routed around.
+
+        The unmarked IP and MAC forms deliberately do not reach here. They
+        carry no key id and are not v1 *tokens*, they are masked values
+        resolved by field context, so there is nothing to refuse.
+
+        While the window is open this logs, because the point of the flag
+        is that a deployment can tell when closing it is safe. The form and
+        the key id are enough for that, and the payload is never logged,
+        which is this module's standing rule.
+        """
+        if self._accept_v1_tokens:
+            if not self._seen_v1_token:
+                self._seen_v1_token = True
+                logger.info(
+                    "v1 masking token accepted (form=%s, key id=%s); the v1 deprecation "
+                    "window is open. Close it once no client returns v1 tokens.",
+                    form,
+                    self._key_id,
+                )
+            else:
+                logger.debug("v1 masking token accepted (form=%s)", form)
+            return
+        raise MaskingError(
+            f"v1 masking token refused: the deprecation window is closed (form={form})"
+        )
+
     def _split_key_id(self, payload: str, token: str) -> str:
         """Split ``<kid>-<ct>``, verify the key id, return the ciphertext."""
         kid, sep, ct = (
@@ -883,6 +983,7 @@ class FPEEngine:
         if not _KEY_ID_RE.match(kid.lower()) or sep != "-" or not ct:
             raise MaskingError(f"token carries no key id: {token!r}")
         self._check_key_id(kid.lower(), token)
+        self._refuse_v1_if_window_closed("prefix")
         return ct
 
     def _split_key_id_suffix(self, payload: str, token: str) -> str:
@@ -895,6 +996,7 @@ class FPEEngine:
         if not _KEY_ID_RE.match(kid) or sep != "." or not ct:
             raise MaskingError(f"token carries no key id: {token!r}")
         self._check_key_id(kid, token)
+        self._refuse_v1_if_window_closed("suffix")
         return ct
 
     def _check_key_id(self, kid: str, token: str) -> None:
