@@ -757,6 +757,23 @@ class FPEEngine:
         # model title-casing a token in prose. The username payload must be
         # kept verbatim (mixed-case alphabet).
         stripped = token.strip()
+        if self.is_v2_shaped(stripped):
+            # The gate, and it has to be FIRST. A v2 hostname token also
+            # starts with "host-", so asking the shape question after the
+            # prefix dispatch below would never reach it, and the v1 path
+            # would decrypt a forged token to plausible garbage: the tag is
+            # hex and a hyphen, both inside the v1 alphabet, so a flipped
+            # tag leaves a byte-valid v1 token. Ordering IS the gate.
+            #
+            # Committed means committed. A v2-shaped token is never retried
+            # on the v1 path, whatever v2 says about it, because a fallback
+            # hands the forger exactly the decrypt this refuses. v2_open
+            # raises, and the caller must let that propagate.
+            #
+            # This is also the first route by which the IP and MAC forms
+            # resolve at all: their v1 tokens carry no marker, so the
+            # dispatch below never covered them and field context had to.
+            return self.v2_open(stripped)
         candidate = stripped.lower()
         # Suffix first: it is the strongest marker. A domain-token payload
         # may itself start with "host-"/"user-" by chance, but a prefix
