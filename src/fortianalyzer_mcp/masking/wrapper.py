@@ -95,7 +95,12 @@ from fortianalyzer_mcp.masking.fields import (
     THREAT_KEY,
     USERNAME,
 )
-from fortianalyzer_mcp.masking.fpe_engine import MASKING_KEY_ENV, FPEEngine, MaskingError
+from fortianalyzer_mcp.masking.fpe_engine import (
+    MASKING_KEY_ENV,
+    FPEEngine,
+    MaskingError,
+    begin_v2_verification_budget,
+)
 from fortianalyzer_mcp.masking.unmask import ArgUnmasker
 
 logger = logging.getLogger(__name__)
@@ -1508,6 +1513,11 @@ def install_masking(mcp: Any) -> tuple[OutputMasker, ArgUnmasker]:
                 async def async_wrapped(*fa: Any, **fk: Any) -> Any:
                     if _AT_BOUNDARY.get():
                         return await fn(*fa, **fk)
+                    # Per-call budget, so the cap means "this call" rather
+                    # than "this process". Set at the OUTERMOST boundary
+                    # only: an inner tool call shares its caller's budget,
+                    # or nesting would hand out a fresh one per hop.
+                    begin_v2_verification_budget()
                     token = _AT_BOUNDARY.set(True)
                     try:
                         if not read_only:
@@ -1527,6 +1537,7 @@ def install_masking(mcp: Any) -> tuple[OutputMasker, ArgUnmasker]:
             def sync_wrapped(*fa: Any, **fk: Any) -> Any:
                 if _AT_BOUNDARY.get():
                     return fn(*fa, **fk)
+                begin_v2_verification_budget()
                 token = _AT_BOUNDARY.set(True)
                 try:
                     if not read_only:

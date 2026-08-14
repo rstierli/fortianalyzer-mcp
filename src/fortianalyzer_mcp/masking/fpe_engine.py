@@ -81,6 +81,7 @@ this module never includes key material in exceptions.
 """
 
 import base64
+import contextvars
 import hashlib
 import hmac
 import ipaddress
@@ -118,6 +119,33 @@ MASKING_KEY_ENV = "FAZ_MASKING_KEY"
 #: Default marker suffix for domain/email tokens. ``.invalid`` is reserved
 #: by RFC 2606 and can never resolve.
 DEFAULT_MASK_SUFFIX = "masked.invalid"
+
+#: Tag verifications allowed within one tool call, and failures tolerated
+#: before the alarm.
+#:
+#: The 32-bit tag is one in 4.3 billion per blind guess, which sounds like
+#: plenty until you count the right unit. The bound is per VERIFICATION,
+#: not per call, and one call can carry thousands of tokens (measured:
+#: 5000 in a single ``filters`` list, each resolved independently). At that
+#: density 2**31 expected verifications is on the order of 10**5 calls
+#: rather than 10**9, so an online grind is a day's work rather than a
+#: geological era. Capping the per-call count is what puts the exponent
+#: back, and it is cheap because no legitimate call comes near the cap.
+#:
+#: Committed to publicly on #40 alongside the tag width, so the width is
+#: only defensible while this exists.
+V2_VERIFY_BUDGET = 2048
+V2_FAILURE_ALARM = 8
+
+_V2_VERIFY_COUNT: contextvars.ContextVar[int] = contextvars.ContextVar("faz_v2_verify_count")
+_V2_FAILURE_COUNT: contextvars.ContextVar[int] = contextvars.ContextVar("faz_v2_failure_count")
+
+
+def begin_v2_verification_budget() -> None:
+    """Reset the per-call verification budget. Called at the tool boundary."""
+    _V2_VERIFY_COUNT.set(0)
+    _V2_FAILURE_COUNT.set(0)
+
 
 # Tweak labels, one per value type. These are part of the token contract:
 # changing a label (or the derivation) invalidates all previously emitted
@@ -499,14 +527,49 @@ class FPEEngine:
         # lowercase by construction and folding tolerates a re-cased token.
         payload = match.group("ct") if vtype == "username" else match.group("ct").lower()
         self._check_key_id(match.group("kid").lower(), token)
+        self._spend_verification()
         if not self.v2_tag_ok(vtype, payload, match.group("tag")):
             # Deliberately loud: this is the only signal that distinguishes a
             # forgery grind from ordinary traffic, and the 32-bit tag is only
             # safe if repeated failures are visible. The token is not logged,
             # since it is attacker-influenced text.
-            logger.warning("v2 token failed tag verification (type=%s); refused", vtype)
+            failures = _V2_FAILURE_COUNT.get(0) + 1
+            _V2_FAILURE_COUNT.set(failures)
+            if failures >= V2_FAILURE_ALARM:
+                # The alarm, distinct from the per-failure line: a handful of
+                # failures in one call is not a corrupted token being echoed
+                # back, it is someone trying tags.
+                logger.error(
+                    "v2 tag verification failed %d times in one call; possible forgery attempt",
+                    failures,
+                )
+            else:
+                # Deliberately loud: this is the only signal that distinguishes a
+                # forgery grind from ordinary traffic, and the 32-bit tag is only
+                # safe if repeated failures are visible. The token is not logged,
+                # since it is attacker-influenced text.
+                logger.warning("v2 token failed tag verification (type=%s); refused", vtype)
             raise MaskingError("tag mismatch: forged or corrupted token")
         return self._v2_decrypt(vtype, payload)
+
+    @staticmethod
+    def _spend_verification() -> None:
+        """Charge one tag verification against this call's budget.
+
+        Counted BEFORE the tag is checked, so a grind pays for its
+        attempts rather than only for its successes. Refusal is a
+        MaskingError like any other, so a caller that hits the cap fails
+        closed on the remaining tokens instead of resolving them.
+        """
+        spent = _V2_VERIFY_COUNT.get(0) + 1
+        _V2_VERIFY_COUNT.set(spent)
+        if spent > V2_VERIFY_BUDGET:
+            if spent == V2_VERIFY_BUDGET + 1:
+                logger.error(
+                    "v2 verification budget of %d exhausted in one call; refusing the rest",
+                    V2_VERIFY_BUDGET,
+                )
+            raise MaskingError("v2 verification budget for this call is exhausted")
 
     def _v2_decrypt(self, vtype: str, payload: str) -> str:
         """Decrypt a verified v2 payload through the existing v1 ciphers."""
