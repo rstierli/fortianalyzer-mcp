@@ -506,6 +506,48 @@ class FPEEngine:
         """
         return _V2_SHAPE_RE.match(token.strip()) is not None
 
+    def is_own_v2_token(self, value: str) -> bool:
+        """Did THIS engine mint this token?
+
+        The one predicate the output side may use, and the reason it
+        exists: shape is not ownership. ``is_v2_shaped`` asks whether
+        something LOOKS like a v2 envelope, which is the right question
+        inbound, where a shaped token must be committed to v2 rather than
+        retried on v1. Outbound it is the wrong question, because a real
+        value can be shaped like a token:
+
+            {"hostname": "host-ab12-web-01-cafe0123"}
+
+        is a perfectly ordinary hostname and a perfectly good v2 shape,
+        and a shape-only skip hands it back in clear. The key id is not
+        enough either: the shape regex accepts any four hex characters, so
+        the exposed surface is every kid rather than ours.
+
+        The tag is what separates the two, and it costs one keyed hash. It
+        deliberately does NOT charge the verification budget: that budget
+        exists to bound an attacker grinding tags on the INBOUND path, and
+        spending it on our own output would let a large response starve
+        the calls that follow it.
+
+        Total: never raises. A malformed or foreign token is simply not
+        ours, which is the answer the caller needs.
+        """
+        match = _V2_SHAPE_RE.match(value.strip())
+        if match is None:
+            return False
+        marker = match.group("marker").lower()
+        if match.group("kid").lower() != self._key_id:
+            return False
+        try:
+            vtype = next(t for t, m in V2_MARKERS.items() if m == marker)
+        except StopIteration:  # pragma: no cover - markers are a closed set
+            return False
+        payload = match.group("ct") if vtype == "username" else match.group("ct").lower()
+        try:
+            return self.v2_tag_ok(vtype, payload, match.group("tag"))
+        except Exception:
+            return False
+
     def v2_open(self, token: str) -> str:
         """Verify and decrypt a v2 envelope, returning the real value.
 

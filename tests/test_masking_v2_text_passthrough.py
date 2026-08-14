@@ -190,14 +190,19 @@ class TestTheGuardDoesNotOverMatch:
         out = masker.mask_text("ip4-2a85-\n10.0.0.1-deadbeef", {})
         assert "10.0.0.1" not in out
 
-    def test_the_guard_agrees_with_the_shape_gate_on_whole_strings(
+    def test_the_guard_protects_exactly_what_this_engine_minted(
         self, engine: FPEEngine, masker: OutputMasker
     ) -> None:
-        """The invariant that actually matters.
+        """The invariant that actually matters, corrected.
 
-        Two definitions of "looks like v2" drifting apart is the bug class
-        this project keeps hitting. For a whole string, the guard must
-        protect exactly what `is_v2_shaped` would commit to v2.
+        This test used to assert the guard agreed with ``is_v2_shaped``,
+        and in doing so it pinned the very conflation that leaked twice:
+        shape is the inbound question, ownership is the outbound one. A
+        string can be shaped and not ours, and the last case below is
+        exactly that, so the old assertion demanded the leak.
+
+        Note it passed while the guard was wrong, because both sides of
+        the comparison were the same mistaken notion.
         """
         cases = [
             _v2_ipv4(engine, "192.0.2.9"),
@@ -207,7 +212,7 @@ class TestTheGuardDoesNotOverMatch:
         ]
         for case in cases:
             protected = masker.mask_text(case, {}) == case
-            assert protected == engine.is_v2_shaped(case), case
+            assert protected == engine.is_own_v2_token(case), case
 
 
 class TestTheGuardStaysLinear:
@@ -236,3 +241,70 @@ class TestTheGuardStaysLinear:
         # The bound is here to catch a return to quadratic, not to police
         # cipher throughput on a slow runner.
         assert elapsed < 1.5, f"{elapsed:.2f}s for 4000 addresses looks quadratic again"
+
+
+class TestShapeIsNotOwnership:
+    """The root cause of three leaks in this cutover, pinned.
+
+    Two questions were being conflated. "Does this LOOK like a v2
+    envelope" is the right question inbound, where a shaped token must be
+    committed to v2 rather than retried on v1. Outbound it is the wrong
+    question, because a real value can be shaped like a token and the
+    shape regex accepts any key id, not only ours.
+
+    Every skip on the output side now asks ``is_own_v2_token``, which adds
+    the key id and the tag. These cases all leaked before that change.
+    """
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "host-ab12-web-01-cafe0123",
+            "user-1234-svc-deadbeef",
+            "sn-0000-FGT60F-12345678",
+        ],
+    )
+    def test_a_real_value_shaped_like_a_token_is_still_masked(
+        self, masker: OutputMasker, engine: FPEEngine, value: str
+    ) -> None:
+        assert engine.is_v2_shaped(value)  # shaped...
+        assert not engine.is_own_v2_token(value)  # ...but not ours
+        assert masker.mask_result({"hostname": value})["hostname"] != value
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "my-host-2a85-10.0.0.1-deadbeef",
+            "src_ip4-2a85-10.0.0.1-deadbeef",
+            "sub.host-2a85-10.0.0.1-deadbeef",
+            "ip4-2a85-10.0.0.1-deadbeefzz",
+            "ip4-2a85-10.0.0.1-deadbeef-cafe",
+        ],
+    )
+    def test_a_near_envelope_in_prose_does_not_shelter_an_address(
+        self, masker: OutputMasker, text: str
+    ) -> None:
+        """The boundary cases that made the old positional guard laxer
+        than the shape predicate. They no longer decide anything: they
+        only widen the candidate, and the tag settles it."""
+        assert "10.0.0.1" not in masker.mask_text(text, {})
+
+    def test_a_foreign_key_id_is_not_ours(self, engine: FPEEngine) -> None:
+        """The shape regex takes any four hex, so a token minted under
+        another key is shaped but must never be treated as our output."""
+        foreign = FPEEngine("00112233445566778899AABBCCDDEEFF")
+        token = foreign.mint("ipv4", "192.0.2.9")
+
+        assert engine.is_v2_shaped(token)
+        assert not engine.is_own_v2_token(token)
+
+    def test_our_own_token_is_recognised_everywhere(
+        self, masker: OutputMasker, engine: FPEEngine
+    ) -> None:
+        """The other direction: the tightened check must not start
+        re-masking real output on any route."""
+        token = engine.mint("ipv4", "192.0.2.9")
+
+        assert engine.is_own_v2_token(token)
+        assert masker.mask_text(token, {}) == token
+        assert masker.mask_result({"srcip": token})["srcip"] == token

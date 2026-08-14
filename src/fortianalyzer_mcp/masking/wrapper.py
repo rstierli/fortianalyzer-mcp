@@ -154,20 +154,42 @@ _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 #: Free text is attacker-supplied, so that was a remote CPU-exhaustion
 #: primitive rather than a tuning matter. The head is at most ten
 #: characters, so a fixed window is all it can ever need.
-_V2_ENVELOPE_HEAD_RE = re.compile(
-    r"(?<![0-9A-Za-z])(?:ip4|ip6|mac|sn|url|host|user)-[0-9a-f]{4}-\Z", re.IGNORECASE
+#: Candidate extractors, NOT the decision. They bracket the widest thing
+#: around a matched address that could be a v2 envelope; whether it IS one
+#: is then answered by ``FPEEngine.is_own_v2_token``, the same predicate
+#: the structured route uses.
+#:
+#: This shape exists because the previous version made the decision here,
+#: with its own looser notion of an envelope, and that divergence leaked a
+#: real address twice: the left boundary admitted a hyphen, a dot, an
+#: underscore and non-ASCII, so ``my-host-2a85-10.0.0.1-deadbeef`` came
+#: back with the address in clear while ``is_v2_shaped`` rejected the same
+#: string. Three leaks in this cutover came from two definitions of "looks
+#: like v2" drifting apart. There is one definition now, and these
+#: patterns only find the text to hand it.
+_V2_CANDIDATE_HEAD_RE = re.compile(
+    r"(?:ip4|ip6|mac|sn|url|host|user)-[0-9a-f]{4}-\Z", re.IGNORECASE
 )
-_V2_ENVELOPE_TAIL_RE = re.compile(r"-[0-9a-f]{8}(?![0-9a-f])", re.IGNORECASE)
+_V2_CANDIDATE_TAIL_RE = re.compile(r"-[0-9a-f]{8}", re.IGNORECASE)
 
-#: Longest possible head, plus one character for the boundary check to see:
-#: marker (up to 4) + "-" + key id (4) + "-" is ten.
-_V2_HEAD_WINDOW = 11
+#: Longest head: marker (up to 4) + "-" + key id (4) + "-".
+_V2_HEAD_WINDOW = 10
 
 
-def _inside_v2_envelope(text: str, start: int, end: int) -> bool:
-    """Is ``text[start:end]`` the payload of a v2 token?"""
-    head = text[max(0, start - _V2_HEAD_WINDOW) : start]
-    return bool(_V2_ENVELOPE_HEAD_RE.search(head) and _V2_ENVELOPE_TAIL_RE.match(text, end))
+def _v2_envelope_around(engine: Any, text: str, start: int, end: int) -> bool:
+    """Is ``text[start:end]`` the payload of a token THIS engine minted?
+
+    Brackets the candidate and then asks the shared predicate. Boundary
+    subtleties that used to decide the answer now only widen or narrow the
+    candidate, and a wrong guess costs a tag check rather than an address.
+    """
+    head = _V2_CANDIDATE_HEAD_RE.search(text[max(0, start - _V2_HEAD_WINDOW) : start])
+    if head is None:
+        return False
+    tail = _V2_CANDIDATE_TAIL_RE.match(text, end)
+    if tail is None:
+        return False
+    return bool(engine.is_own_v2_token(text[start - len(head.group(0)) : tail.end()]))
 
 
 _MAC_RE = re.compile(r"\b[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}\b")
@@ -377,7 +399,7 @@ class OutputMasker:
         """
         if value.strip() in SKIP_VALUES:
             return value
-        if self._engine.is_v2_shaped(value):
+        if self._engine.is_own_v2_token(value):
             # Already this layer's own output. Masking it again destroys
             # it, loudly on a typed route that cannot parse a token (an IP
             # field fails closed to an irreversible placeholder) and
@@ -687,7 +709,7 @@ class OutputMasker:
 
         def ip_sub(m: re.Match[str]) -> str:
             candidate = m.group(0)
-            if _inside_v2_envelope(text, m.start(), m.end()):
+            if _v2_envelope_around(self._engine, text, m.start(), m.end()):
                 # Our own output. Re-encrypting the payload would leave the
                 # tag signing a value that is no longer there.
                 return candidate
