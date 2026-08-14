@@ -342,7 +342,11 @@ class TestRoundTrip:
             seen["srcip"] = srcip  # what the tool body (and validators) observe
             return {"logs": [{"srcip": srcip}]}
 
-        token = engine.mask_ip("192.0.2.102")
+        # Minted the way the server mints, so the assertion below is a real
+        # round trip rather than a comparison against a format nothing
+        # emits. A v1 bare address still resolves inbound, by field
+        # context, but it is not what comes back out any more.
+        token = engine.mint("ip", "192.0.2.102")
         result = await fake_search(srcip=token)
         assert seen["srcip"] == "192.0.2.102"  # unmasked before the body ran
         assert result["logs"][0]["srcip"] == token  # re-masked on the way out

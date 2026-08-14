@@ -290,6 +290,11 @@ def masker(monkeypatch: pytest.MonkeyPatch) -> OutputMasker:
 
 
 @pytest.fixture
+def engine() -> FPEEngine:
+    return FPEEngine(KEY)
+
+
+@pytest.fixture
 def full_masker(monkeypatch: pytest.MonkeyPatch) -> OutputMasker:
     monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
     return OutputMasker(FPEEngine(KEY), mask_device_identity=True)
@@ -396,8 +401,8 @@ class TestFreeTextSubstitution:
         assert upper_token != lower_token
         assert upper_token in masked["msg"]
         assert lower_token in masked["msg"]
-        assert engine.unmask_username(upper_token) == "Admin"
-        assert engine.unmask_username(lower_token) == "admin"
+        assert engine.unmask_token(upper_token) == "Admin"
+        assert engine.unmask_token(lower_token) == "admin"
 
     def test_uppercase_short_values_are_not_substituted_into_prose(self, masker: OutputMasker):
         masked = masker.mask_result({"user": "abc", "msg": "ABC is a short code"})
@@ -547,11 +552,20 @@ class TestFreeTextSubstitution:
         )
         assert BAD_DOMAIN not in masked["extrainfo"]
 
-    def test_ip_or_host_field_holding_an_address_masks_as_an_ip(self, masker: OutputMasker):
-        import ipaddress
+    def test_ip_or_host_field_holding_an_address_masks_as_an_ip(
+        self, masker: OutputMasker, engine: FPEEngine
+    ):
+        """An IP_OR_HOST field holding an address masks as an address.
 
+        The discrimination used to be implicit: an IP token parsed as an
+        IP and a hostname token carried the host- marker. Under v2 both
+        are marked, so the type is stated rather than inferred, which is
+        the clearer assertion and the same property.
+        """
         masked = masker.mask_result({"epname": GATEWAY_IP})
-        ipaddress.ip_address(masked["epname"])  # still a valid address, not a host- token
+
+        assert masked["epname"].startswith("ip4-")
+        assert engine.v2_open(masked["epname"]) == GATEWAY_IP
 
     def test_ip_or_host_field_holding_a_name_masks_as_a_hostname(self, masker: OutputMasker):
         masked = masker.mask_result({"epname": ENDPOINT_NAME})
@@ -1088,7 +1102,7 @@ class TestSoarIndicatorPair:
         out = masker.mask_result({"data": [row]})["data"][0]
 
         assert PEER_IP not in str(out)
-        assert engine.unmask_ip(out["value"]) == PEER_IP
+        assert engine.unmask_token(out["value"]) == PEER_IP
         assert out["enrichment-reputation"] == "Malicious"  # verdict stays readable
 
     def test_indicator_domain_is_masked(self, masker: OutputMasker):
@@ -1279,12 +1293,12 @@ class TestFortiViewResolvedName:
         out = masker.mask_result({"data": [row]})["data"][0]
 
         assert BAD_DOMAIN not in str(out)
-        assert FPEEngine(KEY).unmask_hostname(out["dstip_hostname"]) == BAD_DOMAIN
+        assert FPEEngine(KEY).unmask_token(out["dstip_hostname"]) == BAD_DOMAIN
 
     def test_address_form_stays_reversible(self, masker: OutputMasker):
         out = masker.mask_result({"dstip_hostname": PEER_IP})["dstip_hostname"]
 
-        assert FPEEngine(KEY).unmask_ip(out) == PEER_IP
+        assert FPEEngine(KEY).unmask_token(out) == PEER_IP
 
     @pytest.mark.parametrize("key", ["srcip_hostname", "dstip_hostname"])
     def test_both_columns_take_the_resolved_form_reversibly(self, masker: OutputMasker, key: str):
@@ -1295,7 +1309,7 @@ class TestFortiViewResolvedName:
 
         assert BAD_DOMAIN not in out
         assert not out.startswith("masked-unrepresentable-")
-        assert FPEEngine(KEY).unmask_hostname(out) == BAD_DOMAIN
+        assert FPEEngine(KEY).unmask_token(out) == BAD_DOMAIN
 
 
 class TestIncidentWorkflowPrincipals:

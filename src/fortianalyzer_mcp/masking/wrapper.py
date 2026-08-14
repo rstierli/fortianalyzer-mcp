@@ -294,31 +294,31 @@ class OutputMasker:
         try:
             ipaddress.ip_address(value.strip())
         except ValueError:
-            return self._engine.mask_hostname(value)
-        return self._engine.mask_ip(value)
+            return self._engine.mint("hostname", value)
+        return self._engine.mint("ip", value)
 
     def _mask_one(self, vtype: str, value: str) -> str:
         try:
             if vtype == IP:
-                return self._engine.mask_ip(value)
+                return self._engine.mint("ip", value)
             if vtype == MAC:
-                return self._engine.mask_mac(value)
+                return self._engine.mint("mac", value)
             if vtype == IP_OR_HOST:
                 return self._mask_ip_or_host(value)
             if vtype == HOSTNAME:
-                return self._engine.mask_hostname(value)
+                return self._engine.mint("hostname", value)
             if vtype == SERIAL:
-                return self._engine.mask_serial(value)
+                return self._engine.mint("serial", value)
             if vtype == USERNAME:
-                return self._engine.mask_username(value)
+                return self._engine.mint("username", value)
             if vtype == DOMAIN:
-                return self._engine.mask_domain(value)
+                return self._engine.mint("domain", value)
             if vtype == EMAIL:
                 # from/to are emails in virus/emailfilter logs but plain
                 # labels elsewhere; only actual addresses mask as email.
                 if "@" in value:
-                    return self._engine.mask_email(value)
-                return self._engine.mask_username(value)
+                    return self._engine.mint("email_local", value)
+                return self._engine.mint("username", value)
         except MaskingError:
             return self.placeholder(value)
         except Exception:
@@ -691,19 +691,19 @@ class OutputMasker:
             except ValueError:
                 return candidate  # e.g. 999.1.1.1 or a dotted version string
             try:
-                return self._engine.mask_ip(candidate)
+                return self._engine.mint("ip", candidate)
             except MaskingError:
                 return self.placeholder(candidate)
 
         def mac_sub(m: re.Match[str]) -> str:
             try:
-                return self._engine.mask_mac(m.group(0))
+                return self._engine.mint("mac", m.group(0))
             except MaskingError:
                 return self.placeholder(m.group(0))
 
         def email_sub(m: re.Match[str]) -> str:
             try:
-                return self._engine.mask_email(m.group(0))
+                return self._engine.mint("email_local", m.group(0))
             except MaskingError:
                 return self.placeholder(m.group(0))
 
@@ -1091,7 +1091,7 @@ class OutputMasker:
             if "@" in decoded_head.partition("/")[0]:
                 return self.placeholder(value)
             try:
-                return self._engine.mask_url_tail(stripped)
+                return self._engine.mint("url_tail", stripped)
             except MaskingError:
                 return self.placeholder(value)
         if self._is_kept(IP_OR_HOST, host, keep):
@@ -1116,7 +1116,7 @@ class OutputMasker:
         if not tail:
             return f"{prefix}{netloc}"
         try:
-            token = self._engine.mask_url_tail(tail)
+            token = self._engine.mint("url_tail", tail)
         except MaskingError:
             return self.placeholder(value)
         return f"{prefix}{netloc}/{token}"

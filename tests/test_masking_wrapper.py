@@ -5,9 +5,6 @@ duality, list-valued fields, free-text IOC scanning, response echo keys,
 fail-closed placeholders, and the mcp.tool registration patch.
 """
 
-import ipaddress
-import re
-
 import pytest
 
 from fortianalyzer_mcp.masking.fields import DOMAIN, EMAIL, FIELD_TYPES, TEXT
@@ -102,19 +99,22 @@ class TestStructureWalk:
         assert masked["logs"][0]["action"] == "deny"
         assert masked["logs"][0]["bytes"] == 42
         assert masked["logs"][0]["srcip"] != "192.0.2.102"
-        ipaddress.IPv4Address(masked["logs"][0]["srcip"])
-        assert engine.unmask_ip(masked["logs"][0]["srcip"]) == "192.0.2.102"
+        # A masked IPv4 used to BE an IPv4. Under the v2 envelope it is a
+        # marked token whose payload is one, which is what lets the layer
+        # recognise its own output instead of re-masking it.
+        assert engine.is_v2_shaped(masked["logs"][0]["srcip"])
+        assert engine.unmask_token(masked["logs"][0]["srcip"]) == "192.0.2.102"
         assert masked["logs"][0]["user"].startswith("user-")
         assert masked["logs"][1]["srcmac"] != "00:1a:2b:3c:4d:5e"
         assert masked["nested"]["event_details"]["src_ip"] != "192.0.2.7"
         assert masked["nested"]["event_details"]["host_name"].startswith("host-")
 
-    def test_list_valued_ip_field(self, masker: OutputMasker):
+    def test_list_valued_ip_field(self, masker: OutputMasker, engine: FPEEngine):
         masked = masker.mask_result({"ipaddr": ["192.0.2.1", "192.0.2.2"]})
         assert len(masked["ipaddr"]) == 2
-        for item in masked["ipaddr"]:
-            assert item not in ("192.0.2.1", "192.0.2.2")
-            ipaddress.IPv4Address(item)
+        for item, original in zip(masked["ipaddr"], ("192.0.2.1", "192.0.2.2"), strict=True):
+            assert item != original
+            assert engine.v2_open(item) == original
 
     def test_comma_joined_ip_string(self, masker: OutputMasker, engine: FPEEngine):
         # Live FAZ packs dns answers into one comma-joined string.
@@ -122,8 +122,8 @@ class TestStructureWalk:
         parts = masked["ipaddr"].split(",")
         assert len(parts) == 3
         assert "192.0.2.1" not in parts and "2001:db8::1" not in parts
-        assert engine.unmask_ip(parts[0]) == "192.0.2.1"
-        assert engine.unmask_ip(parts[2]) == "2001:db8::1"
+        assert engine.unmask_token(parts[0]) == "192.0.2.1"
+        assert engine.unmask_token(parts[2]) == "2001:db8::1"
 
     def test_skip_values_pass_through(self, masker: OutputMasker):
         masked = masker.mask_result({"user": "N/A", "srcip": "", "dstuser": "unknown"})
@@ -157,10 +157,21 @@ class TestTextScan:
     def test_invalid_ipv4_lookalike_untouched(self, masker: OutputMasker):
         assert masker.mask_text("version 999.1.2.3 ok") == "version 999.1.2.3 ok"
 
-    def test_embedded_mac_masked(self, masker: OutputMasker):
+    def test_embedded_mac_masked(self, masker: OutputMasker, engine: FPEEngine):
+        """A MAC in prose masks into a marked token, not another MAC.
+
+        The old assertion looked for a colon-separated MAC in the output,
+        which was right while a masked MAC was itself a MAC. The v2 MAC
+        payload is colon-free hex precisely so the free-text MAC scan
+        cannot see it and chew it on a later pass, so the property to
+        assert now is the marker and the round trip.
+        """
         out = masker.mask_text("client ae:42:a1:52:45:d6 associated")
+
         assert "ae:42:a1:52:45:d6" not in out
-        assert re.search(r"([0-9a-f]{2}:){5}[0-9a-f]{2}", out)
+        token = out.split("client ")[1].split(" associated")[0]
+        assert token.startswith("mac-")
+        assert engine.v2_open(token) == "ae:42:a1:52:45:d6"
 
     def test_echo_keys_scanned(self, masker: OutputMasker):
         masked = masker.mask_result({"filter": 'srcip=="192.0.2.102"', "device": "FGT-BRANCH-01"})
@@ -321,7 +332,7 @@ class TestTargetFailClosed:
         masked = masker.mask_result({"target": [{"name": "ip", "value": raw_ip}, stray]})
         valid, burned = masked["target"]
 
-        assert engine.unmask_ip(valid["value"]) == raw_ip
+        assert engine.unmask_token(valid["value"]) == raw_ip
         assert "masked-unrepresentable-" not in valid["value"]
         assert burned.startswith("masked-unrepresentable-")
         assert raw_ip not in str(masked)
@@ -653,8 +664,9 @@ class TestAssetValueDiffering:
     """#73 item 3: an asset_value that differs from value used to pass
     through in clear even when it is a second identifier."""
 
-    def test_differing_string_asset_value_masks_by_name_type(self, masker: OutputMasker):
-        import ipaddress
+    def test_differing_string_asset_value_masks_by_name_type(
+        self, masker: OutputMasker, engine: FPEEngine
+    ):
 
         masked = masker.mask_result(
             {"target": [{"name": "ip", "value": "192.0.2.57", "asset_value": "192.0.2.58"}]}
@@ -663,7 +675,7 @@ class TestAssetValueDiffering:
 
         assert "192.0.2.58" not in str(masked)
         # reversibly masked by the entry's own type, not burned
-        ipaddress.IPv4Address(entry["asset_value"])
+        assert engine.v2_open(entry["asset_value"]) == "192.0.2.58"
 
     def test_numeric_id_asset_value_stays_clear(self, masker: OutputMasker):
         masked = masker.mask_result(

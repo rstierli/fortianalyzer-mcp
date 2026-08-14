@@ -198,7 +198,14 @@ class ArgUnmasker:
         # over a case-insensitive alphabet, so this one must too.
         if tail[:5].lower() == "/url-":
             try:
-                resolved_tail = self._engine.unmask_url_tail(tail[1:])
+                # Through the dispatch rather than the v1 primitive, so this
+                # path gets the v2 shape gate and the deprecation window
+                # instead of routing around both. A v2 url token also starts
+                # "url-", so the prefix test above still selects it, and
+                # calling the v1 primitive on one would fail to decrypt and
+                # drop the whole URL. None means no marker matched, which
+                # leaves the tail as it was.
+                resolved_tail = self._engine.unmask_token(tail[1:]) or tail
             except MaskingError:
                 # Marker present but the payload will not decrypt: leave the
                 # whole URL alone so the downstream validator rejects it.

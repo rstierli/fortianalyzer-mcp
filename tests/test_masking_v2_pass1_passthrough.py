@@ -125,17 +125,19 @@ class TestRealValuesStillMask:
         assert out["dstip"] != "198.51.100.99"
 
     def test_masking_a_response_twice_is_now_a_fixed_point(self, masker: OutputMasker) -> None:
-        """The property the whole item buys, once minting is v2.
+        """The property the whole item buys, now that minting is v2.
 
-        Not true today for the v1 tokens this still produces, so it is
-        asserted on the structured route only, where the second pass sees
-        whatever the first pass emitted.
+        This assertion was inverted until the emission switch landed, and
+        deliberately so: while the wrapper still minted v1, a masked IP was
+        an ordinary valid IP with no envelope, so a second pass could not
+        tell it from a real one and masked it again. Nothing about the
+        second pass changed. The envelope did, and that is the whole point
+        of it.
         """
         once = masker.mask_result({"srcip": "198.51.100.99"})
-        # A v1 token is not v2-shaped, so this documents current behaviour
-        # rather than asserting idempotence the format cannot yet give.
         twice = masker.mask_result(once)
-        assert twice["srcip"] != once["srcip"]
+
+        assert twice["srcip"] == once["srcip"]
 
 
 class TestV1TokensAreNotSkipped:

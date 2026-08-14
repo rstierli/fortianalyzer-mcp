@@ -923,6 +923,11 @@ class FPEEngine:
             MaskingError: If the value cannot be masked, unchanged from the
                 primitive it delegates to.
         """
+        if vtype == "ip":
+            # Callers that hold a field type rather than an address family
+            # say "ip" and let the engine pick, because the family decides
+            # the marker and the tag domain and that is format knowledge.
+            vtype = "ipv6" if self._parse_ip(value).version == 6 else "ipv4"
         if vtype in ("ipv4", "ipv6"):
             # A masked IP is a valid IP, so the primitive's output IS the
             # bare ciphertext. This is also the type whose v2 payload stays
