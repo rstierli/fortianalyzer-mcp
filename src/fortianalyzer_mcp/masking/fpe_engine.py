@@ -1136,7 +1136,23 @@ class FPEEngine:
         if not _KEY_ID_RE.match(kid) or sep != "." or not ct:
             raise MaskingError(f"token carries no key id: {token!r}")
         self._check_key_id(kid, token)
-        self._refuse_v1_if_window_closed("suffix")
+        # Deliberately NOT gated by the v1 deprecation window. The suffix
+        # form is domain and email_local, and those two have no v2 envelope
+        # by design (they are suffix-marked, so a v2 spelling would be a
+        # different parse, and they already carry a marker and a key id --
+        # settled on #40). A suffix token is therefore not a legacy
+        # encoding waiting to be retired, it is the only encoding those
+        # types have ever had, and refusing it refuses this build's own
+        # freshly minted output.
+        #
+        # Measured before changing it: with the window closed, mask_domain
+        # produced a token that unmask_domain then refused, in the same
+        # process with the same key. That made the window unclosable, since
+        # closing it broke domain and email masking outright.
+        #
+        # If domain/email_local ever gain a v2 envelope, this call has to
+        # come back. test_domain_and_email_local_have_no_v2_envelope is what
+        # fails first in that case.
         return ct
 
     def _check_key_id(self, kid: str, token: str) -> None:
