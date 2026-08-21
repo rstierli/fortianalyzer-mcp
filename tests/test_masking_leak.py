@@ -2380,3 +2380,205 @@ class TestCompositeContainerShapesKeepKeyContext:
         assert self.IP not in str(masker.mask_result({"grpby": [self._blob()]}))
         assert self.HOST not in str(masker.mask_result({"http_url": self.URL}))
         assert self.HOST not in str(masker.mask_result({"http_url": [self.URL]}))
+
+
+class TestAuditConfirmedLeaks:
+    """The five leaks confirmed by the live coverage sweep (#80).
+
+    Every one has the same shape: the masker covers one spelling of an
+    identifier and the appliance ships a second spelling of the same
+    value on the same surface, often in the same record. Because FPE is
+    deterministic, a record carrying both publishes the token and the
+    plaintext for one identifier and hands over the mapping.
+
+    Measured on 2.13.0 (``cfc2585``) with a known test key, in the live
+    record shape, with the device-identity flag both off and on:
+
+        {"mac_devtype_agg": "<mac>,DSM 7.3-86009"}   byte-identical
+        {"dev_src_agg": "<host>,DSM 7.3-86009"}      byte-identical
+        {"f_user": "<user>"}                         5 of 5 shapes verbatim
+        {"auto_raise_grpby": '[{"dstendpoint": "<ip>"}]'}   verbatim
+
+    while the covered twins (``mac``, ``dstmac``, ``hostname``,
+    ``srcname``, ``device``, ``unauthuser``, ``grpby``) all masked the
+    identical value.
+    """
+
+    MAC = "aa:bb:cc:dd:ee:11"
+    HOST = "wkstn-audit-01"
+    DEVTYPE = "Ubuntu 22.04.5"
+    UUID = "ffeb3f77-0000-4000-8000-000000000001"
+    IP = "198.51.100.22"
+    USER = "audituser"
+
+    # ---- f_user: a plain username slot, no composite involved ----
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            "audituser",
+            "audituser@example.com",
+            "EXAMPLE\\audituser",
+            "wkstn-audit-01",
+            "198.51.100.22",
+        ],
+    )
+    @pytest.mark.parametrize("flag", [False, True])
+    def test_f_user_does_not_leak_any_measured_payload_shape(
+        self, payload: str, flag: bool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """All five shapes the audit measured. Whether a given one becomes
+        a token or a placeholder is the USERNAME handler's business; not
+        plaintext is the contract.
+
+        Asserts against the field, NOT against ``str(out)``: the repr
+        escapes a backslash, so ``EXAMPLE\\audituser`` is not a substring
+        of the rendered dict and that case could never have failed."""
+        monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
+        masker = OutputMasker(FPEEngine(KEY), mask_device_identity=flag)
+        out = masker.mask_result({"f_user": payload})
+        assert out["f_user"] != payload
+        assert payload not in out["f_user"]
+
+    def test_f_user_masks_like_its_covered_twin(self, masker: OutputMasker) -> None:
+        """unauthuser holding the same literal masked while f_user did
+        not, in the same dict. That pairing is what hands over the map."""
+        out = masker.mask_result({"unauthuser": self.USER, "f_user": self.USER})
+        assert out["f_user"] == out["unauthuser"]
+
+    # ---- auto_raise_grpby: the twin of the covered grpby ----
+
+    def test_auto_raise_grpby_does_not_leak(self, masker: OutputMasker) -> None:
+        """COMPOSITE_JSON was ("grpby",) only. The audit's exact payload is
+        a JSON array string, not an object."""
+        blob = f'[{{"dstendpoint": "{self.IP}"}}]'
+        out = masker.mask_result({"auto_raise_grpby": blob})
+        assert self.IP not in str(out)
+
+    def test_auto_raise_grpby_masks_like_grpby(self, masker: OutputMasker) -> None:
+        blob = f'[{{"dstendpoint": "{self.IP}"}}]'
+        out = masker.mask_result({"grpby": blob, "auto_raise_grpby": blob})
+        assert out["auto_raise_grpby"] == out["grpby"]
+
+    # ---- the two <identifier>,<devtype> aggregates ----
+
+    @pytest.mark.parametrize("flag", [False, True])
+    def test_mac_devtype_agg_masks_the_mac_and_keeps_the_devtype(
+        self, flag: bool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
+        masker = OutputMasker(FPEEngine(KEY), mask_device_identity=flag)
+        out = masker.mask_result({"mac_devtype_agg": f"{self.MAC},{self.DEVTYPE}"})
+        rendered = out["mac_devtype_agg"]
+        assert self.MAC not in rendered
+        assert rendered.endswith(f",{self.DEVTYPE}")
+
+    @pytest.mark.parametrize("flag", [False, True])
+    def test_dev_src_agg_masks_the_device_and_keeps_the_devtype(
+        self, flag: bool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
+        masker = OutputMasker(FPEEngine(KEY), mask_device_identity=flag)
+        out = masker.mask_result({"dev_src_agg": f"{self.HOST},{self.DEVTYPE}"})
+        rendered = out["dev_src_agg"]
+        assert self.HOST not in rendered
+        assert rendered.endswith(f",{self.DEVTYPE}")
+
+    def test_the_agg_heads_mask_like_their_covered_twins(self, masker: OutputMasker) -> None:
+        """The whole point of the finding: the covered and uncovered
+        spellings land in the same record, so they must agree."""
+        out = masker.mask_result(
+            {
+                "mac": self.MAC,
+                "mac_devtype_agg": f"{self.MAC},{self.DEVTYPE}",
+                "hostname": self.HOST,
+                "dev_src_agg": f"{self.HOST},{self.DEVTYPE}",
+            }
+        )
+        assert out["mac_devtype_agg"] == f"{out['mac']},{self.DEVTYPE}"
+        assert out["dev_src_agg"] == f"{out['hostname']},{self.DEVTYPE}"
+
+    def test_the_aggs_are_not_gated_on_the_device_identity_flag(self, masker: OutputMasker) -> None:
+        """Their covered twins (mac, hostname) are FIELD_TYPES entries, so
+        they mask with the flag OFF. The neighbouring devvds handler IS
+        flag-gated, so the asymmetry needs a pin rather than an assumption
+        of symmetry."""
+        out = masker.mask_result(
+            {
+                "mac_devtype_agg": f"{self.MAC},{self.DEVTYPE}",
+                "dev_src_agg": f"{self.HOST},{self.DEVTYPE}",
+            }
+        )
+        assert self.MAC not in str(out)
+        assert self.HOST not in str(out)
+
+    def test_a_forticlient_uuid_head_is_masked_too(self, masker: OutputMasker) -> None:
+        """dev_src_agg also carries the FortiClient UUID form. The
+        srcuuid/dstuuid carve-out is scoped to those KEYS, not to the
+        value's shape, and nothing else in this masker types by shape, so
+        the head is masked by the key's type either way."""
+        out = masker.mask_result({"dev_src_agg": f"{self.UUID},macOS 10.15.7"})
+        assert self.UUID not in str(out)
+
+    def test_a_second_pair_in_the_tail_does_not_leak(self, masker: OutputMasker) -> None:
+        """These are agg fields: devvds's own docstring records that an
+        aggregating row comma-joins several. A verbatim tail would hand
+        back every identifier after the first."""
+        second = "aa:bb:cc:dd:ee:22"
+        out = masker.mask_result(
+            {"mac_devtype_agg": f"{self.MAC},{self.DEVTYPE},{second},{self.DEVTYPE}"}
+        )
+        rendered = str(out)
+        assert self.MAC not in rendered
+        assert second not in rendered
+
+    def test_a_value_with_no_comma_is_masked_whole(self, masker: OutputMasker) -> None:
+        """Same fallback devvds uses for a shape it has not seen: mask the
+        whole thing rather than hand back an untyped string."""
+        out = masker.mask_result({"mac_devtype_agg": self.MAC})
+        assert self.MAC not in str(out)
+
+    def test_an_empty_value_is_unchanged(self, masker: OutputMasker) -> None:
+        """The audit measured these empty on most live rows. An empty
+        string must not become a placeholder."""
+        out = masker.mask_result({"mac_devtype_agg": "", "dev_src_agg": "", "f_user": ""})
+        assert out == {"mac_devtype_agg": "", "dev_src_agg": "", "f_user": ""}
+
+    # ---- the new kind must be wired everywhere the existing kinds are ----
+
+    @pytest.mark.parametrize("key", ["mac_devtype_agg", "dev_src_agg", "auto_raise_grpby"])
+    def test_the_new_keys_survive_the_container_shapes(
+        self, masker: OutputMasker, key: str
+    ) -> None:
+        """A composite kind handled at one site and not another is exactly
+        how #73, #116 and #117 each found a leak. This walks the same
+        shapes #117's matrix walks."""
+        payloads = {
+            "mac_devtype_agg": f"{self.MAC},{self.DEVTYPE}",
+            "dev_src_agg": f"{self.HOST},{self.DEVTYPE}",
+            "auto_raise_grpby": f'[{{"dstendpoint": "{self.IP}"}}]',
+        }
+        secrets = {
+            "mac_devtype_agg": self.MAC,
+            "dev_src_agg": self.HOST,
+            "auto_raise_grpby": self.IP,
+        }
+        value, secret = payloads[key], secrets[key]
+        for shape in (value, [value], {"a": value}, [[value]], {value: 1}):
+            out = masker.mask_result({key: shape})
+            assert secret not in str(out), f"{key} leaked under {shape!r}"
+
+    @pytest.mark.parametrize("key", ["mac_devtype_agg", "dev_src_agg", "auto_raise_grpby"])
+    def test_the_new_keys_work_as_a_groupby_dimension(self, masker: OutputMasker, key: str) -> None:
+        """A composite key served by a handler rather than by FIELD_TYPES
+        has to be listed as a composite dimension too, or a breakdown
+        bucket under that name types from the empty table and passes
+        through in clear (the #109 review's finding)."""
+        payloads = {
+            "mac_devtype_agg": (f"{self.MAC},{self.DEVTYPE}", self.MAC),
+            "dev_src_agg": (f"{self.HOST},{self.DEVTYPE}", self.HOST),
+            "auto_raise_grpby": (f'[{{"dstendpoint": "{self.IP}"}}]', self.IP),
+        }
+        value, secret = payloads[key]
+        out = masker.mask_result({"breakdowns": {key: [{"value": value, "hits": 3}]}})
+        assert secret not in str(out)

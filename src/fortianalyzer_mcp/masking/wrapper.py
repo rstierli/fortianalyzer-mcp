@@ -74,6 +74,7 @@ from fortianalyzer_mcp.masking.fields import (
     COMPOSITE_BREAKDOWNS,
     COMPOSITE_DEVICE_VDOM,
     COMPOSITE_FILTER_ENTRIES,
+    COMPOSITE_ID_DEVTYPE,
     COMPOSITE_JSON,
     COMPOSITE_PREFIXED,
     COMPOSITE_TARGET,
@@ -122,6 +123,7 @@ _COMPOSITE_DIMENSIONS: frozenset[str] = frozenset(
         *COMPOSITE_URL_HOST,
         *COMPOSITE_URL_FULL,
         *COMPOSITE_DEVICE_VDOM,
+        *COMPOSITE_ID_DEVTYPE,
         *COMPOSITE_PREFIXED,
         *COMPOSITE_JSON,
     )
@@ -368,6 +370,37 @@ class OutputMasker:
             device = self._mask_scalar(HOSTNAME, match.group("dev"), mapping, keep=keep)
             out.append(f"{device}[{match.group('vdom')}]")
         return ",".join(out)
+
+    def _mask_id_devtype(
+        self, key: str, value: str, mapping: dict[str, str], keep: frozenset[str]
+    ) -> str:
+        """``"<identifier>,<devtype>"`` (fortiview-sources aggregates).
+
+        The head is masked by the type this key maps to, which is the type
+        its covered flat twin already uses. The devtype tail is an OS or
+        product string, the same class as ``srchwvendor`` and ``catdesc``
+        that ``fields.py`` declines by name, so it stays readable.
+
+        The tail goes through ``mask_text`` rather than back verbatim.
+        These are aggregating fields: a row covering several endpoints
+        comma-joins them, so a verbatim tail would hand back every
+        identifier after the first. ``mask_text`` catches the IPv4, MAC
+        and email shapes there. A second HOSTNAME in a tail is not
+        recoverable this way, since no hostname regex exists and adding
+        one would burn ordinary prose.
+
+        No comma means a shape we have not seen, so the whole value is
+        masked rather than returned untyped, matching what
+        ``_mask_device_vdom`` does with a bare device name.
+        """
+        if not value:
+            return value
+        vtype = COMPOSITE_ID_DEVTYPE[key]
+        head, sep, tail = value.partition(",")
+        if not sep:
+            return self._mask_scalar(vtype, value, mapping, keep=keep)
+        masked_head = self._mask_scalar(vtype, head, mapping, keep=keep)
+        return f"{masked_head},{self.mask_text(tail, mapping, keep)}"
 
     def _mask_breakdowns(self, value: Any, mapping: dict[str, str], keep: frozenset[str]) -> Any:
         """``{dimension: [{"value": ..., "hits": N}, ...]}`` (#98).
@@ -1205,6 +1238,10 @@ class OutputMasker:
             # happens to cover. The cost is real: a container whose keys
             # are allowlisted was masked reversibly before and now burns.
             return self._burn_strings(value, keep)
+        if lowered in COMPOSITE_ID_DEVTYPE and isinstance(value, str):
+            return self._mask_id_devtype(lowered, value, mapping, keep)
+        if lowered in COMPOSITE_ID_DEVTYPE and isinstance(value, list | dict):
+            return self._mask_composite_container(lowered, value, mapping, keep)
         if lowered in COMPOSITE_DEVICE_VDOM and isinstance(value, str):
             return self._mask_device_vdom(value, mapping, keep)
         if lowered in COMPOSITE_DEVICE_VDOM and isinstance(value, list | dict):
