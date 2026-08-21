@@ -2799,3 +2799,24 @@ class TestPercentEncodedFreeText:
         out, and the format change is the documented cost."""
         out = masker.mask_result({"msg": "src%3D192.0.2.77 blocked"})
         assert "192.0.2.77" not in str(out)
+
+    def test_an_untouched_escape_survives_when_the_plain_scan_already_hit(
+        self, masker: OutputMasker
+    ) -> None:
+        """The early return is load-bearing, and a mutation sweep caught
+        that nothing pinned it.
+
+        When the ordinary scan already masked something, the decode must
+        not run, or an escape that had nothing to do with the match gets
+        rewritten as a side effect. Measured with the guard removed:
+
+            src=<token> path%2Fto%2Ffile  ->  src=<token> path/to/file
+
+        The tokens are identical either way, because the decode reads the
+        ORIGINAL rather than the masked text. So this is about byte
+        fidelity, not about double-masking.
+        """
+        out = masker.mask_result({"srcip": "192.0.2.77", "msg": "src=192.0.2.77 path%2Fto%2Ffile"})
+        assert "192.0.2.77" not in str(out)
+        assert out["srcip"] in out["msg"]
+        assert "path%2Fto%2Ffile" in out["msg"]
