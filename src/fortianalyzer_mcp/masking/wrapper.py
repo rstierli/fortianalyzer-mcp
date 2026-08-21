@@ -69,6 +69,7 @@ import os
 import re
 from functools import wraps
 from typing import Any
+from urllib.parse import unquote
 
 from fortianalyzer_mcp.masking.fields import (
     COMPOSITE_BREAKDOWNS,
@@ -1424,10 +1425,45 @@ class OutputMasker:
         if value.strip() in SKIP_VALUES:
             return value
         try:
-            return self.mask_text(value, mapping, keep)
+            masked = self.mask_text(value, mapping, keep)
+            if masked != value:
+                return masked
+            return self._mask_percent_encoded_text(value, masked, mapping, keep)
         except Exception:
             logger.exception("unexpected error masking free text; placeholder used")
             return self.placeholder(value)
+
+    def _mask_percent_encoded_text(
+        self, value: str, masked: str, mapping: dict[str, str], keep: frozenset[str]
+    ) -> str:
+        """Second look at free text that FortiAnalyzer percent-encoded.
+
+        ``msg`` arrives encoded, so a MAC reaches the scan as
+        ``aa%3Abb%3A...`` and an email as ``analyst%40example.com``. The
+        pass-2 regexes need the literal ``:`` and ``@``, so neither
+        matched, and the original stayed readable beside its own masked
+        twin in the structured field of the same record (#80).
+
+        Decoding is a means of FINDING identifiers, not a reformatting of
+        tool output, so the caller keeps the exact bytes FortiAnalyzer
+        sent unless the decode actually surfaces something to mask. That
+        is what keeps ``"CPU 100% busy"`` and an encoded path with no
+        identifier in it byte-identical.
+
+        When it does surface one, the decoded and masked form goes out.
+        Re-encoding the untouched spans around a substitution is not
+        attempted: the token is not the same length or alphabet as what it
+        replaced, so a faithful round trip is not available, and emitting
+        a half-encoded string would be worse than the honest decoded one.
+        """
+        decoded = unquote(value)
+        if decoded == value:
+            return masked
+        decoded_masked = self.mask_text(decoded, mapping, keep)
+        if decoded_masked == decoded:
+            # Nothing found either way: hand back the original bytes.
+            return masked
+        return decoded_masked
 
     # -- tool-result entry point ----------------------------------------- #
 
