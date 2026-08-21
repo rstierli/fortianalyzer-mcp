@@ -1135,6 +1135,17 @@ class OutputMasker:
             return self._mask_composite_map(value, mapping, keep)
         if lowered in COMPOSITE_JSON and isinstance(value, str):
             return self._mask_json_blob(value, mapping, keep)
+        if lowered in COMPOSITE_JSON and isinstance(value, list):
+            # same list convention the other composites handle -- a list
+            # value here previously fell through every typed branch to
+            # _mask_structured with no key context, which cannot identify
+            # bare strings as JSON blobs and returned them verbatim.
+            return [
+                self._mask_json_blob(item, mapping, keep)
+                if isinstance(item, str)
+                else self._mask_structured(item, mapping, keep)
+                for item in value
+            ]
         if lowered in COMPOSITE_URL_HOST and isinstance(value, str):
             return self._mask_url_host(value, mapping, keep)
         if lowered in COMPOSITE_URL_HOST and isinstance(value, list):
@@ -1178,6 +1189,17 @@ class OutputMasker:
             return self._burn_strings(value, keep)
         if lowered in COMPOSITE_DEVICE_VDOM and isinstance(value, str):
             return self._mask_device_vdom(value, mapping, keep)
+        if lowered in COMPOSITE_DEVICE_VDOM and isinstance(value, list):
+            # same gap as COMPOSITE_JSON above: a list of device[vdom]
+            # strings fell through to _mask_structured with no key
+            # context and returned every device name verbatim, even with
+            # mask_device_identity on.
+            return [
+                self._mask_device_vdom(item, mapping, keep)
+                if isinstance(item, str)
+                else self._mask_structured(item, mapping, keep)
+                for item in value
+            ]
         if lowered in COMPOSITE_BREAKDOWNS and isinstance(value, dict):
             return self._mask_breakdowns(value, mapping, keep)
 

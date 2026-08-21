@@ -2212,6 +2212,26 @@ class TestCompositeMapShapes:
         assert self.IP not in str(out)
         assert not str(out["groupby1"]["srcip"]).startswith("['masked-unrepresentable")
 
+    def test_a_devvds_list_does_not_leak_device_identity(self, full_masker: OutputMasker) -> None:
+        """_typeable() claims every composite branch handles a list of
+        strings, but COMPOSITE_DEVICE_VDOM only had a str arm in
+        _mask_entry -- a list value was waved through _mask_composite_map
+        as "known and typeable", then fell through every typed branch
+        (list is not str) straight to _mask_structured with no key
+        context, which cannot identify bare strings as device[vdom]
+        pairs. Leaked real device names verbatim even with
+        mask_device_identity on."""
+        device = "fw-paris-01[root]"
+        out = full_masker.mask_result({"groupby1": {"devvds": [device, "fw-lyon-02[root]"]}})
+        assert device not in str(out)
+
+    def test_a_grpby_list_does_not_leak_an_embedded_identifier(self, masker: OutputMasker) -> None:
+        """Same gap as devvds above, for COMPOSITE_JSON: a list of JSON
+        blob strings under "grpby" fell through to _mask_structured with
+        no key context and returned the embedded IP verbatim."""
+        out = masker.mask_result({"groupby1": {"grpby": [f'{{"dstendpoint": "{self.IP}"}}']}})
+        assert self.IP not in str(out)
+
     def test_a_burned_value_is_recorded_so_its_twin_in_prose_follows(
         self, masker: OutputMasker
     ) -> None:
