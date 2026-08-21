@@ -2582,3 +2582,153 @@ class TestAuditConfirmedLeaks:
         value, secret = payloads[key]
         out = masker.mask_result({"breakdowns": {key: [{"value": value, "hits": 3}]}})
         assert secret not in str(out)
+
+
+class TestSecondTierAuditKeys:
+    """The #80 second-tier table, re-measured at `0d17c41` and fixed where
+    the fix is an allowlist or composite entry rather than a mechanism.
+
+    Two rows of that table did NOT survive re-measurement and are pinned
+    here as correct rather than fixed, because the sweep ran with
+    FAZ_MASK_DEVICE_IDENTITY off and estate identity is clear by design in
+    that configuration:
+
+      - ``name`` on ``list_devices`` masks correctly with the flag on when
+        the record carries a device-proving sibling (``sn``,
+        ``platform_str``). The bare ``{"name": ...}`` form is not a device
+        object and must stay clear, which is what the sibling machinery
+        exists to decide.
+      - ``devid`` on a vdom object masks with the flag on.
+
+    Each key below is classified by the table its covered twin already
+    uses, which is the whole principle of the audit: two spellings of one
+    value in one record must not disagree.
+    """
+
+    IP = "192.0.2.57"
+    HOST = "wkstn-audit-01"
+    SN = "FAZVM0000000000"
+    SSID = "CorpWiFi"
+    AP = "ap-lobby-01"
+    MAC = "aa:bb:cc:dd:ee:11"
+
+    def _masker(self, monkeypatch: pytest.MonkeyPatch, flag: bool) -> OutputMasker:
+        monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
+        return OutputMasker(FPEEngine(KEY), mask_device_identity=flag)
+
+    # ---- source: the structural twin of target ----
+
+    def test_source_entries_mask_like_target(self, masker: OutputMasker) -> None:
+        """Same [{"name": ..., "value": ...}] shape, alongside target in the
+        same alert. Measured leaking: five allowlisted renderings of the
+        same asset masked while source kept the address in clear."""
+        entry = [{"name": "device", "value": self.IP, "risk_type": "EndPoint"}]
+        out = masker.mask_result({"target": entry, "source": list(entry)})
+        assert self.IP not in str(out)
+        assert out["source"] == out["target"]
+
+    def test_a_scalar_source_is_not_burned(self, masker: OutputMasker) -> None:
+        """Deliberate divergence from target, which burns every non-list
+        shape. ``get_endpoints`` at detail_level="standard" emits a bare
+        ``source`` (measured during the #80 sweep), so a blanket burn would
+        destroy an ordinary enum on every endpoint read. target can burn
+        because the name is specific to the alert surface; source cannot,
+        because the name is generic."""
+        out = masker.mask_result({"source": "FortiClient"})
+        assert out["source"] == "FortiClient"
+
+    # ---- groupby3: an allowlisted dimension riding through on slot ----
+
+    def test_groupby3_masks_like_its_lower_numbered_siblings(self, masker: OutputMasker) -> None:
+        """The shipped handler catalogue puts qname in slot 3 on one
+        handler, so an allowlisted dimension rode through in clear purely
+        because of which slot it landed in."""
+        out = masker.mask_result({"groupby1": f"srcip:{self.IP}", "groupby3": f"srcip:{self.IP}"})
+        assert self.IP not in str(out)
+        assert out["groupby3"] == out["groupby1"]
+
+    # ---- Serial Number: the system-status vocabulary ----
+
+    def test_serial_number_follows_the_flag_like_sn(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """get_system_status spells its keys Title Case With Spaces.
+        Hostname matched despite the capital H because matching lowercases,
+        but "Serial Number" differs from sn by more than case. It is estate
+        identity, so it follows FAZ_MASK_DEVICE_IDENTITY exactly as sn
+        does: clear with the flag off, masked with it on."""
+        off = self._masker(monkeypatch, False).mask_result({"Serial Number": self.SN})
+        assert off["Serial Number"] == self.SN
+
+        on = self._masker(monkeypatch, True).mask_result({"Serial Number": self.SN, "sn": self.SN})
+        assert self.SN not in str(on)
+        assert on["Serial Number"] == on["sn"]
+
+    # ---- wireless: each key classified by its own twin ----
+
+    def test_ssid_and_vap_mask_whenever_bssid_does(self, masker: OutputMasker) -> None:
+        """bssid is a plain FIELD_TYPES entry, so it masks with the flag
+        off. The MAC form of a wireless network being masked while the name
+        form of the SAME network sits beside it in clear is exactly the
+        twin disagreement this audit is about."""
+        out = masker.mask_result({"bssid": self.MAC, "ssid": self.SSID, "vap": self.SSID})
+        assert self.SSID not in str(out)
+        assert out["ssid"] == out["vap"]
+
+    def test_ap_follows_the_flag_like_devname(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An access point name is estate identity, the same class as
+        devname, so it follows the flag rather than masking unconditionally
+        the way ssid does. The asymmetry is intentional and follows from
+        each key's own twin."""
+        off = self._masker(monkeypatch, False).mask_result({"ap": self.AP})
+        assert off["ap"] == self.AP
+
+        on = self._masker(monkeypatch, True).mask_result({"ap": self.AP, "devname": self.AP})
+        assert self.AP not in str(on)
+        assert on["ap"] == on["devname"]
+
+    # ---- reference_url ----
+
+    def test_reference_url_masks_like_url(self, masker: OutputMasker) -> None:
+        """COMPOSITE_URL_FULL carries "link" precisely because the
+        reputation source puts the indicator in the reference URL query
+        string, but the raw tool emits reference_url, which was typed by
+        nothing."""
+        raw = f"https://ti.example.com/q?ioc={self.IP}"
+        out = masker.mask_result({"url": raw, "reference_url": raw})
+        assert self.IP not in str(out)
+        assert out["reference_url"] == out["url"]
+
+    # ---- the container-shape matrix, extended to the new composite keys ----
+
+    @pytest.mark.parametrize("key", ["groupby3", "reference_url"])
+    def test_the_new_composite_keys_survive_the_container_shapes(
+        self, masker: OutputMasker, key: str
+    ) -> None:
+        payloads = {
+            "groupby3": (f"srcip:{self.IP}", self.IP),
+            "reference_url": (f"https://ti.example.com/q?ioc={self.IP}", self.IP),
+        }
+        value, secret = payloads[key]
+        for shape in (value, [value], {"a": value}, [[value]]):
+            out = masker.mask_result({key: shape})
+            assert secret not in str(out), f"{key} leaked under {shape!r}"
+
+    # ---- the two rows that did not survive re-measurement ----
+
+    def test_a_device_object_name_masks_with_the_flag_on(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pinned as correct, not fixed. The #80 table listed this as a
+        leak; the sweep ran flag-off, where estate identity is clear by
+        design."""
+        on = self._masker(monkeypatch, True)
+        assert self.HOST not in str(on.mask_result({"name": self.HOST, "sn": self.SN}))
+        assert self.HOST not in str(
+            on.mask_result({"name": self.HOST, "platform_str": "FortiGate-VM64"})
+        )
+
+    def test_a_bare_name_is_not_treated_as_a_device(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The counterpart. A name with no device-proving sibling belongs
+        to an ADOM, a report layout or a group, and burning it would mangle
+        every one of those."""
+        on = self._masker(monkeypatch, True)
+        assert on.mask_result({"name": "my-report-layout"}) == {"name": "my-report-layout"}

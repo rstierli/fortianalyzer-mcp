@@ -176,6 +176,12 @@ FIELD_TYPES: dict[str, str] = {
     "masterdstmac": MAC,
     "mac": MAC,
     "bssid": MAC,
+    # The name form of the same wireless network whose MAC form is
+    # bssid above. Masking one while the other sits beside it in clear
+    # is the twin disagreement #80 is about, so these follow bssid and
+    # mask regardless of the device-identity flag.
+    "ssid": HOSTNAME,
+    "vap": HOSTNAME,
     "stamac": MAC,
     "tamac": MAC,
     "source_mac": MAC,
@@ -401,12 +407,30 @@ FIELD_NAME_ARGS = ("fields", "group_by", "sample_by", "sort_by", "view_name")
 #:   groupby1/groupby2  "<fieldname>:<value>"   e.g. "dstip:192.0.2.1"
 #:   grpby              JSON, e.g. '[{"dstendpoint": "192.0.2.1"}]'
 #:   target             [{"name": "ip", "value": "192.0.2.1"}, ...]
-COMPOSITE_PREFIXED = ("groupby1", "groupby2")
+#: ``groupby3`` was uncovered while its two siblings were handled. The
+#: shipped alert-handler catalogue puts ``qname`` in slot 3 on one
+#: handler, so an allowlisted dimension rode through in clear purely
+#: because of which slot it landed in (#80).
+COMPOSITE_PREFIXED = ("groupby1", "groupby2", "groupby3")
 #: ``auto_raise_grpby`` is the incident-surface twin of ``grpby`` and
 #: carries the identical JSON payload; it was uncovered while its twin
 #: masked, measured on the live estate (#80).
 COMPOSITE_JSON = ("grpby", "auto_raise_grpby")
 COMPOSITE_TARGET = ("target",)
+
+#: The structural twin of ``target`` on the alert surface, same
+#: ``[{"name": ..., "value": ...}]`` shape, measured carrying an endpoint
+#: address in clear while five allowlisted renderings of the same asset
+#: masked in the same response (#80).
+#:
+#: Deliberately NOT folded into ``COMPOSITE_TARGET``: that kind burns every
+#: non-list shape, and ``get_endpoints`` at ``detail_level="standard"``
+#: emits a bare scalar ``source``, so a blanket burn would destroy an
+#: ordinary field on every endpoint read. ``target`` can afford to burn
+#: because the name is specific to one surface; ``source`` is a generic
+#: word and cannot. Only the list form is claimed here; every other shape
+#: keeps the ordinary allowlist treatment.
+COMPOSITE_SOURCE = ("source",)
 
 #: ``analyze_policy_traffic`` and ``query_logs(sample_by=...)``:
 #: ``{dimension: [{"value": "...", "hits": N}, ...]}``. The dimension name
@@ -497,8 +521,19 @@ COMPOSITE_ID_DEVTYPE: dict[str, str] = {
 DEVICE_IDENTITY_TYPES: dict[str, str] = {
     "devname": HOSTNAME,
     "devid": HOSTNAME,
+    # logs-event: the access point's own name, estate identity of the
+    # same class as devname, so it follows the flag rather than masking
+    # unconditionally the way the ssid beside it does (#80).
+    "ap": HOSTNAME,
     "sn": HOSTNAME,
     "serialno": HOSTNAME,
+    # get_system_status spells its keys Title Case With Spaces.
+    # "Hostname" matched despite the capital H because every key match
+    # lowercases, but "Serial Number" differs from sn by more than
+    # case and matched nothing, so the serial rode out beside a masked
+    # hostname in the same dict (#80). Key matching lowercases and does
+    # not strip whitespace, so the alias is spelled with the space.
+    "serial number": HOSTNAME,
     "csf": HOSTNAME,
     "sndetected": HOSTNAME,
     "snclosest": HOSTNAME,
@@ -544,7 +579,12 @@ COMPOSITE_URL_HOST = ("http_url",)
 #: puts the indicator in its query string ("...?query=<indicator>"), so the
 #: sensitive part is the tail, not the public portal host. Same treatment
 #: as ``url``, which keeps it reversible for anyone who wants to follow it.
-COMPOSITE_URL_FULL = ("url", "referralurl", "link")
+#: ``link`` is here precisely because the reputation source puts the
+#: indicator in the reference URL query string, but the raw IOC tool
+#: emits ``reference_url``: ``client.py`` sets the row verbatim and
+#: only the skills layer renames it, so the raw spelling was typed by
+#: nothing (#80).
+COMPOSITE_URL_FULL = ("url", "referralurl", "link", "reference_url")
 
 # Values that carry no identifier and pass through unmasked.
 SKIP_VALUES = frozenset({"", "N/A", "n/a", "unknown", "none", "-"})

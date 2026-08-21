@@ -77,6 +77,7 @@ from fortianalyzer_mcp.masking.fields import (
     COMPOSITE_ID_DEVTYPE,
     COMPOSITE_JSON,
     COMPOSITE_PREFIXED,
+    COMPOSITE_SOURCE,
     COMPOSITE_TARGET,
     COMPOSITE_URL_FULL,
     COMPOSITE_URL_HOST,
@@ -1227,6 +1228,13 @@ class OutputMasker:
             # cost is the same too: any analytic structure a producer put
             # there burns rather than round-tripping.
             return self._burn_strings(value, keep)
+        if lowered in COMPOSITE_SOURCE and isinstance(value, list):
+            # The list form is target's shape and gets target's handler.
+            # No other arm on purpose: unlike "target", the name "source"
+            # is generic (get_endpoints emits a bare scalar one), so every
+            # other shape keeps the ordinary allowlist treatment rather
+            # than being burned. See COMPOSITE_SOURCE in fields.py.
+            return self._mask_target(value, mapping, keep)
         if lowered in COMPOSITE_TARGET:
             if isinstance(value, list):
                 return self._mask_target(value, mapping, keep)
