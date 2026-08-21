@@ -2126,3 +2126,257 @@ class TestGroupByGroupsRowsAlreadyCovered:
 
         flagged = full_masker.mask_result(payload)
         assert flagged["groups"][0]["fortigate"] != DEV_NAME
+
+
+class TestCompositeMapShapes:
+    """A map under a group-by key must not ride through in clear.
+
+    A dict-shaped group-by used to fall through to the plain allowlist
+    walk, on the reasoning that the walk would type it by its inner keys.
+    That holds only when those keys happen to be allowlisted. Measured on
+    2.13.0 (``cfc2585``) before the fix, with RFC 5737 values:
+
+        {"groupby1": {"srcip": "192.0.2.90"}}     masked
+        {"groupby1": {"a": "srcip:192.0.2.90"}}   LEAK, verbatim
+        {"groupby1": {"a": "192.0.2.90"}}         LEAK, verbatim
+        {"groupby1": [{"a": "srcip:192.0.2.90"}]} LEAK, verbatim
+        {"groupby1": {"192.0.2.90": 5}}           LEAK, in the key
+
+    upstream #73 item 1.
+    """
+
+    IP = "192.0.2.90"
+
+    @pytest.mark.parametrize("key", ["groupby1", "groupby2"])
+    def test_an_unknown_inner_key_does_not_leak_its_value(
+        self, masker: OutputMasker, key: str
+    ) -> None:
+        out = masker.mask_result({key: {"a": f"srcip:{self.IP}"}})
+        assert self.IP not in str(out)
+
+    def test_an_unknown_inner_key_holding_a_bare_address_does_not_leak(
+        self, masker: OutputMasker
+    ) -> None:
+        out = masker.mask_result({"groupby1": {"a": self.IP}})
+        assert self.IP not in str(out)
+
+    def test_an_identifier_used_as_the_key_does_not_leak(self, masker: OutputMasker) -> None:
+        """The allowlist walk never masks a key, so a group-by keyed by the
+        identifier handed it over as the key itself."""
+        out = masker.mask_result({"groupby1": {self.IP: 5}})
+        assert self.IP not in str(out)
+
+    def test_a_map_nested_in_a_list_does_not_leak(self, masker: OutputMasker) -> None:
+        out = masker.mask_result({"groupby1": [{"a": f"srcip:{self.IP}"}]})
+        assert self.IP not in str(out)
+
+    def test_an_allowlisted_inner_key_still_masks_reversibly(self, masker: OutputMasker) -> None:
+        """The half that worked is kept: burning the whole map would throw
+        away a reversible mask, which is why this is not the blanket burn
+        the URL composites and ``target`` use."""
+        out = masker.mask_result({"groupby1": {"srcip": self.IP}})
+        assert self.IP not in str(out)
+        assert "srcip" in out["groupby1"]
+        assert not str(out["groupby1"]["srcip"]).startswith("masked-unrepresentable")
+
+    def test_known_and_unknown_keys_are_handled_separately(self, masker: OutputMasker) -> None:
+        out = masker.mask_result({"groupby1": {"srcip": self.IP, "a": "192.0.2.91"}})
+        rendered = str(out)
+        assert self.IP not in rendered
+        assert "192.0.2.91" not in rendered
+        assert "srcip" in out["groupby1"]
+
+    def test_the_string_form_is_untouched(self, masker: OutputMasker) -> None:
+        """The shape that already worked keeps working."""
+        out = masker.mask_result({"groupby1": f"srcip:{self.IP}"})
+        assert self.IP not in str(out)
+        assert str(out["groupby1"]).startswith("srcip:")
+
+    def test_a_known_key_holding_a_container_does_not_leak(self, masker: OutputMasker) -> None:
+        """Recognising the key is not enough. _mask_entry's branches are
+        shape-gated to strings, so a known key holding a container fell
+        back into the allowlist walk this function exists to distrust."""
+        for payload in (
+            {"groupby1": {"srcip": {"nested": self.IP}}},
+            {"groupby1": {"srcip": [{"nested": self.IP}]}},
+            {"groupby1": [{"srcip": [{"nested": self.IP}]}]},
+            {"groupby1": {"devvds": {"x": self.IP}}},
+            {"groupby1": {"grpby": {"x": self.IP}}},
+        ):
+            assert self.IP not in str(masker.mask_result(payload)), payload
+
+    def test_a_known_key_holding_a_list_of_strings_still_masks(self, masker: OutputMasker) -> None:
+        """The shape _mask_entry can type is still handed to it, so
+        narrowing the known branch does not burn what worked."""
+        out = masker.mask_result({"groupby1": {"srcip": [self.IP]}})
+        assert self.IP not in str(out)
+        assert not str(out["groupby1"]["srcip"]).startswith("['masked-unrepresentable")
+
+    def test_a_devvds_list_does_not_leak_device_identity(self, full_masker: OutputMasker) -> None:
+        """_typeable() claims every composite branch handles a list of
+        strings, but COMPOSITE_DEVICE_VDOM only had a str arm in
+        _mask_entry -- a list value was waved through _mask_composite_map
+        as "known and typeable", then fell through every typed branch
+        (list is not str) straight to _mask_structured with no key
+        context, which cannot identify bare strings as device[vdom]
+        pairs. Leaked real device names verbatim even with
+        mask_device_identity on."""
+        device = "fw-paris-01[root]"
+        out = full_masker.mask_result({"groupby1": {"devvds": [device, "fw-lyon-02[root]"]}})
+        assert device not in str(out)
+
+    def test_a_grpby_list_does_not_leak_an_embedded_identifier(self, masker: OutputMasker) -> None:
+        """Same gap as devvds above, for COMPOSITE_JSON: a list of JSON
+        blob strings under "grpby" fell through to _mask_structured with
+        no key context and returned the embedded IP verbatim."""
+        out = masker.mask_result({"groupby1": {"grpby": [f'{{"dstendpoint": "{self.IP}"}}']}})
+        assert self.IP not in str(out)
+
+    def test_a_burned_value_is_recorded_so_its_twin_in_prose_follows(
+        self, masker: OutputMasker
+    ) -> None:
+        """_burn_strings takes no mapping, so a burned value's twin in a
+        free-text field rode out in clear beside its own burned copy."""
+        out = masker.mask_result(
+            {"groupby1": {"srcuser": "walter.white"}, "msg": "blocked walter.white today"}
+        )
+        assert "walter.white" not in str(out)
+
+    def test_a_masked_value_is_recorded_so_its_twin_in_prose_follows(
+        self, masker: OutputMasker
+    ) -> None:
+        """The known branch has to keep feeding the shared mapping. Dropping
+        its result on the floor left the map masked and the same name in
+        clear two keys away, with the whole suite green."""
+        out = masker.mask_result(
+            {"groupby1": {"user": "walter.white"}, "msg": "blocked walter.white today"}
+        )
+        assert "walter.white" not in str(out)
+
+    def test_a_device_identity_key_keeps_its_name_with_the_flag_off(
+        self, masker: OutputMasker
+    ) -> None:
+        """The "is this name known" question is flag-independent. Asking
+        the flag-mutated table made devname read as unknown with the flag
+        off, so the KEY burned while the value stayed readable: mangled
+        schema on the majority configuration, for no gain."""
+        out = masker.mask_result({"groupby1": {"devname": "fw-paris-01"}})
+        assert "devname" in out["groupby1"]
+
+    def test_a_device_identity_key_still_masks_with_the_flag_on(
+        self, full_masker: OutputMasker
+    ) -> None:
+        out = full_masker.mask_result({"groupby1": {"devname": "fw-paris-01"}})
+        assert "devname" in out["groupby1"]
+        assert "fw-paris-01" not in str(out)
+
+    def test_a_known_key_is_matched_case_insensitively(self, masker: OutputMasker) -> None:
+        """FortiAnalyzer surfaces do not agree on case. Matching the key
+        verbatim would burn a dimension that masks reversibly today."""
+        out = masker.mask_result({"groupby1": {"SrcIP": self.IP}})
+        assert self.IP not in str(out)
+        assert "SrcIP" in out["groupby1"]
+        assert not str(out["groupby1"]["SrcIP"]).startswith("masked-unrepresentable")
+
+    def test_a_kept_value_is_not_burned_inside_the_map(self, masker: OutputMasker) -> None:
+        """A value the deployment chose to leave readable stays readable
+        under every key. Burning it here while devname shows it two keys
+        away is the same mismatch the keep set exists to prevent."""
+        out = masker.mask_result({"devname": "fw-paris-01", "groupby1": {"unknown": "fw-paris-01"}})
+        assert out["groupby1"]["unknown"] == "fw-paris-01"
+
+
+class TestCompositeContainerShapesKeepKeyContext:
+    """A composite key must keep deciding the type at every depth.
+
+    Each composite kind dispatches on the key, then on the value's shape.
+    The shapes with no arm fall to the generic tail, which walks by
+    allowlist and knows none of these inner names, so the payload rides
+    out in clear. The list arms had the same hole one level down: they
+    delegated a non-string element to ``_mask_structured``, which is the
+    route that strips the key context the value can only be typed by.
+
+    Measured on ``1f60904`` before the fix, RFC 5737 / RFC 2606 values:
+
+        {"devvds": {"a": "fw-oslo-01[root]"}}       LEAK, flag ON
+        {"devvds": {"fw-oslo-01[root]": 5}}         LEAK, flag ON, in the key
+        {"devvds": [["fw-oslo-01[root]"]]}          LEAK, flag ON
+        {"grpby": {"a": '{"dstendpoint": "<ip>"}'}} LEAK
+        {"grpby": {"<ip>": ...}}                    LEAK, in the key
+        {"grpby": [['{"dstendpoint": "<ip>"}']]}    LEAK
+        {"http_url": [["https://bad.example.com/x"]]} LEAK
+        {"url":      [["https://bad.example.com/x"]]} LEAK
+
+    Reachable rather than observed: no live surface sampled in the #80
+    sweep emitted a composite under a map or a nested list. The same was
+    true of ``groupby3`` and of the map shapes #116 closed.
+    """
+
+    IP = "192.0.2.90"
+    DEV = "fw-oslo-01[root]"
+    DEV_NAME = "fw-oslo-01"
+    HOST = "bad.example.com"
+    URL = "https://bad.example.com/x"
+
+    def _blob(self) -> str:
+        return f'{{"dstendpoint": "{self.IP}"}}'
+
+    # ---- devvds: the device-identity flag must survive every shape ----
+
+    def test_a_devvds_map_value_does_not_leak(self, full_masker: OutputMasker) -> None:
+        out = full_masker.mask_result({"devvds": {"a": self.DEV}})
+        assert self.DEV_NAME not in str(out)
+
+    def test_a_devvds_map_keyed_by_the_device_does_not_leak(
+        self, full_masker: OutputMasker
+    ) -> None:
+        """No later pass ever scans a key, so the map form hands the
+        device name over as the key itself."""
+        out = full_masker.mask_result({"devvds": {self.DEV: 5}})
+        assert self.DEV_NAME not in str(out)
+
+    def test_a_devvds_nested_list_does_not_leak(self, full_masker: OutputMasker) -> None:
+        out = full_masker.mask_result({"devvds": [[self.DEV]]})
+        assert self.DEV_NAME not in str(out)
+
+    def test_a_devvds_map_stays_readable_with_the_flag_off(self, masker: OutputMasker) -> None:
+        """The counterpart pin. Device identity is clear by design unless
+        the deployment opts in, so the container shapes must not be closed
+        by burning -- that would mask an estate name the flag-off
+        deployment is entitled to read, under a key whose string form
+        hands it back in clear two rows away."""
+        out = masker.mask_result({"devvds": {"a": self.DEV}})
+        assert out["devvds"]["a"] == self.DEV
+
+    # ---- grpby: a JSON blob under a container ----
+
+    def test_a_grpby_map_value_does_not_leak(self, masker: OutputMasker) -> None:
+        out = masker.mask_result({"grpby": {"a": self._blob()}})
+        assert self.IP not in str(out)
+
+    def test_a_grpby_map_keyed_by_the_identifier_does_not_leak(self, masker: OutputMasker) -> None:
+        out = masker.mask_result({"grpby": {self.IP: self._blob()}})
+        assert self.IP not in str(out)
+
+    def test_a_grpby_nested_list_does_not_leak(self, masker: OutputMasker) -> None:
+        out = masker.mask_result({"grpby": [[self._blob()]]})
+        assert self.IP not in str(out)
+
+    # ---- the URL composites, one level down from the arm that works ----
+
+    @pytest.mark.parametrize("key", ["http_url", "url", "referralurl", "link"])
+    def test_a_url_nested_list_does_not_leak(self, masker: OutputMasker, key: str) -> None:
+        out = masker.mask_result({key: [[self.URL]]})
+        assert self.HOST not in str(out)
+
+    # ---- the shapes that already worked keep working ----
+
+    def test_the_shapes_that_already_worked_are_untouched(
+        self, masker: OutputMasker, full_masker: OutputMasker
+    ) -> None:
+        assert self.DEV_NAME not in str(full_masker.mask_result({"devvds": self.DEV}))
+        assert self.DEV_NAME not in str(full_masker.mask_result({"devvds": [self.DEV]}))
+        assert self.IP not in str(masker.mask_result({"grpby": self._blob()}))
+        assert self.IP not in str(masker.mask_result({"grpby": [self._blob()]}))
+        assert self.HOST not in str(masker.mask_result({"http_url": self.URL}))
+        assert self.HOST not in str(masker.mask_result({"http_url": [self.URL]}))
