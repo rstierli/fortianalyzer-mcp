@@ -699,3 +699,65 @@ class TestResolveNeverRaises:
 
         with pytest.raises(RuntimeError, match="orchestration failure"):
             unmasker.resolve_scalar(value)
+
+
+class TestBudgetExhaustionDoesNotDowngradeTheWriteRefusal:
+    """``contains_marked`` caught every ``MaskingError``, including the
+    one that is not a decrypt failure.
+
+    ``VerificationBudgetExhausted`` is its own type precisely so the
+    boundary can treat it differently: exhaustion means "we could not
+    check", and resolving part of a response and passing the rest through
+    as literals is the outcome this engine's own history calls worse than
+    refusing. Caught as an ordinary decrypt failure it fell to a shape
+    test instead, which answers a different question.
+
+    Measured before the fix: no live bypass, because the shape regex
+    alternation and ``V2_MARKERS`` happen to list the same seven markers.
+    That is the whole problem. Two independently maintained definitions
+    of "is this one of ours" agreeing today is the same structure that
+    produced three separate leaks in this repo, so the second test here
+    stops it being a coincidence.
+    """
+
+    def test_the_marker_set_and_the_shape_regex_cannot_diverge(self) -> None:
+        """The durable half. Any marker added to V2_MARKERS without the
+        regex learning it becomes a hole the moment a decrypt fails."""
+        from fortianalyzer_mcp.masking.fpe_engine import V2_MARKERS
+        from fortianalyzer_mcp.masking.wrapper import _TOKEN_PREFIX_SHAPE_RE
+
+        alternation = set(_TOKEN_PREFIX_SHAPE_RE.pattern.split("(?:")[1].split(")")[0].split("|"))
+        assert set(V2_MARKERS.values()) == alternation
+
+    @pytest.mark.asyncio
+    async def test_exhaustion_still_refuses_a_marked_write_argument(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The behavioural half, driven through the real boundary: a write
+        tool handed a marked token must be refused whether the tag check
+        ran or ran out."""
+        from mcp.server.mcpserver import MCPServer
+
+        from fortianalyzer_mcp.masking.fpe_engine import VerificationBudgetExhausted
+
+        monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
+        mcp = MCPServer("test")
+        masker, _ = install_masking(mcp)
+        token = FPEEngine(KEY).mint("ip", "192.0.2.102")
+
+        called: dict[str, object] = {}
+
+        @mcp.tool()
+        async def fake_write(srcip: str) -> dict:
+            called["srcip"] = srcip
+            return {"ok": True}
+
+        def boom(_value: str) -> object:
+            raise VerificationBudgetExhausted("budget spent")
+
+        monkeypatch.setattr(masker._engine, "unmask_token", boom)
+
+        result = await fake_write(srcip=token)
+        assert "srcip" not in called, "the write body ran on a marked argument"
+        assert isinstance(result, dict)
+        assert result.get("status") == "error" or "refus" in str(result).lower()
