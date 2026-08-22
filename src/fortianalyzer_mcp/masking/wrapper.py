@@ -85,6 +85,7 @@ from fortianalyzer_mcp.masking.fields import (
     FIELD_TYPES,
     HOSTNAME,
     IP,
+    IP_HOST_OR_SERIAL,
     IP_OR_HOST,
     MAC,
     OBF_URL_KEY,
@@ -324,6 +325,34 @@ class OutputMasker:
             return self._engine.mint("hostname", value)
         return self._engine.mint("ip", value)
 
+    #: FortiGate/FortiAP/FortiSwitch etc. serial shape -- byte-identical to
+    #: fortimanager-mcp's DEVICE_SERIAL_PATTERN, since a serial that reaches
+    #: this codepath from a live estate looks the same regardless of which
+    #: MCP server observed it. Checked before HOSTNAME: real hostnames do
+    #: not start with a 2-letter Fortinet product code followed by 10-20
+    #: uppercase alphanumerics with no dots or hyphens, so the false-positive
+    #: risk of masking a hostname as a serial is effectively nil.
+    _SERIAL_SHAPE_RE = re.compile(r"^(FG|FM|FW|FA|FS|FD|FP|FC|FV|PU|PS)[A-Z0-9]{10,20}$")
+
+    def _mask_ip_host_or_serial(self, value: str) -> str:
+        """Mask a field that holds an address, a name, or a device serial.
+
+        target[].value under name=="device" is polymorphic: measured
+        fixture data shows this slot carries either an endpoint hostname or
+        the device's own serial. A serial minted as a hostname loses its
+        case (SERIAL exists specifically because of this -- see its
+        docstring), which also breaks token correlation with the same
+        device's serial appearing elsewhere in the same record under "sn".
+        """
+        stripped = value.strip()
+        try:
+            ipaddress.ip_address(stripped)
+        except ValueError:
+            if self._SERIAL_SHAPE_RE.match(stripped):
+                return self._engine.mint("serial", value)
+            return self._engine.mint("hostname", value)
+        return self._engine.mint("ip", value)
+
     def _mask_one(self, vtype: str, value: str) -> str:
         try:
             if vtype == IP:
@@ -332,6 +361,8 @@ class OutputMasker:
                 return self._engine.mint("mac", value)
             if vtype == IP_OR_HOST:
                 return self._mask_ip_or_host(value)
+            if vtype == IP_HOST_OR_SERIAL:
+                return self._mask_ip_host_or_serial(value)
             if vtype == HOSTNAME:
                 return self._engine.mint("hostname", value)
             if vtype == SERIAL:

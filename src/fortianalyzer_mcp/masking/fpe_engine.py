@@ -580,7 +580,14 @@ class FPEEngine:
         if match is None:
             raise MaskingError("not a v2 token")
         marker = match.group("marker").lower()
-        vtype = next(t for t, m in V2_MARKERS.items() if m == marker)
+        try:
+            vtype = next(t for t, m in V2_MARKERS.items() if m == marker)
+        except StopIteration:  # pragma: no cover - markers are a closed set
+            # Same guard is_own_v2_token takes on the identical lookup: if
+            # V2_MARKERS and _V2_SHAPE_RE's marker alternation ever diverge,
+            # this fails closed with the documented refusal instead of an
+            # unhandled StopIteration escaping the masking boundary.
+            raise MaskingError("not a v2 token") from None
         # Username ciphertext is case-sensitive; every other payload is
         # lowercase by construction and folding tolerates a re-cased token.
         payload = match.group("ct") if vtype == "username" else match.group("ct").lower()

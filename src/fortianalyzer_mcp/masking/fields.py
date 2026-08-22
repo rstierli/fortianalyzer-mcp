@@ -147,6 +147,15 @@ TEXT = "text"  # free text: embedded IOCs are masked in place
 #: parses as an IP), so the round trip is unambiguous.
 IP_OR_HOST = "ip_or_host"
 
+#: Like IP_OR_HOST, plus a device serial. Needed for target[].value under
+#: name=="device": measured fixture data shows this slot carries either an
+#: endpoint hostname or the device's own serial (see the "sn" field type's
+#: docstring for why a serial cannot round-trip as a hostname -- case is
+#: lost). Kept separate from IP_OR_HOST rather than teaching every
+#: IP_OR_HOST field to also try serial-shape, since none of the others
+#: (endpoint, host_name) are documented to ever carry one.
+IP_HOST_OR_SERIAL = "ip_host_or_serial"
+
 FIELD_TYPES: dict[str, str] = {
     # --- IP carriers (log fields + alert/event_details variants)
     "srcip": IP,
@@ -510,7 +519,7 @@ DEVICE_IDENTITY_TYPES: dict[str, str] = {
 TARGET_NAME_TYPES: dict[str, str] = {
     "ip": IP,
     "domain": DOMAIN,
-    "device": IP_OR_HOST,
+    "device": IP_HOST_OR_SERIAL,
     "endpoint": IP_OR_HOST,
     "user": USERNAME,
     # Live webfilter alerts carry the browsed destination as a host_name

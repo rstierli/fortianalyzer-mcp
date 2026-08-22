@@ -767,6 +767,33 @@ class TestTargetDeviceIdentityConsistency:
         assert masked["target"][4]["value"] == masked["devid"]  # same identifier, same token
         assert DEV_SERIAL not in str(masked)
 
+    def test_a_real_shaped_serial_masks_with_the_sn_token_not_as_a_hostname(
+        self, full_masker: OutputMasker
+    ):
+        """TARGET_NAME_TYPES["device"] was IP_OR_HOST, which has no serial
+        branch: a real FortiGate-shaped serial masked as a lowercased
+        hostname token instead of the case-preserving serial one, breaking
+        correlation with the identical value under "sn" (masks reversibly
+        via SERIAL) and losing case on unmask. DEV_SERIAL above predates
+        this fix and does not have the real serial shape, so it never
+        exercised this branch -- this uses one that does."""
+        serial = "FGT60FTK20000001"
+        masked = full_masker.mask_result(
+            {"sn": serial, "target": [{"name": "device", "value": serial}]}
+        )
+        assert serial not in str(masked)
+        assert masked["target"][0]["value"] == masked["sn"]  # same identifier, same token
+        assert masked["sn"].startswith("sn-")
+
+    def test_an_endpoint_shaped_device_target_still_masks_as_a_hostname(
+        self, full_masker: OutputMasker
+    ):
+        """The polymorphic device slot must not regress the far more common
+        hostname/endpoint-name case while gaining serial detection."""
+        masked = full_masker.mask_result({"target": [{"name": "device", "value": ENDPOINT_NAME}]})
+        assert ENDPOINT_NAME not in str(masked)
+        assert masked["target"][0]["value"].startswith("host-")
+
 
 class TestUrlHostMasking:
     """``http_url``: the URL's HOST component masks in place; scheme, path
