@@ -481,7 +481,20 @@ COMPOSITE_DEVICE_VDOM = ("devvds",)
 #: opts in via ``FAZ_MASK_DEVICE_IDENTITY``; see the module docstring.
 DEVICE_IDENTITY_TYPES: dict[str, str] = {
     "devname": HOSTNAME,
-    "devid": HOSTNAME,
+    # This repo's own tools layer documents devid as the SERIAL-carrying
+    # spelling, in three places: fortiview_tools.py builds
+    # [{"devid": <serial>}] for a serial-shaped value and notes that "a
+    # serial under devname silently matches nothing", and report_tools.py
+    # routes "serials -> devid, names -> devname". Typed HOSTNAME it kept
+    # the exact round-trip bug SERIAL was added to fix: a serial came back
+    # lowercased, and it minted a different token from the same serial
+    # under sn on the same list_devices row.
+    #
+    # IP_HOST_OR_SERIAL rather than a flat SERIAL because devid is
+    # polymorphic in practice, holding a device NAME on the surfaces the
+    # #80 sweep sampled. Same reasoning, and the same type, as the
+    # "device" target slot.
+    "devid": IP_HOST_OR_SERIAL,
     # The serial-carrying keys take SERIAL rather than HOSTNAME, so they
     # round-trip byte-exact. Only keys already in this table move; the
     # spelling variants found in #80 (module_sn, tunnel_sn) are not added
