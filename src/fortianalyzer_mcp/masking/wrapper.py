@@ -1285,12 +1285,24 @@ class OutputMasker:
             # cost is the same too: any analytic structure a producer put
             # there burns rather than round-tripping.
             return self._burn_strings(value, keep)
-        if lowered in COMPOSITE_SOURCE and isinstance(value, list):
-            # The list form is target's shape and gets target's handler.
-            # No other arm on purpose: unlike "target", the name "source"
-            # is generic (get_endpoints emits a bare scalar one), so every
-            # other shape keeps the ordinary allowlist treatment rather
-            # than being burned. See COMPOSITE_SOURCE in fields.py.
+        if (
+            lowered in COMPOSITE_SOURCE
+            and isinstance(value, list)
+            and any(isinstance(item, dict) for item in value)
+        ):
+            # Gated on the ELEMENT type, not just on being a list, because
+            # "source" has two live shapes and only one of them is
+            # target's. The alert surface sends [{"name": ..., "value":
+            # ...}], which carries an identifier. The UEBA endpoint
+            # surface sends a list of bare detection-method labels, and
+            # _mask_target burns every entry that is not a dict, so
+            # claiming the whole list destroyed them (measured live: 152
+            # of 394 endpoint records, 16 distinct label values, burned
+            # irreversibly with the device-identity flag off).
+            #
+            # Everything else keeps the ordinary allowlist treatment, for
+            # the reason in fields.py: "source" is a generic name and this
+            # key cannot afford target's burn-by-default.
             return self._mask_target(value, mapping, keep)
         if lowered in COMPOSITE_TARGET:
             if isinstance(value, list):
