@@ -2532,6 +2532,22 @@ class TestAuditConfirmedLeaks:
         assert self.MAC not in rendered
         assert second not in rendered
 
+    def test_a_second_hostname_pair_in_the_tail_does_not_leak(self, masker: OutputMasker) -> None:
+        """mac_devtype_agg's second-pair coverage above is incidental,
+        not designed: mask_text's MAC regex happens to catch a second
+        MAC, but has no hostname regex, so dev_src_agg's second pair had
+        no protection at all. Walking every pair by position rather than
+        only typing the first closes this without needing one."""
+        second = "wkstn-02.corp.local"
+        out = masker.mask_result(
+            {"dev_src_agg": f"{self.HOST},{self.DEVTYPE},{second},{self.DEVTYPE}"}
+        )
+        rendered = str(out)
+        assert self.HOST not in rendered
+        assert second not in rendered
+        # the devtype strings stay readable
+        assert rendered.count(self.DEVTYPE) == 2
+
     def test_a_value_with_no_comma_is_masked_whole(self, masker: OutputMasker) -> None:
         """Same fallback devvds uses for a shape it has not seen: mask the
         whole thing rather than hand back an untyped string."""
