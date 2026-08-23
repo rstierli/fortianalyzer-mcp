@@ -2800,23 +2800,37 @@ class TestPercentEncodedFreeText:
         out = masker.mask_result({"msg": "src%3D192.0.2.77 blocked"})
         assert "192.0.2.77" not in str(out)
 
-    def test_an_untouched_escape_survives_when_the_plain_scan_already_hit(
+    def test_a_second_identifier_hiding_behind_an_escape_is_not_missed(
         self, masker: OutputMasker
     ) -> None:
-        """The early return is load-bearing, and a mutation sweep caught
-        that nothing pinned it.
+        """The previous shape of this function returned as soon as the
+        plain-text scan matched anything, so the decode pass never ran at
+        all when a plain-form identifier was already present -- a second,
+        percent-encoded identifier next to it went straight through in
+        clear. Measured pre-fix:
 
-        When the ordinary scan already masked something, the decode must
-        not run, or an escape that had nothing to do with the match gets
-        rewritten as a side effect. Measured with the guard removed:
+            src=192.0.2.77 mac=aa%3Abb%3Acc%3Add%3Aee%3A11
+              -> src=<token> mac=aa%3Abb%3Acc%3Add%3Aee%3A11  (MAC leaked)
 
-            src=<token> path%2Fto%2Ffile  ->  src=<token> path/to/file
+        Both must be masked now, in the same value, regardless of which
+        form either one arrived in."""
+        out = masker.mask_result({"msg": "src=192.0.2.77 mac=aa%3Abb%3Acc%3Add%3Aee%3A11 blocked"})
+        rendered = str(out)
+        assert "192.0.2.77" not in rendered
+        assert "aa%3Abb%3Acc%3Add%3Aee%3A11" not in rendered
+        assert self.MAC not in rendered
 
-        The tokens are identical either way, because the decode reads the
-        ORIGINAL rather than the masked text. So this is about byte
-        fidelity, not about double-masking.
-        """
+    def test_an_unrelated_escape_may_decode_as_a_side_effect_of_a_real_find(
+        self, masker: OutputMasker
+    ) -> None:
+        """Byte fidelity is preserved only when nothing in the value needs
+        masking at all (see the two pins above): once any identifier is
+        found -- via the plain scan or the decoded one -- the value the
+        caller gets back is masked either way it was reached, and an
+        unrelated escape sitting next to a genuine identifier may come
+        back decoded as a side effect. That is an acceptable, documented
+        cost; the previous version paid the opposite cost instead, which
+        was a real identifier leak, not a formatting nicety."""
         out = masker.mask_result({"srcip": "192.0.2.77", "msg": "src=192.0.2.77 path%2Fto%2Ffile"})
         assert "192.0.2.77" not in str(out)
         assert out["srcip"] in out["msg"]
-        assert "path%2Fto%2Ffile" in out["msg"]
