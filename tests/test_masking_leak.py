@@ -2362,6 +2362,32 @@ class TestCompositeContainerShapesKeepKeyContext:
         out = masker.mask_result({"grpby": [[self._blob()]]})
         assert self.IP not in str(out)
 
+    # ---- grpby: the ALREADY-PARSED dict form, not a JSON-string blob ----
+    #
+    # Distinct from the map-of-blob-string tests above: here the dict IS
+    # the parsed payload (as fetch_fortiview hands it back for some FAZ
+    # builds), not a wrapper whose values are still JSON strings. Measured
+    # live: {"grpby": [{"dstendpoint": "<hostname>"}]} leaked the hostname
+    # verbatim while the JSON-STRING form of the identical payload masked
+    # it correctly -- the dict form had no key-typed arm and fell through
+    # to the outer-key-only route, which only a bare string can be typed
+    # by. A hostname (not an IP) is used deliberately: it cannot be caught
+    # incidentally by mask_text's IP/MAC/email regexes, so it only passes
+    # if the dict's own inner key ("dstendpoint") is actually doing the
+    # typing.
+
+    NATIVE_HOST = "websrv-native-01.corp.local"
+
+    def test_a_grpby_list_of_native_dicts_does_not_leak_a_hostname(
+        self, masker: OutputMasker
+    ) -> None:
+        out = masker.mask_result({"grpby": [{"dstendpoint": self.NATIVE_HOST}]})
+        assert self.NATIVE_HOST not in str(out)
+
+    def test_a_grpby_bare_native_dict_does_not_leak_a_hostname(self, masker: OutputMasker) -> None:
+        out = masker.mask_result({"grpby": {"dstendpoint": self.NATIVE_HOST}})
+        assert self.NATIVE_HOST not in str(out)
+
     # ---- the URL composites, one level down from the arm that works ----
 
     @pytest.mark.parametrize("key", ["http_url", "url", "referralurl", "link"])
