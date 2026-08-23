@@ -376,33 +376,49 @@ class OutputMasker:
     def _mask_id_devtype(
         self, key: str, value: str, mapping: dict[str, str], keep: frozenset[str]
     ) -> str:
-        """``"<identifier>,<devtype>"`` (fortiview-sources aggregates).
+        """``"<identifier>,<devtype>,<identifier>,<devtype>,..."``
+        (fortiview-sources aggregates).
 
-        The head is masked by the type this key maps to, which is the type
-        its covered flat twin already uses. The devtype tail is an OS or
-        product string, the same class as ``srchwvendor`` and ``catdesc``
-        that ``fields.py`` declines by name, so it stays readable.
+        Each identifier is masked by the type this key maps to, which is
+        the type its covered flat twin already uses. Each devtype is an OS
+        or product string, the same class as ``srchwvendor`` and
+        ``catdesc`` that ``fields.py`` declines by name, so it stays
+        readable -- run through ``mask_text`` rather than back verbatim
+        only to catch an identifier accidentally embedded in it, same as
+        any other free-text field.
 
-        The tail goes through ``mask_text`` rather than back verbatim.
         These are aggregating fields: a row covering several endpoints
-        comma-joins them, so a verbatim tail would hand back every
-        identifier after the first. ``mask_text`` catches the IPv4, MAC
-        and email shapes there. A second HOSTNAME in a tail is not
-        recoverable this way, since no hostname regex exists and adding
-        one would burn ordinary prose.
+        comma-joins their pairs, per this field's own docstring in
+        ``fields.py``. Only typing the first pair and handing the rest to
+        ``mask_text`` -- the previous shape of this function -- caught a
+        repeated MAC by accident (``mask_text`` has a MAC regex) but never
+        a repeated HOSTNAME (no hostname regex exists, nor should one:
+        scanning arbitrary prose for anything hostname-shaped burns
+        ordinary text). Walking every pair explicitly and typing each
+        identifier by position sidesteps that entirely -- it never needs a
+        hostname regex, because it is never guessing which substring is an
+        identifier; the comma-delimited shape already says so.
 
         No comma means a shape we have not seen, so the whole value is
         masked rather than returned untyped, matching what
-        ``_mask_device_vdom`` does with a bare device name.
+        ``_mask_device_vdom`` does with a bare device name. An odd number
+        of parts (a trailing identifier with no devtype) is the same
+        situation for its last pair, so that lone identifier is masked
+        as one too rather than left readable or dropped.
         """
         if not value:
             return value
         vtype = COMPOSITE_ID_DEVTYPE[key]
-        head, sep, tail = value.partition(",")
-        if not sep:
+        parts = value.split(",")
+        if len(parts) < 2:
             return self._mask_scalar(vtype, value, mapping, keep=keep)
-        masked_head = self._mask_scalar(vtype, head, mapping, keep=keep)
-        return f"{masked_head},{self.mask_text(tail, mapping, keep)}"
+        masked_parts = [
+            self._mask_scalar(vtype, part, mapping, keep=keep)
+            if i % 2 == 0
+            else self.mask_text(part, mapping, keep)
+            for i, part in enumerate(parts)
+        ]
+        return ",".join(masked_parts)
 
     def _mask_breakdowns(self, value: Any, mapping: dict[str, str], keep: frozenset[str]) -> Any:
         """``{dimension: [{"value": ..., "hits": N}, ...]}`` (#98).
@@ -580,9 +596,50 @@ class OutputMasker:
 
         Keys are masked as well as values: no later pass ever scans a key,
         so a map keyed by the identifier hands it over as the key itself.
+
+        COMPOSITE_JSON's dict form is the one exception to "re-enter under
+        the same key": a native dict here can be either shape _mask_json_blob
+        would otherwise have to parse out of a string -- an already-parsed
+        payload, whose own field names (not the outer key) type its
+        contents, or a wrapper whose values are themselves JSON-string
+        blobs one level down (the same shape #117's tests keep under the
+        outer key). Re-entering everything under the outer key asked
+        _mask_entry to type the whole dict as e.g. "grpby", which only the
+        str-only _mask_json_blob can read; every field inside a parsed
+        payload fell through unmasked. Measured:
+        {"grpby": [{"dstendpoint": "web-01.corp.local"}]} (a list containing
+        one such dict) leaked the hostname in clear while the JSON-STRING
+        form of the identical payload correctly masked it.
+
+        Distinguishing the two shapes per inner value rather than per whole
+        dict: a string value that parses as JSON is a nested blob and goes
+        to _mask_json_blob (preserves #117's wrapper-of-blobs shape); any
+        other value belongs to this dict's own structure and is typed by
+        its own inner key via _mask_entry, not the outer composite key --
+        that inner-key dispatch is what correctly masks a bare
+        "dstendpoint": "web-01.corp.local" pair, typed rather than caught
+        incidentally by mask_text's IP/MAC/email-only regexes. A nested
+        dict/list value recurses through _mask_structured so its own keys
+        keep typing it. A list of JSON-string elements is unaffected: each
+        string element still re-enters under the outer key one level up
+        and dispatches to _mask_json_blob exactly as before.
         """
         if isinstance(value, list | tuple):
             return [self._mask_entry(key, item, mapping, keep) for item in value]
+        if key in COMPOSITE_JSON:
+            out: dict[Any, Any] = {}
+            for inner_key, item in value.items():
+                masked_key = self._mask_entry(key, inner_key, mapping, keep)
+                if isinstance(item, str):
+                    try:
+                        json.loads(item)
+                    except (ValueError, TypeError):
+                        out[masked_key] = self._mask_entry(inner_key, item, mapping, keep)
+                    else:
+                        out[masked_key] = self._mask_json_blob(item, mapping, keep)
+                else:
+                    out[masked_key] = self._mask_structured(item, mapping, keep)
+            return out
         return {
             self._mask_entry(key, inner_key, mapping, keep): self._mask_entry(
                 key, item, mapping, keep

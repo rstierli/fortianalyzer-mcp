@@ -2362,6 +2362,32 @@ class TestCompositeContainerShapesKeepKeyContext:
         out = masker.mask_result({"grpby": [[self._blob()]]})
         assert self.IP not in str(out)
 
+    # ---- grpby: the ALREADY-PARSED dict form, not a JSON-string blob ----
+    #
+    # Distinct from the map-of-blob-string tests above: here the dict IS
+    # the parsed payload (as fetch_fortiview hands it back for some FAZ
+    # builds), not a wrapper whose values are still JSON strings. Measured
+    # live: {"grpby": [{"dstendpoint": "<hostname>"}]} leaked the hostname
+    # verbatim while the JSON-STRING form of the identical payload masked
+    # it correctly -- the dict form had no key-typed arm and fell through
+    # to the outer-key-only route, which only a bare string can be typed
+    # by. A hostname (not an IP) is used deliberately: it cannot be caught
+    # incidentally by mask_text's IP/MAC/email regexes, so it only passes
+    # if the dict's own inner key ("dstendpoint") is actually doing the
+    # typing.
+
+    NATIVE_HOST = "websrv-native-01.corp.local"
+
+    def test_a_grpby_list_of_native_dicts_does_not_leak_a_hostname(
+        self, masker: OutputMasker
+    ) -> None:
+        out = masker.mask_result({"grpby": [{"dstendpoint": self.NATIVE_HOST}]})
+        assert self.NATIVE_HOST not in str(out)
+
+    def test_a_grpby_bare_native_dict_does_not_leak_a_hostname(self, masker: OutputMasker) -> None:
+        out = masker.mask_result({"grpby": {"dstendpoint": self.NATIVE_HOST}})
+        assert self.NATIVE_HOST not in str(out)
+
     # ---- the URL composites, one level down from the arm that works ----
 
     @pytest.mark.parametrize("key", ["http_url", "url", "referralurl", "link"])
@@ -2531,6 +2557,22 @@ class TestAuditConfirmedLeaks:
         rendered = str(out)
         assert self.MAC not in rendered
         assert second not in rendered
+
+    def test_a_second_hostname_pair_in_the_tail_does_not_leak(self, masker: OutputMasker) -> None:
+        """mac_devtype_agg's second-pair coverage above is incidental,
+        not designed: mask_text's MAC regex happens to catch a second
+        MAC, but has no hostname regex, so dev_src_agg's second pair had
+        no protection at all. Walking every pair by position rather than
+        only typing the first closes this without needing one."""
+        second = "wkstn-02.corp.local"
+        out = masker.mask_result(
+            {"dev_src_agg": f"{self.HOST},{self.DEVTYPE},{second},{self.DEVTYPE}"}
+        )
+        rendered = str(out)
+        assert self.HOST not in rendered
+        assert second not in rendered
+        # the devtype strings stay readable
+        assert rendered.count(self.DEVTYPE) == 2
 
     def test_a_value_with_no_comma_is_masked_whole(self, masker: OutputMasker) -> None:
         """Same fallback devvds uses for a shape it has not seen: mask the
