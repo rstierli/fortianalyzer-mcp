@@ -2327,6 +2327,102 @@ class TestCompositeMapShapes:
         assert out["groupby1"]["unknown"] == "fw-paris-01"
 
 
+class TestCompositeContainerShapesKeepKeyContext:
+    """A composite key must keep deciding the type at every depth.
+
+    Each composite kind dispatches on the key, then on the value's shape.
+    The shapes with no arm fall to the generic tail, which walks by
+    allowlist and knows none of these inner names, so the payload rides
+    out in clear. The list arms had the same hole one level down: they
+    delegated a non-string element to ``_mask_structured``, which is the
+    route that strips the key context the value can only be typed by.
+
+    Measured on ``1f60904`` before the fix, RFC 5737 / RFC 2606 values:
+
+        {"devvds": {"a": "fw-oslo-01[root]"}}       LEAK, flag ON
+        {"devvds": {"fw-oslo-01[root]": 5}}         LEAK, flag ON, in the key
+        {"devvds": [["fw-oslo-01[root]"]]}          LEAK, flag ON
+        {"grpby": {"a": '{"dstendpoint": "<ip>"}'}} LEAK
+        {"grpby": {"<ip>": ...}}                    LEAK, in the key
+        {"grpby": [['{"dstendpoint": "<ip>"}']]}    LEAK
+        {"http_url": [["https://bad.example.com/x"]]} LEAK
+        {"url":      [["https://bad.example.com/x"]]} LEAK
+
+    Reachable rather than observed: no live surface sampled in the #80
+    sweep emitted a composite under a map or a nested list. The same was
+    true of ``groupby3`` and of the map shapes #116 closed.
+    """
+
+    IP = "192.0.2.90"
+    DEV = "fw-oslo-01[root]"
+    DEV_NAME = "fw-oslo-01"
+    HOST = "bad.example.com"
+    URL = "https://bad.example.com/x"
+
+    def _blob(self) -> str:
+        return f'{{"dstendpoint": "{self.IP}"}}'
+
+    # ---- devvds: the device-identity flag must survive every shape ----
+
+    def test_a_devvds_map_value_does_not_leak(self, full_masker: OutputMasker) -> None:
+        out = full_masker.mask_result({"devvds": {"a": self.DEV}})
+        assert self.DEV_NAME not in str(out)
+
+    def test_a_devvds_map_keyed_by_the_device_does_not_leak(
+        self, full_masker: OutputMasker
+    ) -> None:
+        """No later pass ever scans a key, so the map form hands the
+        device name over as the key itself."""
+        out = full_masker.mask_result({"devvds": {self.DEV: 5}})
+        assert self.DEV_NAME not in str(out)
+
+    def test_a_devvds_nested_list_does_not_leak(self, full_masker: OutputMasker) -> None:
+        out = full_masker.mask_result({"devvds": [[self.DEV]]})
+        assert self.DEV_NAME not in str(out)
+
+    def test_a_devvds_map_stays_readable_with_the_flag_off(self, masker: OutputMasker) -> None:
+        """The counterpart pin. Device identity is clear by design unless
+        the deployment opts in, so the container shapes must not be closed
+        by burning -- that would mask an estate name the flag-off
+        deployment is entitled to read, under a key whose string form
+        hands it back in clear two rows away."""
+        out = masker.mask_result({"devvds": {"a": self.DEV}})
+        assert out["devvds"]["a"] == self.DEV
+
+    # ---- grpby: a JSON blob under a container ----
+
+    def test_a_grpby_map_value_does_not_leak(self, masker: OutputMasker) -> None:
+        out = masker.mask_result({"grpby": {"a": self._blob()}})
+        assert self.IP not in str(out)
+
+    def test_a_grpby_map_keyed_by_the_identifier_does_not_leak(self, masker: OutputMasker) -> None:
+        out = masker.mask_result({"grpby": {self.IP: self._blob()}})
+        assert self.IP not in str(out)
+
+    def test_a_grpby_nested_list_does_not_leak(self, masker: OutputMasker) -> None:
+        out = masker.mask_result({"grpby": [[self._blob()]]})
+        assert self.IP not in str(out)
+
+    # ---- the URL composites, one level down from the arm that works ----
+
+    @pytest.mark.parametrize("key", ["http_url", "url", "referralurl", "link"])
+    def test_a_url_nested_list_does_not_leak(self, masker: OutputMasker, key: str) -> None:
+        out = masker.mask_result({key: [[self.URL]]})
+        assert self.HOST not in str(out)
+
+    # ---- the shapes that already worked keep working ----
+
+    def test_the_shapes_that_already_worked_are_untouched(
+        self, masker: OutputMasker, full_masker: OutputMasker
+    ) -> None:
+        assert self.DEV_NAME not in str(full_masker.mask_result({"devvds": self.DEV}))
+        assert self.DEV_NAME not in str(full_masker.mask_result({"devvds": [self.DEV]}))
+        assert self.IP not in str(masker.mask_result({"grpby": self._blob()}))
+        assert self.IP not in str(masker.mask_result({"grpby": [self._blob()]}))
+        assert self.HOST not in str(masker.mask_result({"http_url": self.URL}))
+        assert self.HOST not in str(masker.mask_result({"http_url": [self.URL]}))
+
+
 class TestDevidCarriesASerial:
     """``devid`` is documented by this repo as the SERIAL-carrying key,
     but it was typed HOSTNAME while ``sn`` moved to SERIAL.

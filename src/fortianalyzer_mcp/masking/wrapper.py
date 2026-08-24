@@ -675,6 +675,39 @@ class OutputMasker:
             }
         return value
 
+    def _mask_composite_container(
+        self, key: str, value: Any, mapping: dict[str, str], keep: frozenset[str]
+    ) -> Any:
+        """Re-enter ``_mask_entry`` under the SAME key for every element.
+
+        For these kinds the key is the only thing that can type the
+        payload, so a container must not be handed to ``_mask_structured``:
+        that route walks by allowlist, knows none of these inner names,
+        and has already lost the key by the time it sees the value. That
+        is how a list under ``devvds`` returned device names in clear with
+        ``FAZ_MASK_DEVICE_IDENTITY`` on, and the map form had no arm at
+        all so it reached the same route (#73 item 1).
+
+        Recursing rather than burning is what keeps the flag honest: the
+        per-kind handlers already decide what the deployment is entitled
+        to read (``_mask_device_vdom`` returns its argument untouched with
+        the flag off), while ``_burn_strings`` would mask an estate name
+        the flag-off deployment sees in clear under the string form of the
+        same key. It also means each kind's own dict policy still applies
+        one level down, so a map inside a list under ``url`` still burns.
+
+        Keys are masked as well as values: no later pass ever scans a key,
+        so a map keyed by the identifier hands it over as the key itself.
+        """
+        if isinstance(value, list | tuple):
+            return [self._mask_entry(key, item, mapping, keep) for item in value]
+        return {
+            self._mask_entry(key, inner_key, mapping, keep): self._mask_entry(
+                key, item, mapping, keep
+            )
+            for inner_key, item in value.items()
+        }
+
     def _mask_composite_map(self, value: Any, mapping: dict[str, str], keep: frozenset[str]) -> Any:
         """Mask a map under a composite key: allowlist what it knows, burn the rest.
 
@@ -1292,37 +1325,22 @@ class OutputMasker:
             return self._mask_composite_map(value, mapping, keep)
         if lowered in COMPOSITE_JSON and isinstance(value, str):
             return self._mask_json_blob(value, mapping, keep)
-        if lowered in COMPOSITE_JSON and isinstance(value, list):
-            # same list convention the other composites handle -- a list
-            # value here previously fell through every typed branch to
+        if lowered in COMPOSITE_JSON and isinstance(value, list | dict):
+            # A list value here used to fall through every typed branch to
             # _mask_structured with no key context, which cannot identify
-            # bare strings as JSON blobs and returned them verbatim.
-            return [
-                self._mask_json_blob(item, mapping, keep)
-                if isinstance(item, str)
-                else self._mask_structured(item, mapping, keep)
-                for item in value
-            ]
+            # bare strings as JSON blobs and returned them verbatim. The
+            # map form had no arm at all and reached the same route.
+            return self._mask_composite_container(lowered, value, mapping, keep)
         if lowered in COMPOSITE_URL_HOST and isinstance(value, str):
             return self._mask_url_host(value, mapping, keep)
         if lowered in COMPOSITE_URL_HOST and isinstance(value, list):
             # same list convention the typed fields handle below
-            return [
-                self._mask_url_host(item, mapping, keep)
-                if isinstance(item, str)
-                else self._mask_structured(item, mapping, keep)
-                for item in value
-            ]
+            return self._mask_composite_container(lowered, value, mapping, keep)
         if lowered in COMPOSITE_URL_FULL and isinstance(value, str):
             return self._mask_url_full(value, mapping, keep)
         if lowered in COMPOSITE_URL_FULL and isinstance(value, list):
             # same list convention the typed fields handle below
-            return [
-                self._mask_url_full(item, mapping, keep)
-                if isinstance(item, str)
-                else self._mask_structured(item, mapping, keep)
-                for item in value
-            ]
+            return self._mask_composite_container(lowered, value, mapping, keep)
         if (lowered in COMPOSITE_URL_HOST or lowered in COMPOSITE_URL_FULL) and isinstance(
             value, dict
         ):
@@ -1346,17 +1364,12 @@ class OutputMasker:
             return self._burn_strings(value, keep)
         if lowered in COMPOSITE_DEVICE_VDOM and isinstance(value, str):
             return self._mask_device_vdom(value, mapping, keep)
-        if lowered in COMPOSITE_DEVICE_VDOM and isinstance(value, list):
+        if lowered in COMPOSITE_DEVICE_VDOM and isinstance(value, list | dict):
             # same gap as COMPOSITE_JSON above: a list of device[vdom]
             # strings fell through to _mask_structured with no key
             # context and returned every device name verbatim, even with
-            # mask_device_identity on.
-            return [
-                self._mask_device_vdom(item, mapping, keep)
-                if isinstance(item, str)
-                else self._mask_structured(item, mapping, keep)
-                for item in value
-            ]
+            # mask_device_identity on. The map form had no arm at all.
+            return self._mask_composite_container(lowered, value, mapping, keep)
         if lowered in COMPOSITE_BREAKDOWNS and isinstance(value, dict):
             return self._mask_breakdowns(value, mapping, keep)
 
