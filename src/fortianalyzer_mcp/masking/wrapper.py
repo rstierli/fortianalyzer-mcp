@@ -77,6 +77,7 @@ from fortianalyzer_mcp.masking.fields import (
     COMPOSITE_ID_DEVTYPE,
     COMPOSITE_JSON,
     COMPOSITE_PREFIXED,
+    COMPOSITE_SOURCE,
     COMPOSITE_TARGET,
     COMPOSITE_URL_FULL,
     COMPOSITE_URL_HOST,
@@ -747,9 +748,50 @@ class OutputMasker:
 
         Keys are masked as well as values: no later pass ever scans a key,
         so a map keyed by the identifier hands it over as the key itself.
+
+        COMPOSITE_JSON's dict form is the one exception to "re-enter under
+        the same key": a native dict here can be either shape _mask_json_blob
+        would otherwise have to parse out of a string -- an already-parsed
+        payload, whose own field names (not the outer key) type its
+        contents, or a wrapper whose values are themselves JSON-string
+        blobs one level down (the same shape #117's tests keep under the
+        outer key). Re-entering everything under the outer key asked
+        _mask_entry to type the whole dict as e.g. "grpby", which only the
+        str-only _mask_json_blob can read; every field inside a parsed
+        payload fell through unmasked. Measured:
+        {"grpby": [{"dstendpoint": "web-01.corp.local"}]} (a list containing
+        one such dict) leaked the hostname in clear while the JSON-STRING
+        form of the identical payload correctly masked it.
+
+        Distinguishing the two shapes per inner value rather than per whole
+        dict: a string value that parses as JSON is a nested blob and goes
+        to _mask_json_blob (preserves #117's wrapper-of-blobs shape); any
+        other value belongs to this dict's own structure and is typed by
+        its own inner key via _mask_entry, not the outer composite key --
+        that inner-key dispatch is what correctly masks a bare
+        "dstendpoint": "web-01.corp.local" pair, typed rather than caught
+        incidentally by mask_text's IP/MAC/email-only regexes. A nested
+        dict/list value recurses through _mask_structured so its own keys
+        keep typing it. A list of JSON-string elements is unaffected: each
+        string element still re-enters under the outer key one level up
+        and dispatches to _mask_json_blob exactly as before.
         """
         if isinstance(value, list | tuple):
             return [self._mask_entry(key, item, mapping, keep) for item in value]
+        if key in COMPOSITE_JSON:
+            out: dict[Any, Any] = {}
+            for inner_key, item in value.items():
+                masked_key = self._mask_entry(key, inner_key, mapping, keep)
+                if isinstance(item, str):
+                    try:
+                        json.loads(item)
+                    except (ValueError, TypeError):
+                        out[masked_key] = self._mask_entry(inner_key, item, mapping, keep)
+                    else:
+                        out[masked_key] = self._mask_json_blob(item, mapping, keep)
+                else:
+                    out[masked_key] = self._mask_structured(item, mapping, keep)
+            return out
         return {
             self._mask_entry(key, inner_key, mapping, keep): self._mask_entry(
                 key, item, mapping, keep
@@ -1400,6 +1442,25 @@ class OutputMasker:
             # cost is the same too: any analytic structure a producer put
             # there burns rather than round-tripping.
             return self._burn_strings(value, keep)
+        if (
+            lowered in COMPOSITE_SOURCE
+            and isinstance(value, list)
+            and any(isinstance(item, dict) for item in value)
+        ):
+            # Gated on the ELEMENT type, not just on being a list, because
+            # "source" has two live shapes and only one of them is
+            # target's. The alert surface sends [{"name": ..., "value":
+            # ...}], which carries an identifier. The UEBA endpoint
+            # surface sends a list of bare detection-method labels, and
+            # _mask_target burns every entry that is not a dict, so
+            # claiming the whole list destroyed them (measured live: 152
+            # of 394 endpoint records, 16 distinct label values, burned
+            # irreversibly with the device-identity flag off).
+            #
+            # Everything else keeps the ordinary allowlist treatment, for
+            # the reason in fields.py: "source" is a generic name and this
+            # key cannot afford target's burn-by-default.
+            return self._mask_target(value, mapping, keep)
         if lowered in COMPOSITE_TARGET:
             if isinstance(value, list):
                 return self._mask_target(value, mapping, keep)
