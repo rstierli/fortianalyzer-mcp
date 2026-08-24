@@ -217,6 +217,11 @@ FIELD_TYPES: dict[str, str] = {
     "domainctrlname": HOSTNAME,
     # --- username carriers
     "user": USERNAME,
+    # fortiview-sources ships this beside the covered "unauthuser"; the
+    # live sweep measured 5 of 5 payload shapes riding out verbatim
+    # (username, email, DOMAIN\\user, hostname, IPv4) while the twin two
+    # keys away masked the identical literal (#80).
+    "f_user": USERNAME,
     "dstuser": USERNAME,
     "unauthuser": USERNAME,
     "xauthuser": USERNAME,
@@ -412,7 +417,10 @@ FIELD_NAME_ARGS = ("fields", "group_by", "sample_by", "sort_by", "view_name")
 #:   grpby              JSON, e.g. '[{"dstendpoint": "192.0.2.1"}]'
 #:   target             [{"name": "ip", "value": "192.0.2.1"}, ...]
 COMPOSITE_PREFIXED = ("groupby1", "groupby2")
-COMPOSITE_JSON = ("grpby",)
+#: ``auto_raise_grpby`` is the incident-surface twin of ``grpby`` and
+#: carries the identical JSON payload; it was uncovered while its twin
+#: masked, measured on the live estate (#80).
+COMPOSITE_JSON = ("grpby", "auto_raise_grpby")
 COMPOSITE_TARGET = ("target",)
 
 #: ``analyze_policy_traffic`` and ``query_logs(sample_by=...)``:
@@ -476,6 +484,28 @@ OBF_URL_KEY = "obf_url"
 #: whole string fails closed to an irreversible placeholder. Follows
 #: ``FAZ_MASK_DEVICE_IDENTITY`` like the flat device keys below.
 COMPOSITE_DEVICE_VDOM = ("devvds",)
+
+#: fortiview-sources aggregates: ``"<identifier>,<devtype>"``, where the
+#: tail is an OS or product string (``"DSM 7.3-86009"``, ``"Ubuntu
+#: 22.04.5"``). Each maps to the type its own head carries, which is the
+#: type the covered flat spelling of the same value already uses:
+#: ``mac_devtype_agg`` beside ``mac``/``dstmac``, ``dev_src_agg`` beside
+#: ``hostname``/``srcname``/``device``.
+#:
+#: A flat ``FIELD_TYPES`` entry is the wrong fix and was rejected: it would
+#: hand the whole ``"<identifier>,<devtype>"`` string to a scalar handler,
+#: which fails closed to an irreversible placeholder and burns the devtype
+#: with it. Same reason ``devvds`` has a handler rather than a type.
+#:
+#: NOT gated on ``FAZ_MASK_DEVICE_IDENTITY``, unlike the neighbouring
+#: ``COMPOSITE_DEVICE_VDOM``. These carry endpoint identity, not estate
+#: identity: their covered twins are ``FIELD_TYPES`` entries that mask with
+#: the flag off, and masking one spelling while its twin stays readable in
+#: the same record is what publishes the mapping (#80).
+COMPOSITE_ID_DEVTYPE: dict[str, str] = {
+    "mac_devtype_agg": MAC,
+    "dev_src_agg": HOSTNAME,
+}
 
 #: Estate identity, not personal data. Masked only when the deployment
 #: opts in via ``FAZ_MASK_DEVICE_IDENTITY``; see the module docstring.

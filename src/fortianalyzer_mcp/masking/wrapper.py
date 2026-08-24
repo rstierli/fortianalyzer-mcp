@@ -74,6 +74,7 @@ from fortianalyzer_mcp.masking.fields import (
     COMPOSITE_BREAKDOWNS,
     COMPOSITE_DEVICE_VDOM,
     COMPOSITE_FILTER_ENTRIES,
+    COMPOSITE_ID_DEVTYPE,
     COMPOSITE_JSON,
     COMPOSITE_PREFIXED,
     COMPOSITE_TARGET,
@@ -215,6 +216,7 @@ _COMPOSITE_DIMENSIONS: frozenset[str] = frozenset(
         *COMPOSITE_URL_HOST,
         *COMPOSITE_URL_FULL,
         *COMPOSITE_DEVICE_VDOM,
+        *COMPOSITE_ID_DEVTYPE,
         *COMPOSITE_PREFIXED,
         *COMPOSITE_JSON,
     )
@@ -521,6 +523,53 @@ class OutputMasker:
             device = self._mask_scalar(HOSTNAME, match.group("dev"), mapping, keep=keep)
             out.append(f"{device}[{match.group('vdom')}]")
         return ",".join(out)
+
+    def _mask_id_devtype(
+        self, key: str, value: str, mapping: dict[str, str], keep: frozenset[str]
+    ) -> str:
+        """``"<identifier>,<devtype>,<identifier>,<devtype>,..."``
+        (fortiview-sources aggregates).
+
+        Each identifier is masked by the type this key maps to, which is
+        the type its covered flat twin already uses. Each devtype is an OS
+        or product string, the same class as ``srchwvendor`` and
+        ``catdesc`` that ``fields.py`` declines by name, so it stays
+        readable -- run through ``mask_text`` rather than back verbatim
+        only to catch an identifier accidentally embedded in it, same as
+        any other free-text field.
+
+        These are aggregating fields: a row covering several endpoints
+        comma-joins their pairs, per this field's own docstring in
+        ``fields.py``. Only typing the first pair and handing the rest to
+        ``mask_text`` -- the previous shape of this function -- caught a
+        repeated MAC by accident (``mask_text`` has a MAC regex) but never
+        a repeated HOSTNAME (no hostname regex exists, nor should one:
+        scanning arbitrary prose for anything hostname-shaped burns
+        ordinary text). Walking every pair explicitly and typing each
+        identifier by position sidesteps that entirely -- it never needs a
+        hostname regex, because it is never guessing which substring is an
+        identifier; the comma-delimited shape already says so.
+
+        No comma means a shape we have not seen, so the whole value is
+        masked rather than returned untyped, matching what
+        ``_mask_device_vdom`` does with a bare device name. An odd number
+        of parts (a trailing identifier with no devtype) is the same
+        situation for its last pair, so that lone identifier is masked
+        as one too rather than left readable or dropped.
+        """
+        if not value:
+            return value
+        vtype = COMPOSITE_ID_DEVTYPE[key]
+        parts = value.split(",")
+        if len(parts) < 2:
+            return self._mask_scalar(vtype, value, mapping, keep=keep)
+        masked_parts = [
+            self._mask_scalar(vtype, part, mapping, keep=keep)
+            if i % 2 == 0
+            else self.mask_text(part, mapping, keep)
+            for i, part in enumerate(parts)
+        ]
+        return ",".join(masked_parts)
 
     def _mask_breakdowns(self, value: Any, mapping: dict[str, str], keep: frozenset[str]) -> Any:
         """``{dimension: [{"value": ..., "hits": N}, ...]}`` (#98).
@@ -1362,6 +1411,10 @@ class OutputMasker:
             # happens to cover. The cost is real: a container whose keys
             # are allowlisted was masked reversibly before and now burns.
             return self._burn_strings(value, keep)
+        if lowered in COMPOSITE_ID_DEVTYPE and isinstance(value, str):
+            return self._mask_id_devtype(lowered, value, mapping, keep)
+        if lowered in COMPOSITE_ID_DEVTYPE and isinstance(value, list | dict):
+            return self._mask_composite_container(lowered, value, mapping, keep)
         if lowered in COMPOSITE_DEVICE_VDOM and isinstance(value, str):
             return self._mask_device_vdom(value, mapping, keep)
         if lowered in COMPOSITE_DEVICE_VDOM and isinstance(value, list | dict):
