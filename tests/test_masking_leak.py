@@ -3268,3 +3268,50 @@ class TestTheNewNamesDoNotBurnRoutineShapes:
         else:
             assert "unrepresentable" in out, f"expected a whole-value burn, got {out!r}"
         assert value not in out
+
+    def test_the_ported_token_round_trips_as_an_argument(self) -> None:
+        """The half of this change I claimed and had not built.
+
+        The justification for splitting the port is that burning the pair
+        destroys the query-back pivot. That is only true if the model can
+        hand the token back. An adversarial review found it could not: the
+        bare token resolved and ``<token>:8080`` passed through untouched, so
+        a model copying a ported host out of a response into a query argument
+        got no restoration and matched zero rows.
+
+        ``resolve_url`` already decomposes, resolves and reassembles a URL
+        including its port; this is the same move for a bare host.
+        """
+        engine = FPEEngine(KEY)
+        masker = OutputMasker(engine)
+        unmasker = ArgUnmasker(engine)
+
+        ported = masker.mask_result({"http_host": "corp.example.com:8080"})["http_host"]
+
+        assert unmasker.unmask_args({"http_host": ported}) == {"http_host": "corp.example.com:8080"}
+
+    def test_an_unresolvable_head_leaves_the_argument_alone(self) -> None:
+        """No behaviour change for anything that is not a token plus a port.
+
+        The split must be a no-op unless the head genuinely resolves, so an
+        ordinary ``host:port`` a caller typed by hand reaches the appliance
+        exactly as written rather than being rewritten by a failed lookup.
+        """
+        unmasker = ArgUnmasker(FPEEngine(KEY))
+
+        assert unmasker.unmask_args({"http_host": "corp.example.com:8080"}) == {
+            "http_host": "corp.example.com:8080"
+        }
+
+    def test_a_unicode_digit_tail_is_not_treated_as_a_port(self) -> None:
+        """``str.isdigit`` alone accepts Unicode digits.
+
+        Harmless in itself, since a port names nobody, but it meant a tail
+        this code never validated was echoed verbatim on the strength of a
+        check that looked like it had validated it. ASCII is what a port is.
+        """
+        value = "corp.example.com:٨٠٨٠"
+        out = OutputMasker(FPEEngine(KEY)).mask_result({"http_host": value})["http_host"]
+
+        assert "unrepresentable" in out, f"expected a whole-value burn, got {out!r}"
+        assert "corp.example.com" not in out

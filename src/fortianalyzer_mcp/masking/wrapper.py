@@ -441,15 +441,22 @@ class OutputMasker:
             # as anything useful. ``_mask_url_host`` already splits a URL's
             # host from the rest for the same reason.
             #
-            # Exactly ONE colon, and a numeric tail. Splitting on the last
-            # colon alone was wrong and my first comment here claimed a
-            # safety it did not have: ``2001:db8::1`` ends in a digit, so it
-            # split into a burned ``2001:db8:`` host and a stray ``:1``. A
-            # bare ``host:port`` has one colon; an IPv6 literal has several
-            # and the bracketed form ``[::1]:8080`` has more still, so both
-            # fall through to be handled whole.
+            # A numeric ASCII tail after the FIRST colon. Splitting on the
+            # last colon was wrong and my first comment claimed a safety it
+            # did not have: ``2001:db8::1`` ends in a digit, so it split into
+            # a burned ``2001:db8:`` host and a stray ``:1``.
+            #
+            # Partitioning on the first colon rejects multi-colon values
+            # indirectly rather than by counting: an IPv6 literal leaves
+            # ``db8::1`` as the tail and the bracketed ``[::1]:8080`` leaves
+            # ``:1]:8080``, neither of which is all digits, so both fall
+            # through and are handled whole.
+            #
+            # ``isascii`` matters: ``str.isdigit`` alone accepts Unicode
+            # digits, so an Arabic-Indic port would split and echo a tail this
+            # code never validated.
             host, sep, port = value.partition(":")
-            if sep and host and port.isdigit() and len(port) <= 5:
+            if sep and host and port.isascii() and port.isdigit() and len(port) <= 5:
                 masked_host = self._mask_scalar(vtype, host, mapping, keep=keep)
                 return f"{masked_host}:{port}"
         if self._engine.is_own_v2_token(value):
