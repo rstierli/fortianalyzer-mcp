@@ -206,11 +206,37 @@ _DEVVDS_RE = re.compile(r"^(?P<dev>[^\[\]]+)\[(?P<vdom>[^\[\]]*)\]$")
 _MIN_SUBSTITUTION_LEN = 4
 
 
+class _TrackedMapping(dict[str, str]):
+    """A raw -> token map that counts every write.
+
+    The plan cache needs to know when the map has changed, and SIZE is not
+    enough: a value already present can be re-typed to a different token,
+    which changes what the alternation must resolve to while leaving the
+    length identical. ``_mask_filter_entries`` does exactly that, in pass 2
+    (see ``_plan_for``).
+    """
+
+    __slots__ = ("version",)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.version = 0
+
+    def __setitem__(self, key: str, value: str) -> None:
+        super().__setitem__(key, value)
+        self.version += 1
+
+
+def _version_of(mapping: dict[str, str]) -> int | None:
+    """``None`` for a plain dict, which forces a rebuild rather than a guess."""
+    return getattr(mapping, "version", None)
+
+
 @dataclass(frozen=True)
 class _SubstitutionPlan:
     """One compiled alternation over the response's known raw values."""
 
-    size: int
+    version: int
     keep: frozenset[str]
     mapping: dict[str, str]
     pattern: re.Pattern[str]
@@ -1060,8 +1086,42 @@ class OutputMasker:
             + "|".join(re.escape(raw) for raw in raws)
             + r")(?![A-Za-z0-9._-])"
         )
+        version = _version_of(mapping)
+        assert version is not None  # only called when _plan_for has one
         return _SubstitutionPlan(
-            size=len(mapping),
+            version=version,
+            keep=keep,
+            mapping=mapping,
+            pattern=pattern,
+            folded=folded,
+            ambiguous=ambiguous,
+        )
+
+    def _build_substitution_plan_uncached(
+        self, mapping: dict[str, str], keep: frozenset[str]
+    ) -> "_SubstitutionPlan | None":
+        """Build without touching the cache, for a caller-supplied plain dict."""
+        raws = [
+            raw
+            for raw in sorted(mapping, key=len, reverse=True)
+            if len(raw) >= _MIN_SUBSTITUTION_LEN and raw not in keep
+        ]
+        if not raws:
+            return None
+        folded: dict[str, str] = {}
+        ambiguous: set[str] = set()
+        for raw in raws:
+            key = raw.casefold()
+            if key in folded and folded[key] != mapping[raw]:
+                ambiguous.add(key)
+            folded.setdefault(key, mapping[raw])
+        pattern = re.compile(
+            r"(?<![A-Za-z0-9._-])(?ai:"
+            + "|".join(re.escape(raw) for raw in raws)
+            + r")(?![A-Za-z0-9._-])"
+        )
+        return _SubstitutionPlan(
+            version=-1,
             keep=keep,
             mapping=mapping,
             pattern=pattern,
@@ -1072,25 +1132,38 @@ class OutputMasker:
     def _plan_for(
         self, mapping: dict[str, str], keep: frozenset[str]
     ) -> "_SubstitutionPlan | None":
-        """The cached plan for this response, rebuilt only when it cannot serve.
+        """The cached plan for this response, rebuilt whenever it cannot serve.
 
-        Keyed on the mapping OBJECT plus its size. Measured on ``329ba81``,
-        ``mapping`` does not grow during pass 2: the free-text scan mints
-        through the engine rather than writing to ``mapping``, and both write
-        sites are pass-1 paths. The size check means correctness does not rest
-        on that staying true, because ``mapping`` only ever grows, so any
-        future route that adds an entry mid-pass changes the size and forces a
-        rebuild rather than substituting against a stale alternation.
+        Keyed on the mapping OBJECT plus a write counter, and the counter is
+        the load-bearing half.
+
+        An earlier version of this keyed on ``len(mapping)`` on the belief that
+        pass 2 never writes to the map. That is false, and the counterexample
+        is deterministic: ``_mask_filter_entries`` runs in pass 2 and reaches
+        ``_mask_scalar``, which writes ``mapping[value] = token``. When the
+        value is already present under a different type the write is an
+        OVERWRITE, so the length does not move, a size key does not fire, and
+        a later case-variant in a TEXT field resolves through the stale
+        ``folded`` table to the previous token. Measured: a device name typed
+        HOSTNAME in pass 1 and re-typed USERNAME by a filter entry produced a
+        host token where main produced a user token.
+
+        Counting writes catches growth and overwrite alike. A caller passing a
+        plain dict has no counter, so it gets a rebuild every call, which is
+        the pre-cache behaviour and correct if slower.
 
         The plan holds the mapping itself rather than its ``id()``, so the
         object cannot be collected and have its identity reused underneath a
         cached plan.
         """
+        version = _version_of(mapping)
+        if version is None:
+            return self._build_substitution_plan_uncached(mapping, keep)
         plan = _SUB_PLAN.get()
         if (
             plan is not None
             and plan.mapping is mapping
-            and plan.size == len(mapping)
+            and plan.version == version
             and plan.keep == keep
         ):
             return plan
@@ -1141,7 +1214,7 @@ class OutputMasker:
 
     def mask_result(self, obj: Any) -> Any:
         """Mask a tool result: structured pass, then free-text pass."""
-        mapping: dict[str, str] = {}
+        mapping: dict[str, str] = _TrackedMapping()
         keep = frozenset() if self._mask_device_identity else self._device_identity_values(obj)
         staged = self._mask_structured(obj, mapping, keep)
         return self._mask_free_text(staged, mapping, keep)

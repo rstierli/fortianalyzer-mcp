@@ -1317,6 +1317,42 @@ class TestSubstitutionPlanIsBuiltOncePerResponse:
         assert "fw-hq-01" not in out["data"][-1]["msg"]
         assert out["data"][-1]["msg"] != "later mention of fw-hq-01 in prose"
 
+    def test_a_pass_two_overwrite_invalidates_the_plan(self) -> None:
+        """The bug an adversarial review found in the first version of this.
+
+        That version keyed the cache on ``len(mapping)``, on the belief that
+        pass 2 never writes to the map. It does: ``_mask_filter_entries`` runs
+        in pass 2 and reaches ``_mask_scalar``, which writes
+        ``mapping[value] = token``. When the value is already present under a
+        different type that write is an OVERWRITE, so the length does not
+        move and a size key never fires.
+
+        Here ``fw-hq-01`` is typed HOSTNAME in pass 1 and re-typed USERNAME by
+        the filter entry. The later TEXT field spells it in a different case,
+        so it resolves through the folded table rather than by exact lookup,
+        and a stale plan hands back the hostname token where the uncached path
+        hands back the username one.
+
+        The assertion is deliberately against the CURRENT behaviour of the
+        uncached path rather than against a token spelling: the point is that
+        caching changes nothing, not that either answer is the right one.
+        """
+        masker = OutputMasker(FPEEngine(KEY), mask_device_identity=True)
+        payload = {
+            "data": [{"devname": "fw-hq-01", "msg": "structured row"}],
+            "filter_applied": [["user", "=", "fw-hq-01"]],
+            "tail": [{"msg": "later mention of FW-HQ-01 in prose"}],
+        }
+
+        out = masker.mask_result(payload)
+        token = out["tail"][0]["msg"].split("later mention of ")[1].split(" in prose")[0]
+
+        assert token.startswith("user-"), (
+            f"expected the username token the filter entry re-typed it to, got {token!r}. "
+            "A host- token means the cached plan served a mapping entry that had "
+            "since been overwritten."
+        )
+
     def test_a_grown_mapping_invalidates_the_plan(self) -> None:
         """Correctness must not rest on pass 2 leaving ``mapping`` alone.
 
