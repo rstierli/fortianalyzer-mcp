@@ -2817,6 +2817,108 @@ class TestSecondTierAuditKeys:
         assert on.mask_result({"name": "my-report-layout"}) == {"name": "my-report-layout"}
 
 
+class TestPercentEncodedFreeText:
+    """FortiAnalyzer returns ``msg`` percent-encoded, so the free-text
+    scan never matched the identifiers inside it (#80).
+
+    Measured on the live estate: on 3 of 3 event records the MAC inside
+    ``msg`` differed from the masked MAC in the structured field of the
+    same record, so the original was recoverable by anyone holding both.
+    One record was decisive: ``msg`` decoded to ``AP <mac> chan 153 live
+    7235442`` while ``channel`` and ``live`` matched the record exactly,
+    so it was demonstrably the same AP whose ``bssid`` had been masked.
+
+    The same mechanism reaches email, because the pass-2 email regex
+    needs a literal ``@`` and this surface ships ``%40``.
+    """
+
+    MAC = "aa:bb:cc:dd:ee:11"
+    EMAIL = "analyst@example.com"
+
+    def test_a_percent_encoded_mac_is_masked(self, masker: OutputMasker) -> None:
+        out = masker.mask_result({"msg": "AP aa%3Abb%3Acc%3Add%3Aee%3A11 chan 153"})
+        assert "aa%3Abb%3Acc%3Add%3Aee%3A11" not in str(out)
+        assert self.MAC not in str(out)
+
+    def test_a_percent_encoded_email_is_masked(self, masker: OutputMasker) -> None:
+        out = masker.mask_result({"msg": "mail from analyst%40example.com rejected"})
+        assert "analyst%40example.com" not in str(out)
+        assert self.EMAIL not in str(out)
+
+    def test_it_agrees_with_the_structured_twin(self, masker: OutputMasker) -> None:
+        """The whole point. The structured field and the prose carry the
+        same AP, so they must come back as the same token."""
+        out = masker.mask_result(
+            {"bssid": self.MAC, "msg": "AP aa%3Abb%3Acc%3Add%3Aee%3A11 chan 153"}
+        )
+        assert out["bssid"] in out["msg"]
+
+    def test_plain_text_is_unaffected(self, masker: OutputMasker) -> None:
+        """The path that already worked keeps working, undecoded."""
+        out = masker.mask_result({"msg": f"AP {self.MAC} chan 153"})
+        assert self.MAC not in str(out)
+        assert "chan 153" in out["msg"]
+
+    def test_encoded_text_with_no_identifier_is_returned_byte_identical(
+        self, masker: OutputMasker
+    ) -> None:
+        """Decoding is a means of finding identifiers, not a reformatting
+        of tool output. If the decode surfaces nothing to mask, the caller
+        gets exactly the bytes FortiAnalyzer sent."""
+        raw = "path%2Fto%2Ffile requested by policy%2042"
+        assert masker.mask_result({"msg": raw})["msg"] == raw
+
+    def test_a_literal_percent_is_not_treated_as_an_escape(self, masker: OutputMasker) -> None:
+        """ "CPU 100% busy" is not an encoding. Nothing masks, so nothing
+        is rewritten."""
+        raw = "CPU 100% busy, mem 40% used"
+        assert masker.mask_result({"msg": raw})["msg"] == raw
+
+    def test_a_percent_that_would_decode_into_an_identifier_still_reports_it(
+        self, masker: OutputMasker
+    ) -> None:
+        """The counterpart to the two pins above: when the decode DOES
+        surface an identifier, the decoded and masked form is what goes
+        out, and the format change is the documented cost."""
+        out = masker.mask_result({"msg": "src%3D192.0.2.77 blocked"})
+        assert "192.0.2.77" not in str(out)
+
+    def test_a_second_identifier_hiding_behind_an_escape_is_not_missed(
+        self, masker: OutputMasker
+    ) -> None:
+        """The previous shape of this function returned as soon as the
+        plain-text scan matched anything, so the decode pass never ran at
+        all when a plain-form identifier was already present -- a second,
+        percent-encoded identifier next to it went straight through in
+        clear. Measured pre-fix:
+
+            src=192.0.2.77 mac=aa%3Abb%3Acc%3Add%3Aee%3A11
+              -> src=<token> mac=aa%3Abb%3Acc%3Add%3Aee%3A11  (MAC leaked)
+
+        Both must be masked now, in the same value, regardless of which
+        form either one arrived in."""
+        out = masker.mask_result({"msg": "src=192.0.2.77 mac=aa%3Abb%3Acc%3Add%3Aee%3A11 blocked"})
+        rendered = str(out)
+        assert "192.0.2.77" not in rendered
+        assert "aa%3Abb%3Acc%3Add%3Aee%3A11" not in rendered
+        assert self.MAC not in rendered
+
+    def test_an_unrelated_escape_may_decode_as_a_side_effect_of_a_real_find(
+        self, masker: OutputMasker
+    ) -> None:
+        """Byte fidelity is preserved only when nothing in the value needs
+        masking at all (see the two pins above): once any identifier is
+        found -- via the plain scan or the decoded one -- the value the
+        caller gets back is masked either way it was reached, and an
+        unrelated escape sitting next to a genuine identifier may come
+        back decoded as a side effect. That is an acceptable, documented
+        cost; the previous version paid the opposite cost instead, which
+        was a real identifier leak, not a formatting nicety."""
+        out = masker.mask_result({"srcip": "192.0.2.77", "msg": "src=192.0.2.77 path%2Fto%2Ffile"})
+        assert "192.0.2.77" not in str(out)
+        assert out["srcip"] in out["msg"]
+
+
 class TestSourceListOfStringsIsNotBurned:
     """``source`` has two live shapes, and only one of them is target's.
 

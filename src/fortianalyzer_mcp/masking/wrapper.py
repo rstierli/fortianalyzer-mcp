@@ -69,6 +69,7 @@ import os
 import re
 from functools import wraps
 from typing import Any
+from urllib.parse import unquote
 
 from fortianalyzer_mcp.masking.fields import (
     COMPOSITE_BREAKDOWNS,
@@ -1647,9 +1648,45 @@ class OutputMasker:
     def _mask_scalar_text(
         self, value: str, mapping: dict[str, str], keep: frozenset[str] = frozenset()
     ) -> str:
+        """Mask free text, looking through FortiAnalyzer's percent-encoding.
+
+        ``msg`` arrives encoded, so a MAC reaches the scan as
+        ``aa%3Abb%3A...`` and an email as ``analyst%40example.com``. The
+        pass-2 regexes need the literal ``:``/``@``, so neither matched,
+        and the original stayed readable beside its own masked twin in
+        the structured field of the same record (#80).
+
+        Tries the decoded form FIRST rather than only as a fallback after
+        a plain-text match: ``unquote()`` only touches ``%XX`` sequences,
+        so a plain-form identifier survives decoding untouched and is
+        still found by the same ``mask_text`` call over the decoded
+        string -- one sweep over the decoded text catches a plain IP and
+        a percent-encoded MAC in the same value. Masking the plain value
+        FIRST and returning immediately on any match -- the previous
+        order -- meant a second identifier hiding behind an escape next
+        to an already-matched plain one was never even looked at:
+        ``"src=192.0.2.77 mac=aa%3Abb%3Acc%3Add%3Aee%3A11"`` masked the IP
+        and left the encoded MAC verbatim, exactly the leak #80 exists to
+        close.
+
+        Decoding is a means of FINDING identifiers, not a reformatting of
+        tool output, so the exact bytes FortiAnalyzer sent survive unless
+        the decode actually surfaces something to mask -- what keeps
+        ``"CPU 100% busy"`` and an encoded path with no identifier in it
+        byte-identical to the original. Re-encoding the untouched spans
+        around a substitution is not attempted: the token is not the same
+        length or alphabet as what it replaced, so a faithful round trip
+        is not available, and emitting a half-encoded string would be
+        worse than the honest decoded one.
+        """
         if value.strip() in SKIP_VALUES:
             return value
         try:
+            decoded = unquote(value)
+            if decoded != value:
+                decoded_masked = self.mask_text(decoded, mapping, keep)
+                if decoded_masked != decoded:
+                    return decoded_masked
             return self.mask_text(value, mapping, keep)
         except Exception:
             logger.exception("unexpected error masking free text; placeholder used")
