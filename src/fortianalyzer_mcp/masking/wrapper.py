@@ -87,21 +87,114 @@ from fortianalyzer_mcp.masking.fields import (
     FIELD_TYPES,
     HOSTNAME,
     IP,
+    IP_HOST_OR_SERIAL,
     IP_OR_HOST,
     MAC,
     OBF_URL_KEY,
+    SERIAL,
     SKIP_VALUES,
     TARGET_NAME_TYPES,
     TEXT,
     THREAT_KEY,
     USERNAME,
 )
-from fortianalyzer_mcp.masking.fpe_engine import MASKING_KEY_ENV, FPEEngine, MaskingError
+from fortianalyzer_mcp.masking.fpe_engine import (
+    MASKING_KEY_ENV,
+    FPEEngine,
+    MaskingError,
+    begin_v2_verification_budget,
+)
 from fortianalyzer_mcp.masking.unmask import ArgUnmasker
 
 logger = logging.getLogger(__name__)
 
 _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+
+#: The two halves of a v2 envelope, matched around an address the IOC scan
+#: found, so the scan can recognise its own output and step over it.
+#:
+#: A v2 IPv4 token carries its ciphertext as a dotted quad, because a masked
+#: IPv4 has to stay a valid IPv4. The free-text scan therefore matches the
+#: payload INSIDE the token and re-encrypts it, which leaves the tag bound to
+#: a payload that is no longer there: the token stops opening at all and the
+#: address is unrecoverable, by us included. IPv6 and MAC payloads went
+#: colon-free hex on #40, so neither the IPv4 nor the MAC scan can see them;
+#: IPv4 is the one exposed type, and that asymmetry is why this guard is
+#: positional rather than a general token pattern.
+#:
+#: Checked around the match rather than by scanning the text for tokens
+#: first: a serial or url ciphertext can itself contain a hyphen, so a
+#: lazily-bounded token pattern can end at the wrong hyphen and leave the
+#: tail unprotected. Position has no such ambiguity.
+#:
+#: Residual, and it is the same trade the shape gate already takes: a real
+#: address that happens to sit between a marker plus key id and a hyphen
+#: plus eight hex digits is left in clear. It has to look exactly like a v2
+#: envelope to get there.
+#:
+#: Three things here are load-bearing, and the first version of this guard
+#: got all three wrong. An adversarial pass measured each one.
+#:
+#: ``(?<![0-9A-Za-z])`` is the left boundary. Without it, any WORD ending in
+#: a marker opens an envelope, because the head is only searched for:
+#: ``myhost-1234-10.0.0.1-deadbeef`` returned with the address in clear, and
+#: so did ``localhost``, ``poweruser``, ``gossip4``, ``tarmac`` and ``unsn``.
+#: That is a leak, and it also put this guard at odds with
+#: :meth:`FPEEngine.is_v2_shaped`, which rejects all of those. Two
+#: definitions of "looks like v2" drifting apart is the bug class this
+#: project keeps hitting, so a test pins them equal on whole strings.
+#:
+#: ``\Z`` rather than ``$``, because ``$`` also matches just before a
+#: trailing newline: ``ip4-2a85-\n10.0.0.1-deadbeef`` leaked while the CRLF
+#: spelling did not, which is that difference exactly. A genuine token can
+#: never contain a newline, so there was nothing to gain from the laxer
+#: anchor.
+#:
+#: Both halves are matched against a BOUNDED window rather than a slice of
+#: the text. ``text[:start]`` and ``text[end:]`` each copy the input on
+#: every IPv4 match, so a quad-dense log line went quadratic: 3.5 seconds
+#: for four thousand addresses, per-match cost doubling on every doubling.
+#: Free text is attacker-supplied, so that was a remote CPU-exhaustion
+#: primitive rather than a tuning matter. The head is at most ten
+#: characters, so a fixed window is all it can ever need.
+#: Candidate extractors, NOT the decision. They bracket the widest thing
+#: around a matched address that could be a v2 envelope; whether it IS one
+#: is then answered by ``FPEEngine.is_own_v2_token``, the same predicate
+#: the structured route uses.
+#:
+#: This shape exists because the previous version made the decision here,
+#: with its own looser notion of an envelope, and that divergence leaked a
+#: real address twice: the left boundary admitted a hyphen, a dot, an
+#: underscore and non-ASCII, so ``my-host-2a85-10.0.0.1-deadbeef`` came
+#: back with the address in clear while ``is_v2_shaped`` rejected the same
+#: string. Three leaks in this cutover came from two definitions of "looks
+#: like v2" drifting apart. There is one definition now, and these
+#: patterns only find the text to hand it.
+_V2_CANDIDATE_HEAD_RE = re.compile(
+    r"(?:ip4|ip6|mac|sn|url|host|user)-[0-9a-f]{4}-\Z", re.IGNORECASE
+)
+_V2_CANDIDATE_TAIL_RE = re.compile(r"-[0-9a-f]{8}", re.IGNORECASE)
+
+#: Longest head: marker (up to 4) + "-" + key id (4) + "-".
+_V2_HEAD_WINDOW = 10
+
+
+def _v2_envelope_around(engine: Any, text: str, start: int, end: int) -> bool:
+    """Is ``text[start:end]`` the payload of a token THIS engine minted?
+
+    Brackets the candidate and then asks the shared predicate. Boundary
+    subtleties that used to decide the answer now only widen or narrow the
+    candidate, and a wrong guess costs a tag check rather than an address.
+    """
+    head = _V2_CANDIDATE_HEAD_RE.search(text[max(0, start - _V2_HEAD_WINDOW) : start])
+    if head is None:
+        return False
+    tail = _V2_CANDIDATE_TAIL_RE.match(text, end)
+    if tail is None:
+        return False
+    return bool(engine.is_own_v2_token(text[start - len(head.group(0)) : tail.end()]))
+
+
 _MAC_RE = re.compile(r"\b[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}\b")
 _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _DEVVDS_RE = re.compile(r"^(?P<dev>[^\[\]]+)\[(?P<vdom>[^\[\]]*)\]$")
@@ -132,7 +225,17 @@ _COMPOSITE_DIMENSIONS: frozenset[str] = frozenset(
 
 #: Structural shape of a prefix-marked token: ``<marker>-<4-hex-kid>-``.
 #: "host-fw01" has no kid group and is a legitimate name, not a token.
-_TOKEN_PREFIX_SHAPE_RE = re.compile(r"^(?:host|user|url)-[0-9a-f]{4}-")
+#: ``sn`` joined the markers with the serial type (#40). It has to be here
+#: and not only in the engine: this shape is what the mutating-tool gate
+#: (#108) recognises, so leaving it out would silently stop that gate
+#: covering serial tokens.
+#: ``ip4``/``ip6``/``mac`` are here for the v2 envelope, which is the first
+#: form those three have ever had: v1 emits them bare, so there was nothing
+#: to recognise. Adding them at the same time as the format, rather than at
+#: the cutover, because the failure is silent in exactly the direction that
+#: matters -- the gate would keep passing while covering none of the three
+#: types the envelope exists to make detectable.
+_TOKEN_PREFIX_SHAPE_RE = re.compile(r"^(?:host|user|url|sn|ip4|ip6|mac)-[0-9a-f]{4}-")
 
 
 #: Keys that prove a dict is a dvmdb device object, so its ``name`` is the
@@ -222,29 +325,61 @@ class OutputMasker:
         try:
             ipaddress.ip_address(value.strip())
         except ValueError:
-            return self._engine.mask_hostname(value)
-        return self._engine.mask_ip(value)
+            return self._engine.mint("hostname", value)
+        return self._engine.mint("ip", value)
+
+    #: FortiGate/FortiAP/FortiSwitch etc. serial shape -- byte-identical to
+    #: fortimanager-mcp's DEVICE_SERIAL_PATTERN, since a serial that reaches
+    #: this codepath from a live estate looks the same regardless of which
+    #: MCP server observed it. Checked before HOSTNAME: real hostnames do
+    #: not start with a 2-letter Fortinet product code followed by 10-20
+    #: uppercase alphanumerics with no dots or hyphens, so the false-positive
+    #: risk of masking a hostname as a serial is effectively nil.
+    _SERIAL_SHAPE_RE = re.compile(r"^(FG|FM|FW|FA|FS|FD|FP|FC|FV|PU|PS)[A-Z0-9]{10,20}$")
+
+    def _mask_ip_host_or_serial(self, value: str) -> str:
+        """Mask a field that holds an address, a name, or a device serial.
+
+        target[].value under name=="device" is polymorphic: measured
+        fixture data shows this slot carries either an endpoint hostname or
+        the device's own serial. A serial minted as a hostname loses its
+        case (SERIAL exists specifically because of this -- see its
+        docstring), which also breaks token correlation with the same
+        device's serial appearing elsewhere in the same record under "sn".
+        """
+        stripped = value.strip()
+        try:
+            ipaddress.ip_address(stripped)
+        except ValueError:
+            if self._SERIAL_SHAPE_RE.match(stripped):
+                return self._engine.mint("serial", value)
+            return self._engine.mint("hostname", value)
+        return self._engine.mint("ip", value)
 
     def _mask_one(self, vtype: str, value: str) -> str:
         try:
             if vtype == IP:
-                return self._engine.mask_ip(value)
+                return self._engine.mint("ip", value)
             if vtype == MAC:
-                return self._engine.mask_mac(value)
+                return self._engine.mint("mac", value)
             if vtype == IP_OR_HOST:
                 return self._mask_ip_or_host(value)
+            if vtype == IP_HOST_OR_SERIAL:
+                return self._mask_ip_host_or_serial(value)
             if vtype == HOSTNAME:
-                return self._engine.mask_hostname(value)
+                return self._engine.mint("hostname", value)
+            if vtype == SERIAL:
+                return self._engine.mint("serial", value)
             if vtype == USERNAME:
-                return self._engine.mask_username(value)
+                return self._engine.mint("username", value)
             if vtype == DOMAIN:
-                return self._engine.mask_domain(value)
+                return self._engine.mint("domain", value)
             if vtype == EMAIL:
                 # from/to are emails in virus/emailfilter logs but plain
                 # labels elsewhere; only actual addresses mask as email.
                 if "@" in value:
-                    return self._engine.mask_email(value)
-                return self._engine.mask_username(value)
+                    return self._engine.mint("email_local", value)
+                return self._engine.mint("username", value)
         except MaskingError:
             return self.placeholder(value)
         except Exception:
@@ -297,6 +432,24 @@ class OutputMasker:
         error and a TypeError instead.
         """
         if value.strip() in SKIP_VALUES:
+            return value
+        if self._engine.is_own_v2_token(value):
+            # Already this layer's own output. Masking it again destroys
+            # it, loudly on a typed route that cannot parse a token (an IP
+            # field fails closed to an irreversible placeholder) and
+            # quietly on one that can (a string cipher wraps the token in
+            # another token, which opens to the wrong value). Both are
+            # silent to the caller.
+            #
+            # By SHAPE, matching the gate decision on #40: a value that
+            # looks like v2 is committed to v2. Verifying the tag instead
+            # would be a third definition of v2-ness in this codebase, and
+            # two definitions drifting apart has already produced one leak
+            # in the free-text guard above.
+            #
+            # This funnel is the whole point: every pass-1 route ends here,
+            # so the check cannot be forgotten by a new caller the way the
+            # keep set was twice.
             return value
         if self._is_kept(vtype, value, keep):
             # A value the deployment chose to leave readable stays readable
@@ -805,24 +958,28 @@ class OutputMasker:
 
         def ip_sub(m: re.Match[str]) -> str:
             candidate = m.group(0)
+            if _v2_envelope_around(self._engine, text, m.start(), m.end()):
+                # Our own output. Re-encrypting the payload would leave the
+                # tag signing a value that is no longer there.
+                return candidate
             try:
                 ipaddress.IPv4Address(candidate)
             except ValueError:
                 return candidate  # e.g. 999.1.1.1 or a dotted version string
             try:
-                return self._engine.mask_ip(candidate)
+                return self._engine.mint("ip", candidate)
             except MaskingError:
                 return self.placeholder(candidate)
 
         def mac_sub(m: re.Match[str]) -> str:
             try:
-                return self._engine.mask_mac(m.group(0))
+                return self._engine.mint("mac", m.group(0))
             except MaskingError:
                 return self.placeholder(m.group(0))
 
         def email_sub(m: re.Match[str]) -> str:
             try:
-                return self._engine.mask_email(m.group(0))
+                return self._engine.mint("email_local", m.group(0))
             except MaskingError:
                 return self.placeholder(m.group(0))
 
@@ -1210,7 +1367,7 @@ class OutputMasker:
             if "@" in decoded_head.partition("/")[0]:
                 return self.placeholder(value)
             try:
-                return self._engine.mask_url_tail(stripped)
+                return self._engine.mint("url_tail", stripped)
             except MaskingError:
                 return self.placeholder(value)
         if self._is_kept(IP_OR_HOST, host, keep):
@@ -1235,7 +1392,7 @@ class OutputMasker:
         if not tail:
             return f"{prefix}{netloc}"
         try:
-            token = self._engine.mask_url_tail(tail)
+            token = self._engine.mint("url_tail", tail)
         except MaskingError:
             return self.placeholder(value)
         return f"{prefix}{netloc}/{token}"
@@ -1554,7 +1711,7 @@ def install_masking(mcp: Any) -> tuple[OutputMasker, ArgUnmasker]:
     if settings.FAZ_MASKING_KEY and not os.environ.get(MASKING_KEY_ENV):
         os.environ[MASKING_KEY_ENV] = settings.FAZ_MASKING_KEY
 
-    engine = FPEEngine.from_env()
+    engine = FPEEngine.from_env(accept_v1_tokens=settings.FAZ_MASKING_ACCEPT_V1_TOKENS)
     masker = OutputMasker(engine, mask_device_identity=settings.FAZ_MASK_DEVICE_IDENTITY)
     unmasker = ArgUnmasker(engine)
     original_tool = mcp.tool
@@ -1652,6 +1809,11 @@ def install_masking(mcp: Any) -> tuple[OutputMasker, ArgUnmasker]:
                 async def async_wrapped(*fa: Any, **fk: Any) -> Any:
                     if _AT_BOUNDARY.get():
                         return await fn(*fa, **fk)
+                    # Per-call budget, so the cap means "this call" rather
+                    # than "this process". Set at the OUTERMOST boundary
+                    # only: an inner tool call shares its caller's budget,
+                    # or nesting would hand out a fresh one per hop.
+                    begin_v2_verification_budget()
                     token = _AT_BOUNDARY.set(True)
                     try:
                         if not read_only:
@@ -1671,6 +1833,7 @@ def install_masking(mcp: Any) -> tuple[OutputMasker, ArgUnmasker]:
             def sync_wrapped(*fa: Any, **fk: Any) -> Any:
                 if _AT_BOUNDARY.get():
                     return fn(*fa, **fk)
+                begin_v2_verification_budget()
                 token = _AT_BOUNDARY.set(True)
                 try:
                     if not read_only:

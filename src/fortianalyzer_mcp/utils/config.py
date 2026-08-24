@@ -137,6 +137,17 @@ class Settings(BaseSettings):
         "from .env consistently with MASKING_ENABLED; the masking engine otherwise reads "
         "it from the process environment (e.g. a container's environment block).",
     )
+    FAZ_MASKING_ACCEPT_V1_TOKENS: bool = Field(
+        default=True,
+        description=(
+            "Keep honouring v1 masking tokens on the way in. Open for one "
+            "release: tokens already sitting in a live conversation must keep "
+            "resolving, or a restart silently breaks every session that was "
+            "mid-flight. Close it once nothing returns v1 tokens; the server "
+            "logs when it accepts one so a deployment can tell."
+        ),
+    )
+
     FAZ_MASK_DEVICE_IDENTITY: bool = Field(
         default=False,
         description="Also mask device-identity fields (devname, devid, sn, csf). "
