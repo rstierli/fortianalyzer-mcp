@@ -67,6 +67,7 @@ import json
 import logging
 import os
 import re
+from dataclasses import dataclass
 from functools import wraps
 from typing import Any
 from urllib.parse import unquote
@@ -203,6 +204,27 @@ _DEVVDS_RE = re.compile(r"^(?P<dev>[^\[\]]+)\[(?P<vdom>[^\[\]]*)\]$")
 #: Values shorter than this are not substituted into free text: a two or
 #: three character username would match inside unrelated words.
 _MIN_SUBSTITUTION_LEN = 4
+
+
+@dataclass(frozen=True)
+class _SubstitutionPlan:
+    """One compiled alternation over the response's known raw values."""
+
+    size: int
+    keep: frozenset[str]
+    mapping: dict[str, str]
+    pattern: re.Pattern[str]
+    folded: dict[str, str]
+    ambiguous: set[str]
+
+
+#: Cached per response rather than per TEXT field. A ContextVar rather than an
+#: instance attribute because one OutputMasker serves concurrent requests, and
+#: an attribute would let one response's plan leak into another's.
+_SUB_PLAN: contextvars.ContextVar["_SubstitutionPlan | None"] = contextvars.ContextVar(
+    "_faz_substitution_plan", default=None
+)
+
 
 _PLACEHOLDER_MARK = "masked-unrepresentable-"
 
@@ -989,29 +1011,16 @@ class OutputMasker:
         out = _EMAIL_RE.sub(email_sub, out)
         return self._substitute_known(out, mapping, keep)
 
-    def _substitute_known(
-        self,
-        text: str,
-        mapping: dict[str, str] | None,
-        keep: frozenset[str] = frozenset(),
-    ) -> str:
-        """Replace values that were masked elsewhere in this response.
+    def _build_substitution_plan(
+        self, mapping: dict[str, str], keep: frozenset[str]
+    ) -> "_SubstitutionPlan | None":
+        """Compile the alternation over every known raw value, once.
 
-        Hostnames and domains cannot be recognized by pattern, but they can
-        be recognized by identity: a value masked in a structured field of
-        the same response is the same identifier wherever it appears in
-        prose, and gets the same token. Longest first, so a domain is not
-        partially rewritten by one of its own labels.
-        Matching is case-insensitive: hostnames, domains and emails are
-        case-insensitive identifiers and mask to the same token whatever
-        their spelling, so an echo that re-cases one is the same value.
-        The exact spelling still wins the token lookup, because usernames
-        are case-sensitive principals and ``Admin``/``admin`` must keep
-        their own tokens when both were masked. One alternation in one
-        pass, so a token already substituted is never re-scanned.
+        This used to happen inside :meth:`_substitute_known`, which pass 2
+        calls once per TEXT field. n texts over n identifiers therefore
+        rebuilt and recompiled an n-branch alternation n times, which is
+        what made a large response quadratic in time (#73 item 7c).
         """
-        if not mapping:
-            return text
         raws = [
             raw
             for raw in sorted(mapping, key=len, reverse=True)
@@ -1023,7 +1032,7 @@ class OutputMasker:
             if len(raw) >= _MIN_SUBSTITUTION_LEN and raw not in keep
         ]
         if not raws:
-            return text
+            return None
         # An inexact (case-only) match may reuse a token only when exactly one
         # raw owns that folded form. Usernames are case-sensitive principals,
         # so two of them differing only in case make a third spelling
@@ -1051,6 +1060,70 @@ class OutputMasker:
             + "|".join(re.escape(raw) for raw in raws)
             + r")(?![A-Za-z0-9._-])"
         )
+        return _SubstitutionPlan(
+            size=len(mapping),
+            keep=keep,
+            mapping=mapping,
+            pattern=pattern,
+            folded=folded,
+            ambiguous=ambiguous,
+        )
+
+    def _plan_for(
+        self, mapping: dict[str, str], keep: frozenset[str]
+    ) -> "_SubstitutionPlan | None":
+        """The cached plan for this response, rebuilt only when it cannot serve.
+
+        Keyed on the mapping OBJECT plus its size. Measured on ``329ba81``,
+        ``mapping`` does not grow during pass 2: the free-text scan mints
+        through the engine rather than writing to ``mapping``, and both write
+        sites are pass-1 paths. The size check means correctness does not rest
+        on that staying true, because ``mapping`` only ever grows, so any
+        future route that adds an entry mid-pass changes the size and forces a
+        rebuild rather than substituting against a stale alternation.
+
+        The plan holds the mapping itself rather than its ``id()``, so the
+        object cannot be collected and have its identity reused underneath a
+        cached plan.
+        """
+        plan = _SUB_PLAN.get()
+        if (
+            plan is not None
+            and plan.mapping is mapping
+            and plan.size == len(mapping)
+            and plan.keep == keep
+        ):
+            return plan
+        plan = self._build_substitution_plan(mapping, keep)
+        _SUB_PLAN.set(plan)
+        return plan
+
+    def _substitute_known(
+        self,
+        text: str,
+        mapping: dict[str, str] | None,
+        keep: frozenset[str] = frozenset(),
+    ) -> str:
+        """Replace values that were masked elsewhere in this response.
+
+        Hostnames and domains cannot be recognized by pattern, but they can
+        be recognized by identity: a value masked in a structured field of
+        the same response is the same identifier wherever it appears in
+        prose, and gets the same token. Longest first, so a domain is not
+        partially rewritten by one of its own labels.
+        Matching is case-insensitive: hostnames, domains and emails are
+        case-insensitive identifiers and mask to the same token whatever
+        their spelling, so an echo that re-cases one is the same value.
+        The exact spelling still wins the token lookup, because usernames
+        are case-sensitive principals and ``Admin``/``admin`` must keep
+        their own tokens when both were masked. One alternation in one
+        pass, so a token already substituted is never re-scanned.
+        """
+        if not mapping:
+            return text
+        plan = self._plan_for(mapping, keep)
+        if plan is None:
+            return text
 
         def swap(match: re.Match[str]) -> str:
             found = match.group(0)
@@ -1058,11 +1131,11 @@ class OutputMasker:
             if exact is not None:
                 return exact
             key = found.casefold()
-            if key in ambiguous:
+            if key in plan.ambiguous:
                 return self.placeholder(found)
-            return folded.get(key) or self.placeholder(found)
+            return plan.folded.get(key) or self.placeholder(found)
 
-        return pattern.sub(swap, text)
+        return plan.pattern.sub(swap, text)
 
     # -- the two passes -------------------------------------------------- #
 
