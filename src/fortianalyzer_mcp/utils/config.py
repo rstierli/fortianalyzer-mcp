@@ -51,6 +51,18 @@ class Settings(BaseSettings):
         description="Verify SSL certificates",
     )
 
+    FORTIANALYZER_CA_BUNDLE: str = Field(
+        default="",
+        description="Path to a PEM CA bundle used to verify the FortiAnalyzer "
+        "certificate. Only consulted when FORTIANALYZER_VERIFY_SSL is true. A "
+        "factory appliance certificate is self-signed with the serial as CN and "
+        "carries no subjectAltName, so verification cannot succeed against one "
+        "however it is trusted; this is for estates that have installed a "
+        "certificate naming the address actually connected to. A path that does "
+        "not exist is refused at startup rather than falling back to the system "
+        "trust store.",
+    )
+
     FORTIANALYZER_TIMEOUT: int = Field(
         default=30,
         ge=1,

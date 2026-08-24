@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -55,6 +56,7 @@ class FortiAnalyzerClient:
         username: str | None = None,
         password: str | None = None,
         verify_ssl: bool = True,
+        ca_bundle: str | None = None,
         timeout: int = 30,
         max_retries: int = 3,
     ) -> None:
@@ -64,6 +66,15 @@ class FortiAnalyzerClient:
         self.username = username
         self.password = password
         self.verify_ssl = verify_ssl
+        # Refuse at construction. Passing a bad path through would fail at the
+        # first call, and a typo'd one must never fall back to the system trust
+        # store: that verifies against the wrong root and looks like success.
+        if ca_bundle and not Path(ca_bundle).is_file():
+            raise ValueError(
+                f"CA bundle not found: {ca_bundle!r}. FORTIANALYZER_CA_BUNDLE must "
+                "point at a readable PEM file."
+            )
+        self.ca_bundle = ca_bundle
         self.timeout = timeout
         self.max_retries = max_retries
 
@@ -99,9 +110,22 @@ class FortiAnalyzerClient:
             username=settings.FORTIANALYZER_USERNAME,
             password=settings.FORTIANALYZER_PASSWORD,
             verify_ssl=settings.FORTIANALYZER_VERIFY_SSL,
+            ca_bundle=settings.FORTIANALYZER_CA_BUNDLE or None,
             timeout=settings.FORTIANALYZER_TIMEOUT,
             max_retries=settings.FORTIANALYZER_MAX_RETRIES,
         )
+
+    def resolve_verify(self) -> bool | str:
+        """What to hand ``requests`` as ``verify=``.
+
+        ``requests`` takes a bool or a CA-bundle path and pyfmg forwards the
+        value unchanged, so a path needs no pyfmg change. Disabled
+        verification wins over a configured bundle, so an explicit
+        ``FORTIANALYZER_VERIFY_SSL=false`` is never silently upgraded.
+        """
+        if not self.verify_ssl:
+            return False
+        return self.ca_bundle or True
 
     async def connect(self) -> None:
         """Establish connection and authenticate."""
@@ -111,10 +135,24 @@ class FortiAnalyzerClient:
 
         logger.info("Connecting to FortiAnalyzer")
         if not self.verify_ssl:
+            # This used to end "prefer trusting the FAZ CA (set the CA bundle)".
+            # It named a setting that did not exist, and the remedy would not
+            # have been enough anyway: a factory FortiAnalyzer certificate is
+            # self-signed with the serial as CN and carries no subjectAltName,
+            # so even with it trusted as the CA bundle a request by IP fails
+            # CERTIFICATE_VERIFY_FAILED on an address mismatch (#126).
             logger.warning(
                 "TLS verification is DISABLED (FORTIANALYZER_VERIFY_SSL=false) -- the FortiAnalyzer "
                 "API token and all log/PCAP data are exposed to man-in-the-middle interception. "
-                "Prefer trusting the FAZ CA (set the CA bundle) over disabling verification."
+                "Trusting the appliance CA is NOT sufficient on its own: a factory certificate is "
+                "self-signed with the serial as CN and carries no subjectAltName, so verification "
+                "still fails on an address mismatch. To enable it, install a certificate on the "
+                "appliance naming the address you connect to, then set FORTIANALYZER_CA_BUNDLE to "
+                "its issuing CA and FORTIANALYZER_VERIFY_SSL=true."
+            )
+        elif self.ca_bundle:
+            logger.info(
+                "TLS verification enabled for %s against CA bundle %s", self.host, self.ca_bundle
             )
 
         # Hold the I/O lock across the connected-check and login so two
@@ -130,7 +168,7 @@ class FortiAnalyzerClient:
                         apikey=self.api_token,
                         debug=False,
                         use_ssl=True,
-                        verify_ssl=self.verify_ssl,
+                        verify_ssl=self.resolve_verify(),
                         timeout=self.timeout,
                         check_adom_workspace=False,
                     )
@@ -141,7 +179,7 @@ class FortiAnalyzerClient:
                         self.password,
                         debug=False,
                         use_ssl=True,
-                        verify_ssl=self.verify_ssl,
+                        verify_ssl=self.resolve_verify(),
                         timeout=self.timeout,
                     )
                 else:
@@ -480,7 +518,7 @@ class FortiAnalyzerClient:
                 fmg.sess.post,
                 fmg._url,
                 data=json.dumps(json_request),
-                verify=fmg.verify_ssl,
+                verify=self.resolve_verify(),
                 timeout=fmg.timeout,
                 headers=headers,
             )
