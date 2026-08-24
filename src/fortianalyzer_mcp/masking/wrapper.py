@@ -218,9 +218,20 @@ class _TrackedMapping(dict[str, str]):
 
     __slots__ = ("version",)
 
+    version: int
+
+    def __new__(cls, *args: Any, **kwargs: Any) -> "_TrackedMapping":
+        # The slot is initialised in __new__, not __init__, because unpickling
+        # reconstructs a dict subclass by feeding items in BEFORE __init__
+        # runs. Without this, ``__setitem__`` raises AttributeError on
+        # ``self.version``. Nothing pickles the mapping today; this keeps a
+        # latent crash from becoming a live one.
+        self = super().__new__(cls, *args, **kwargs)
+        self.version = 0
+        return self
+
     def __init__(self) -> None:
         super().__init__()
-        self.version = 0
 
     # EVERY mutating entry point, not just __setitem__. In CPython
     # ``setdefault``, ``update``, ``pop``, ``popitem``, ``clear``, ``|=`` and
@@ -271,8 +282,15 @@ class _TrackedMapping(dict[str, str]):
 
 
 def _version_of(mapping: dict[str, str]) -> int | None:
-    """``None`` for a plain dict, which forces a rebuild rather than a guess."""
-    return getattr(mapping, "version", None)
+    """``None`` for anything we do not ourselves track, forcing a rebuild.
+
+    An isinstance check rather than ``getattr(mapping, "version", None)``: the
+    duck-typed form would trust any object an external caller passed that
+    happened to carry an unrelated ``version`` attribute, and treat its value
+    as a cache key. Contrived, but the failure mode is a stale plan, which is
+    the bug class this whole mechanism exists to close.
+    """
+    return mapping.version if isinstance(mapping, _TrackedMapping) else None
 
 
 @dataclass(frozen=True)
@@ -1183,7 +1201,10 @@ class OutputMasker:
         An earlier version of this keyed on ``len(mapping)`` on the belief that
         pass 2 never writes to the map. That is false, and the counterexample
         is deterministic: ``_mask_filter_entries`` runs in pass 2 and reaches
-        ``_mask_scalar``, which writes ``mapping[value] = token``. When the
+        ``_mask_scalar``, which writes ``mapping[value] = token``. Writes also
+        reach the map through ``setdefault`` (``_burn_and_record``), not only
+        through ``__setitem__``, which is why the counter lives on every
+        mutating method rather than on one. When the
         value is already present under a different type the write is an
         OVERWRITE, so the length does not move, a size key does not fire, and
         a later case-variant in a TEXT field resolves through the stale

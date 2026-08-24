@@ -1353,6 +1353,48 @@ class TestSubstitutionPlanIsBuiltOncePerResponse:
             "since been overwritten."
         )
 
+    def test_a_burned_value_recorded_by_setdefault_reaches_pass_two(self) -> None:
+        """The cleartext leak an adversarial review constructed.
+
+        I claimed I could not build a payload where the ``setdefault`` hole
+        diverged. The reviewer built one, and it is worse than a divergence:
+        the raw value rides out while its own burn placeholder sits two keys
+        away, which is exactly the token-beside-plaintext pairing the masker
+        exists to prevent.
+
+        The chain needs four things in one response, which is why it is rare
+        and why hand-written tests missed it:
+
+        1. a tracked write, so a plan can exist at all
+        2. a PASS 1 route into ``mask_text`` so the plan is built early. Here
+           ``grpby`` carrying a non-JSON string takes ``_mask_json_blob``'s
+           fallback. ``_mask_device_vdom`` comma parts and
+           ``_mask_url_host``'s unparseable-URL fallback do the same.
+        3. ``_burn_and_record`` recording a burn via ``mapping.setdefault``,
+           which in CPython never routes through a subclass ``__setitem__``
+        4. a later TEXT field naming the burned value
+
+        Any ordinary ``mapping[k] = v`` between 3 and 4 rebuilds the plan and
+        the leak vanishes, which is why it was about 0.5% of fuzz payloads
+        and deterministic when the shape lines up.
+        """
+        masker = OutputMasker(FPEEngine(KEY), mask_device_identity=True)
+        payload = {
+            "data": [
+                {"devname": "fw-hq-01"},
+                {"grpby": "context line"},
+                {"groupby1": {"customdim": "j.doe.contractor"}},
+                {"msg": "observed j.doe.contractor in prose"},
+            ]
+        }
+
+        out = masker.mask_result(payload)
+
+        assert "j.doe.contractor" not in out["data"][3]["msg"], (
+            "a value burned in groupby1 rode out in clear in a later TEXT "
+            "field, publishing the placeholder beside the plaintext"
+        )
+
     def test_a_grown_mapping_invalidates_the_plan(self) -> None:
         """Correctness must not rest on pass 2 leaving ``mapping`` alone.
 
