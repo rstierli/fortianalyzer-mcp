@@ -222,9 +222,52 @@ class _TrackedMapping(dict[str, str]):
         super().__init__()
         self.version = 0
 
+    # EVERY mutating entry point, not just __setitem__. In CPython
+    # ``setdefault``, ``update``, ``pop``, ``popitem``, ``clear``, ``|=`` and
+    # ``del`` all mutate the underlying dict WITHOUT routing through
+    # ``__setitem__``, so overriding that alone leaves silent holes. This is
+    # not hypothetical: ``_burn_and_record`` calls ``mapping.setdefault(value,
+    # burned)``, and a version counter that missed it would be the same
+    # stale-plan bug this class exists to prevent, reintroduced through a new
+    # mechanism.
     def __setitem__(self, key: str, value: str) -> None:
         super().__setitem__(key, value)
         self.version += 1
+
+    def __delitem__(self, key: str) -> None:
+        super().__delitem__(key)
+        self.version += 1
+
+    def setdefault(self, key: str, default: str = "") -> str:
+        before = len(self)
+        result = super().setdefault(key, default)
+        if len(self) != before:
+            self.version += 1
+        return result
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        super().update(*args, **kwargs)
+        self.version += 1
+
+    def pop(self, *args: Any, **kwargs: Any) -> Any:
+        result = super().pop(*args, **kwargs)
+        self.version += 1
+        return result
+
+    def popitem(self) -> tuple[str, str]:
+        result = super().popitem()
+        self.version += 1
+        return result
+
+    def clear(self) -> None:
+        super().clear()
+        self.version += 1
+
+    def __ior__(self, other: Any) -> "_TrackedMapping":  # type: ignore[misc,override]
+        # Delegates rather than calling dict.__ior__, so the bump lives in
+        # exactly one place.
+        self.update(other)
+        return self
 
 
 def _version_of(mapping: dict[str, str]) -> int | None:
