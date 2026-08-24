@@ -3148,3 +3148,75 @@ class TestGroupbyDimensionNamesCarryTheirType:
         }[dimension]
         out = masker.mask_result({"groupby1": f"{dimension}:{value}"})["groupby1"]
         assert value in out
+
+
+class TestTheNewNamesDoNotBurnRoutineShapes:
+    """#124 types four names that were previously untyped, and typing a name
+    changes what happens to values that do not fit the type.
+
+    An adversarial review measured the trade: on main these rode out in CLEAR
+    (a leak), and once typed they fail CLOSED to an irreversible placeholder.
+    Failing closed is right, but a placeholder is not a token: it cannot be
+    unmasked, so the analyst loses the query-back pivot. Two of the three
+    shapes it found are routine enough to be worth handling rather than
+    burning, and both are introduced by this PR rather than pre-existing.
+
+    Deliberately NOT handled here: ``enduser:CORP\\alice``. A domain-qualified
+    principal burns identically under the already-typed twin ``user`` on
+    main, so it is a question about the USERNAME mint in general and not
+    something this PR introduces.
+    """
+
+    def test_a_host_header_keeps_its_port_and_masks_the_host(self, masker: OutputMasker) -> None:
+        """``http_host`` is the HTTP Host header, which is ``host[:port]``.
+
+        The port is not an identifier and the host is, so burning the pair
+        loses both the reversibility of the host and the readability of the
+        port. ``_mask_url_host`` already splits a URL's host from the rest for
+        the same reason.
+        """
+        out = masker.mask_result({"groupby1": "http_host:corp.example.com:8080"})["groupby1"]
+
+        assert "corp.example.com" not in out
+        assert out.endswith(":8080"), f"port should survive, got {out!r}"
+        assert "unrepresentable" not in out, f"host should mint a token, got {out!r}"
+
+    def test_the_ported_host_mints_the_same_token_as_the_bare_host(
+        self, masker: OutputMasker
+    ) -> None:
+        """Otherwise one host has two identities depending on the port."""
+        ported = masker.mask_result({"groupby1": "http_host:corp.example.com:8080"})["groupby1"]
+        bare = masker.mask_result({"groupby1": "http_host:corp.example.com"})["groupby1"]
+
+        assert ported.split("http_host:")[1].rsplit(":", 1)[0] == bare.split("http_host:")[1]
+
+    def test_the_null_envelope_sender_is_not_an_identifier(self, masker: OutputMasker) -> None:
+        """``<>`` is the SMTP null return path, a protocol constant.
+
+        Every bounce and DSN carries it, so burning it turns the most common
+        value on the surface into an irreversible placeholder while naming
+        nobody.
+        """
+        out = masker.mask_result({"groupby1": "mail_from:<>"})["groupby1"]
+        assert out == "mail_from:<>"
+
+    @pytest.mark.parametrize(
+        "value",
+        ["2001:db8::1", "[2001:db8::1]:8080", "corp.example.com:abc"],
+        ids=["ipv6-bare", "ipv6-bracketed", "non-numeric-tail"],
+    )
+    def test_a_colon_that_is_not_a_port_is_not_split(
+        self, masker: OutputMasker, value: str
+    ) -> None:
+        """My first version of the port split cut in the wrong place.
+
+        It used the LAST colon, so ``2001:db8::1`` ends in a digit and split
+        into a burned ``2001:db8:`` plus a stray ``:1``. The comment above it
+        claimed IPv6 fell through unchanged, which it did not. Only a value
+        with exactly one colon and a numeric tail is a ``host:port``.
+        """
+        out = masker.mask_result({"groupby1": f"http_host:{value}"})["groupby1"]
+        body = out.split("http_host:", 1)[1]
+
+        assert value not in body, "the value itself must not survive in clear"
+        assert not body.endswith(":1"), f"split at the wrong colon: {body!r}"

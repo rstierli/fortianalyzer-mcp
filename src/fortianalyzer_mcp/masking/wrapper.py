@@ -434,6 +434,24 @@ class OutputMasker:
         """
         if value.strip() in SKIP_VALUES:
             return value
+        if vtype == DOMAIN:
+            # An HTTP Host header is ``host[:port]`` and a port is not an
+            # identifier, so masking the pair whole loses the host's
+            # reversibility AND the port's readability: neither half survives
+            # as anything useful. ``_mask_url_host`` already splits a URL's
+            # host from the rest for the same reason.
+            #
+            # Exactly ONE colon, and a numeric tail. Splitting on the last
+            # colon alone was wrong and my first comment here claimed a
+            # safety it did not have: ``2001:db8::1`` ends in a digit, so it
+            # split into a burned ``2001:db8:`` host and a stray ``:1``. A
+            # bare ``host:port`` has one colon; an IPv6 literal has several
+            # and the bracketed form ``[::1]:8080`` has more still, so both
+            # fall through to be handled whole.
+            host, sep, port = value.partition(":")
+            if sep and host and port.isdigit() and len(port) <= 5:
+                masked_host = self._mask_scalar(vtype, host, mapping, keep=keep)
+                return f"{masked_host}:{port}"
         if self._engine.is_own_v2_token(value):
             # Already this layer's own output. Masking it again destroys
             # it, loudly on a typed route that cannot parse a token (an IP

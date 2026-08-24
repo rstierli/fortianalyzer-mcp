@@ -655,4 +655,8 @@ COMPOSITE_URL_HOST = ("http_url",)
 COMPOSITE_URL_FULL = ("url", "referralurl", "link", "reference_url")
 
 # Values that carry no identifier and pass through unmasked.
-SKIP_VALUES = frozenset({"", "N/A", "n/a", "unknown", "none", "-"})
+#: ``<>`` is the SMTP null return path, carried by every bounce and DSN. It is
+#: a protocol constant, not a principal, and typing ``mail_from`` (#80) turned
+#: the most common value on that surface into an irreversible placeholder that
+#: names nobody.
+SKIP_VALUES = frozenset({"", "N/A", "n/a", "unknown", "none", "-", "<>"})
