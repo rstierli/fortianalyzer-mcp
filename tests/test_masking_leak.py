@@ -2876,3 +2876,60 @@ class TestPercentEncodedFreeText:
         out = masker.mask_result({"srcip": "192.0.2.77", "msg": "src=192.0.2.77 path%2Fto%2Ffile"})
         assert "192.0.2.77" not in str(out)
         assert out["srcip"] in out["msg"]
+
+
+class TestSourceListOfStringsIsNotBurned:
+    """``source`` has two live shapes, and only one of them is target's.
+
+    Measured on a live FortiAnalyzer, ``get_endpoints(detail_level=
+    "standard", fields=["*"])``: 394 records, 152 carry ``source``, and
+    every one of the 152 is an **array of strings**. Zero dicts, zero
+    scalars. The 16 distinct values all contain a space, none contains a
+    dot, colon, ``@`` or an all-hex form, and none matches any other key
+    on its own record. They are the detection-method labels the UEBA
+    schema describes ("The source(s) of detecting an endpoint"), not
+    identifiers.
+
+    Routing every list to ``_mask_target`` burned all of them, because
+    that handler burns any entry that is not a dict. Irreversibly, and
+    with ``FAZ_MASK_DEVICE_IDENTITY`` off, so a deployment lost a label
+    vocabulary it was entitled to read and got no privacy for it.
+
+    The alert shape, ``[{"name": ..., "value": ...}]``, is the one that
+    carries an identifier and still gets target's handler. So the arm is
+    gated on the ELEMENT type rather than on the value being a list.
+    """
+
+    IP = "192.0.2.35"
+    LABELS = ["FortiClient EMS", "Endpoint Vulnerability Scan"]
+
+    def test_a_list_of_label_strings_survives(self, masker: OutputMasker) -> None:
+        out = masker.mask_result({"source": list(self.LABELS)})
+        assert out["source"] == self.LABELS
+
+    def test_a_list_of_label_strings_survives_with_the_flag_on(
+        self, full_masker: OutputMasker
+    ) -> None:
+        """Flag-independent: these are not estate identity under either
+        setting, so neither setting should burn them."""
+        out = full_masker.mask_result({"source": list(self.LABELS)})
+        assert out["source"] == self.LABELS
+
+    def test_the_alert_entry_shape_still_masks(self, masker: OutputMasker) -> None:
+        """The half that must not regress. A dict entry still carries an
+        identifier and still goes through target's handler."""
+        entry = [{"name": "device", "value": self.IP, "risk_type": "EndPoint"}]
+        out = masker.mask_result({"target": [dict(entry[0])], "source": entry})
+        assert self.IP not in str(out)
+        assert out["source"] == out["target"]
+
+    def test_a_mixed_list_still_masks_its_dict_entries(self, masker: OutputMasker) -> None:
+        """A list carrying both shapes is typed by what is in it, not by
+        the first element."""
+        out = masker.mask_result({"source": [{"name": "ip", "value": self.IP}, "FortiClient EMS"]})
+        assert self.IP not in str(out)
+
+    def test_a_scalar_source_is_still_not_burned(self, masker: OutputMasker) -> None:
+        """Unchanged, and still the reason this key is not folded into
+        COMPOSITE_TARGET."""
+        assert masker.mask_result({"source": "FortiClient"})["source"] == "FortiClient"
