@@ -3220,3 +3220,51 @@ class TestTheNewNamesDoNotBurnRoutineShapes:
 
         assert value not in body, "the value itself must not survive in clear"
         assert not body.endswith(":1"), f"split at the wrong colon: {body!r}"
+
+    @pytest.mark.parametrize(
+        ("value", "splits"),
+        [
+            ("corp.example.com:8080", True),
+            ("corp.example.com:0", True),
+            ("corp.example.com:00080", True),
+            ("a:1:2", False),
+            (":8080", False),
+            ("host:", False),
+            ("corp.example.com:abc", False),
+        ],
+        ids=[
+            "ordinary",
+            "port-zero",
+            "leading-zeros",
+            "two-colons",
+            "empty-host",
+            "empty-port",
+            "non-numeric",
+        ],
+    )
+    def test_the_split_declines_anything_that_is_not_a_host_port(
+        self, masker: OutputMasker, value: str, splits: bool
+    ) -> None:
+        """The gate is ``vtype == DOMAIN``, which is wider than ``http_host``.
+
+        Eight fields are DOMAIN-typed (``botnetdomain``, ``domain``,
+        ``domainctrldomain``, ``dst_domain``, ``http_host``, ``qname``,
+        ``scertcname``, ``srcdomain``), so this runs on all of them. A domain
+        cannot legally contain a colon, so any colon-bearing value here is
+        already anomalous; what matters is that the split never LOSES
+        information. Where it declines, the value burns exactly as it did
+        before, and where it fires, the host masks reversibly and the tail is
+        carried through untouched.
+
+        The recursive call cannot loop: ``partition`` hands it the segment
+        before the first colon, and a minted token contains no colon.
+        """
+        out = masker.mask_result({"qname": value})["qname"]
+
+        if splits:
+            tail = value.split(":", 1)[1]
+            assert out.endswith(f":{tail}"), f"tail not carried through: {out!r}"
+            assert "unrepresentable" not in out
+        else:
+            assert "unrepresentable" in out, f"expected a whole-value burn, got {out!r}"
+        assert value not in out
