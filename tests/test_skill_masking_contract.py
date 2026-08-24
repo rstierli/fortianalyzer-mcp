@@ -148,8 +148,13 @@ NON_IDENTIFIER_STRINGS = {
     "tid",
     # Structured containers. Their annotation admits a string somewhere in the
     # union, but what a skill actually puts in them is a dict or a list of
-    # dicts, which masking recurses into and types by the INNER key. Verified
-    # by the round-trip tests below rather than assumed.
+    # dicts, which masking recurses into and types by the INNER key.
+    #
+    # "Types by the inner key" is doing real work here and is NOT unconditional:
+    # a verbatim ``record`` whose inner ``value`` has no recognised ``type``
+    # sibling passes through in clear. That is filed as #130 and pinned below
+    # as the positive case only, because asserting the current behaviour of the
+    # negative case would pin a leak.
     "alert",
     "incident",
     "entity",
@@ -337,3 +342,38 @@ class TestValueIsOnlyCoveredByItsTypeSibling:
         digest = "d41d8cd98f00b204e9800998ecf8427e"
         out = masker.mask_result({"indicators": [{"value": digest, "type": "Hash"}]})
         assert out["indicators"][0]["value"] == digest
+
+
+class TestAVerbatimValueNeedsItsTypeSibling:
+    """The `record` passthrough, tested at the pair rather than at the record.
+
+    The round-trip test above uses ``srcip``/``mac``/``user`` inner keys, all
+    of which masking types by NAME. It therefore says nothing about the one
+    inner shape that is typed by CONTEXT, which is the ``value``/``type`` pair.
+    An adversarial review pointed that out and it was a fair hit: the suite
+    claimed containers were verified, and the case that could fail was the case
+    it did not exercise.
+
+    Only the positive direction is asserted. The negative direction (no
+    sibling, or an unrecognised one) rides out in clear today and is filed as
+    #130; pinning it here would make this suite defend the leak.
+    """
+
+    @pytest.fixture
+    def masker(self) -> OutputMasker:
+        return OutputMasker(FPEEngine(KEY))
+
+    @pytest.mark.parametrize(
+        ("indicator_type", "value"),
+        [("IP", "203.0.113.5"), ("Domain", "bad.example.com")],
+        ids=["IP", "Domain"],
+    )
+    def test_a_typed_value_inside_a_verbatim_record_masks(
+        self, masker: OutputMasker, indicator_type: str, value: str
+    ) -> None:
+        out = masker.mask_result({"record": {"value": value, "type": indicator_type, "hits": 3}})
+        assert out["record"]["value"] != value
+        # The sibling that made it maskable stays readable: it is a class
+        # label, not an identifier, and burning it would lose the context that
+        # explains what the token is.
+        assert out["record"]["type"] == indicator_type
