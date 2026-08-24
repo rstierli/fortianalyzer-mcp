@@ -628,6 +628,100 @@ class OutputMasker:
             }
         return value
 
+    #: Every key the schema knows, independent of the device-identity flag.
+    #: ``self._field_types`` is the wrong table for the "do we recognise
+    #: this name" question: it only gains DEVICE_IDENTITY_TYPES when the
+    #: flag is on, so flag-off the name ``devname`` read as unknown and its
+    #: KEY burned while its value stayed readable via the keep set. That is
+    #: mangled schema on the majority configuration, for no gain.
+    _SCHEMA_KEYS: frozenset[str] = frozenset(FIELD_TYPES) | frozenset(DEVICE_IDENTITY_TYPES)
+
+    @staticmethod
+    def _typeable(value: Any) -> bool:
+        """Can ``_mask_entry`` actually type this shape?
+
+        Its typed and composite branches are all gated on ``str`` or on a
+        list of them. Anything else reaches the ``_mask_structured`` tail,
+        which is the allowlist walk this whole function exists to avoid
+        trusting.
+        """
+        if isinstance(value, str):
+            return True
+        return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+    def _burn_and_record(self, value: Any, mapping: dict[str, str], keep: frozenset[str]) -> Any:
+        """Burn, and record what was burned so pass 2 can follow it.
+
+        ``_burn_strings`` takes no mapping, so a burned value's twin in a
+        free-text field rode out in clear: measured, ``{"groupby1":
+        {"srcuser": "walter.white"}, "msg": "blocked walter.white"}`` burned
+        the map and left the name in ``msg``. Recording raw -> placeholder
+        lets the pass-2 substitution replace it there too, which is the
+        same principle ``_mask_scalar`` already documents.
+        """
+        if isinstance(value, str):
+            burned = self._burn_strings(value, keep)
+            if isinstance(burned, str) and burned != value:
+                mapping.setdefault(value, burned)
+            return burned
+        if isinstance(value, list | tuple):
+            return [self._burn_and_record(item, mapping, keep) for item in value]
+        if isinstance(value, dict):
+            return {
+                self._burn_and_record(key, mapping, keep): self._burn_and_record(
+                    item, mapping, keep
+                )
+                for key, item in value.items()
+            }
+        return value
+
+    def _mask_composite_map(self, value: Any, mapping: dict[str, str], keep: frozenset[str]) -> Any:
+        """Mask a map under a composite key: allowlist what it knows, burn the rest.
+
+        A dict-shaped group-by used to fall through to the plain allowlist
+        walk, on the reasoning that the walk would type it by its inner
+        keys. That holds only when those keys happen to be allowlisted.
+        Measured on 2.13.0 (``cfc2585``), same engine, RFC 5737 values:
+
+            {"groupby1": {"srcip": "192.0.2.90"}}     -> masked
+            {"groupby1": {"a": "srcip:192.0.2.90"}}   -> LEAK, verbatim
+            {"groupby1": {"a": "192.0.2.90"}}         -> LEAK, verbatim
+            {"groupby1": [{"a": "srcip:192.0.2.90"}]} -> LEAK, verbatim
+            {"groupby1": {"192.0.2.90": 5}}           -> LEAK, in the key
+
+        Recognising the key is not enough on its own. ``_mask_entry``'s
+        branches are shape-gated, so a known key holding a CONTAINER fell
+        straight back into the walk: ``{"srcip": {"nested": "192.0.2.90"}}``
+        leaked verbatim. A known key is therefore only handed on when its
+        value is a shape ``_mask_entry`` can actually type.
+
+        The working half is kept and everything else fails closed, rather
+        than burning the whole map the way the URL composites and ``target``
+        do. Those have no slot their handler can type at all; a group-by map
+        does for the keys the allowlist covers, and burning those would cost
+        a reversible mask for nothing.
+        """
+        if not isinstance(value, dict):
+            return self._burn_and_record(value, mapping, keep)
+        out: dict[Any, Any] = {}
+        for key, item in value.items():
+            known = isinstance(key, str) and (
+                key.lower() in self._SCHEMA_KEYS or key.lower() in _COMPOSITE_DIMENSIONS
+            )
+            if known and self._typeable(item):
+                out[key] = self._mask_entry(key, item, mapping, keep)
+            elif known:
+                # Name recognised, shape not. Keep the name, burn the value.
+                out[key] = self._burn_and_record(item, mapping, keep)
+            else:
+                # Unknown key: neither it nor its value can be typed, so
+                # both burn. The key burns too because a group-by map can
+                # carry the identifier there ({"192.0.2.90": 5}).
+                out[self._burn_and_record(key, mapping, keep)] = self._burn_and_record(
+                    item, mapping, keep
+                )
+        return out
+
     def _mask_target(
         self, value: list[Any], mapping: dict[str, str], keep: frozenset[str] = frozenset()
     ) -> list[Any]:
@@ -1188,16 +1282,27 @@ class OutputMasker:
         if lowered in COMPOSITE_PREFIXED and isinstance(value, list):
             # list-valued group-bys are a normal FAZ variation (#73): each
             # element gets the same prefixed treatment the string form gets.
-            # A dict-shaped groupby stays with the allowlist walk below,
-            # which types it by its inner keys.
             return [
                 self._mask_prefixed(item, mapping, keep)
+                if isinstance(item, str)
+                else self._mask_composite_map(item, mapping, keep)
+                for item in value
+            ]
+        if lowered in COMPOSITE_PREFIXED and isinstance(value, dict):
+            return self._mask_composite_map(value, mapping, keep)
+        if lowered in COMPOSITE_JSON and isinstance(value, str):
+            return self._mask_json_blob(value, mapping, keep)
+        if lowered in COMPOSITE_JSON and isinstance(value, list):
+            # same list convention the other composites handle -- a list
+            # value here previously fell through every typed branch to
+            # _mask_structured with no key context, which cannot identify
+            # bare strings as JSON blobs and returned them verbatim.
+            return [
+                self._mask_json_blob(item, mapping, keep)
                 if isinstance(item, str)
                 else self._mask_structured(item, mapping, keep)
                 for item in value
             ]
-        if lowered in COMPOSITE_JSON and isinstance(value, str):
-            return self._mask_json_blob(value, mapping, keep)
         if lowered in COMPOSITE_URL_HOST and isinstance(value, str):
             return self._mask_url_host(value, mapping, keep)
         if lowered in COMPOSITE_URL_HOST and isinstance(value, list):
@@ -1241,6 +1346,17 @@ class OutputMasker:
             return self._burn_strings(value, keep)
         if lowered in COMPOSITE_DEVICE_VDOM and isinstance(value, str):
             return self._mask_device_vdom(value, mapping, keep)
+        if lowered in COMPOSITE_DEVICE_VDOM and isinstance(value, list):
+            # same gap as COMPOSITE_JSON above: a list of device[vdom]
+            # strings fell through to _mask_structured with no key
+            # context and returned every device name verbatim, even with
+            # mask_device_identity on.
+            return [
+                self._mask_device_vdom(item, mapping, keep)
+                if isinstance(item, str)
+                else self._mask_structured(item, mapping, keep)
+                for item in value
+            ]
         if lowered in COMPOSITE_BREAKDOWNS and isinstance(value, dict):
             return self._mask_breakdowns(value, mapping, keep)
 
