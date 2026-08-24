@@ -106,7 +106,15 @@ NON_IDENTIFIER_STRINGS = {
     "tier",
     "id",
     "skill",
-    # human prose explaining a finding, not naming one
+    # human prose explaining a finding, not naming one.
+    #
+    # NOTE what is deliberately ABSENT: description, message, reason, warnings
+    # and entity_ref were here and have been removed, because masking types
+    # them TEXT. They are safe because they are SCANNED, not because they are
+    # inert, and listing them made a covered field look like an exempt one.
+    # Worse, it was a hole in this guard: dropping "reason" from FIELD_TYPES
+    # would have left this suite green. TestTheTwoSetsAreDisjoint is what
+    # stops that recurring.
     "basis",
     "anomaly_basis",
     "correlation_basis",
@@ -114,14 +122,10 @@ NON_IDENTIFIER_STRINGS = {
     "ttp",
     "assessment",
     "impact",
-    "description",
-    "message",
     "recommendation",
     "note",
     "notes",
     "summary",
-    "warnings",
-    "reason",
     # windows and counters
     "time_range",
     "timestamp",
@@ -135,7 +139,6 @@ NON_IDENTIFIER_STRINGS = {
     # internal row ids: #80 cleared epid/euid/alertid/incid/logid as numeric
     # join keys whose covered siblings already mint tokens
     "reference",
-    "entity_ref",
     "epid",
     "euid",
     "incid",
@@ -179,6 +182,26 @@ class TestEverySkillStringFieldIsAccountedFor:
             "cannot type and that nothing has declared non-identifying. Either add "
             "the name to the masking tables or, if it cannot carry an identifier, "
             "to NON_IDENTIFIER_STRINGS with the reason."
+        )
+
+
+class TestTheTwoSetsAreDisjoint:
+    """A name must not be both typed and exempt.
+
+    Overlap is not merely redundant, it is a hole: a field masking covers
+    today, also listed as exempt, keeps this suite green if its table entry is
+    later removed. Five names were in exactly that state when this suite was
+    first written (``description``, ``message``, ``reason``, ``warnings``,
+    ``entity_ref``, all TEXT), which is how the hole was found.
+    """
+
+    def test_no_name_is_both_typed_and_exempt(self) -> None:
+        overlap = sorted(NON_IDENTIFIER_STRINGS & KNOWN_NAMES)
+        assert not overlap, (
+            f"{overlap} are declared non-identifying AND typed by masking. "
+            "Remove them from NON_IDENTIFIER_STRINGS: they are covered because "
+            "they are masked, and listing them here means this suite stays "
+            "green if that coverage is ever dropped."
         )
 
 
