@@ -59,7 +59,11 @@ class TestFieldTable:
             "srchost",
             "dsthost",
             "srcuser",
-            "remotename",
+            # "remotename" was on this list and has been removed: it does
+            # exist. The live alert-handler catalogue uses it as a groupby
+            # dimension (2 of the 55 distinct names), so typing it is not a
+            # no-op feigning coverage, it is the fix for a measured leak.
+            # See the #80 groupby-dimension work.
         ):
             assert dead not in FIELD_TYPES
 

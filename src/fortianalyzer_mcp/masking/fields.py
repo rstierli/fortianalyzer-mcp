@@ -160,6 +160,17 @@ FIELD_TYPES: dict[str, str] = {
     # --- IP carriers (log fields + alert/event_details variants)
     "srcip": IP,
     "dstip": IP,
+    # --- alert-handler groupby dimension names (#80) -------------------- #
+    # Read out of the live handler catalogue rather than guessed: 55 distinct
+    # names ship across the rules, and these carry an identifier the flat
+    # allowlist did not type. COMPOSITE_PREFIXED resolves "<field>:<value>"
+    # through this same table, so covering groupby3 bought nothing while the
+    # name inside it was unknown. Each takes the type of the covered twin it
+    # sits beside in a record, so the two spellings of one value mint the
+    # same token instead of publishing the pairing.
+    "attackerip": IP,  # twin of srcip
+    "victimip": IP,  # twin of dstip
+    "host_ip": IP,  # twin of srcip
     "trueclntip": IP,
     "transip": IP,
     "tranip": IP,
@@ -204,6 +215,7 @@ FIELD_TYPES: dict[str, str] = {
     "srcname": HOSTNAME,
     "dstname": HOSTNAME,
     "hostname": HOSTNAME,
+    "remotename": HOSTNAME,  # groupby (#80): IPsec/dialup peer name
     "epname": IP_OR_HOST,
     "dstepname": IP_OR_HOST,
     # fortiview top-sources/top-destinations: the resolved name for the
@@ -230,6 +242,9 @@ FIELD_TYPES: dict[str, str] = {
     "f_user": USERNAME,
     "dstuser": USERNAME,
     "unauthuser": USERNAME,
+    "user_name": USERNAME,  # groupby (#80): twin of user
+    "user_id": USERNAME,  # groupby (#80): twin of user
+    "enduser": USERNAME,  # groupby (#80): twin of user/euname
     "xauthuser": USERNAME,
     "eapuser": USERNAME,
     "useralt": USERNAME,
@@ -243,6 +258,8 @@ FIELD_TYPES: dict[str, str] = {
     "domainctrlusername": USERNAME,
     # --- domain carriers
     "qname": DOMAIN,
+    "dst_domain": DOMAIN,  # groupby (#80): twin of qname
+    "http_host": DOMAIN,  # groupby (#80): the HTTP Host header, twin of qname
     "srcdomain": DOMAIN,
     "botnetdomain": DOMAIN,
     "domainctrldomain": DOMAIN,
@@ -252,6 +269,7 @@ FIELD_TYPES: dict[str, str] = {
     "sender": EMAIL,
     "recipient": EMAIL,
     "from": EMAIL,
+    "mail_from": EMAIL,  # groupby (#80): twin of from
     "to": EMAIL,
     "cc": EMAIL,
     "collectedemail": EMAIL,
@@ -308,6 +326,7 @@ FIELD_TYPES: dict[str, str] = {
     "remedy_executor": EMAIL,
     "remedy_approver": EMAIL,
     "dstendpoint": IP_OR_HOST,  # inside the incident grpby JSON blob
+    "net_remote_server": IP_OR_HOST,  # groupby (#80): twin of dstendpoint
     "srcendpoint": IP_OR_HOST,
     # --- response echo keys: tool responses reflect caller inputs at the
     # top level; a filter like srcip=="192.0.2.1" re-leaks the raw value
@@ -535,6 +554,11 @@ COMPOSITE_ID_DEVTYPE: dict[str, str] = {
 #: opts in via ``FAZ_MASK_DEVICE_IDENTITY``; see the module docstring.
 DEVICE_IDENTITY_TYPES: dict[str, str] = {
     "devname": HOSTNAME,
+    # groupby (#80): the logging device's own name, estate identity of the
+    # same class as devname, so it follows the flag rather than masking
+    # unconditionally. Measured leaking in BOTH flag states before this,
+    # which is what separates it from devname reading as a leak flag-off.
+    "logdev_name": HOSTNAME,
     # This repo's own tools layer documents devid as the SERIAL-carrying
     # spelling, in three places: fortiview_tools.py builds
     # [{"devid": <serial>}] for a serial-shaped value and notes that "a

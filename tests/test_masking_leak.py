@@ -3048,3 +3048,103 @@ class TestDevidCarriesASerial:
         monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
         off = OutputMasker(FPEEngine(KEY), mask_device_identity=False)
         assert off.mask_result({"devid": self.SERIAL_VALUE})["devid"] == self.SERIAL_VALUE
+
+
+# --------------------------------------------------------------------------- #
+# groupby dimension names from the shipped alert-handler catalogue (#80)
+# --------------------------------------------------------------------------- #
+
+#: Every dimension name below was read out of the live handler catalogue
+#: (``get_alert_handlers(handler_type="both")``), not invented here: 55
+#: distinct names appear across the shipped rules, and these are the ones
+#: carrying an identifier that the flat allowlist did not type.
+#:
+#: The mechanism is the whole finding. ``COMPOSITE_PREFIXED`` masks
+#: ``"<fieldname>:<value>"`` by looking the INNER name up in the same type
+#: table, so ``groupby3`` being covered buys nothing when the name inside
+#: it is not. Measured on ``329ba81``, one masker, one key:
+#:
+#:     srcip:203.0.113.5        -> srcip:ip4-<kid>-<ciphertext>-<tag>
+#:     attackerip:203.0.113.5   -> attackerip:203.0.113.5
+#:
+#: Same value, same composite key, same record: the covered spelling mints
+#: a token and the uncovered spelling publishes the plaintext beside it.
+GROUPBY_IDENTIFIER_DIMENSIONS = [
+    ("attackerip", "203.0.113.5", "srcip"),
+    ("victimip", "203.0.113.5", "dstip"),
+    ("host_ip", "203.0.113.5", "srcip"),
+    ("dst_domain", "corp.example.com", "qname"),
+    ("http_host", "corp.example.com", "qname"),
+    ("net_remote_server", "corp.example.com", "dstendpoint"),
+    ("remotename", "corp.example.com", "hostname"),
+    ("user_name", "alice", "user"),
+    ("user_id", "alice", "user"),
+    ("enduser", "alice", "user"),
+    ("mail_from", "alice@example.com", "from"),
+]
+
+
+class TestGroupbyDimensionNamesCarryTheirType:
+    """The #80 residual: 55 dimension names ship in the handler catalogue
+    and the identifier-bearing ones were not in the type table."""
+
+    @pytest.mark.parametrize(
+        ("dimension", "value", "twin"),
+        GROUPBY_IDENTIFIER_DIMENSIONS,
+        ids=[d for d, _, _ in GROUPBY_IDENTIFIER_DIMENSIONS],
+    )
+    def test_the_dimension_masks_like_its_covered_twin(
+        self, masker: OutputMasker, dimension: str, value: str, twin: str
+    ) -> None:
+        out = masker.mask_result({"groupby1": f"{dimension}:{value}"})["groupby1"]
+        assert value not in out, (
+            f"{dimension} published {value!r} verbatim while its twin "
+            f"{twin} masks the same value in the same position"
+        )
+
+    @pytest.mark.parametrize(
+        ("dimension", "value", "twin"),
+        GROUPBY_IDENTIFIER_DIMENSIONS,
+        ids=[d for d, _, _ in GROUPBY_IDENTIFIER_DIMENSIONS],
+    )
+    def test_the_dimension_agrees_with_its_twin(
+        self, masker: OutputMasker, dimension: str, value: str, twin: str
+    ) -> None:
+        """Determinism is the reason this matters: if the two spellings of one
+        value minted different tokens, a record carrying both would still
+        hand over the pairing."""
+        got = masker.mask_result({"groupby1": f"{dimension}:{value}"})["groupby1"]
+        want = masker.mask_result({"groupby1": f"{twin}:{value}"})["groupby1"]
+        assert got.split(":", 1)[1] == want.split(":", 1)[1]
+
+    def test_logdev_name_follows_the_device_identity_flag(
+        self, masker: OutputMasker, full_masker: OutputMasker
+    ) -> None:
+        """It is estate identity, the same class as devname, so it must be
+        clear with the flag off and masked with it on.
+
+        Running this flag-off only is what made `devname` itself read as a
+        leak during the sweep, so both directions are asserted.
+        """
+        payload = {"groupby1": "logdev_name:fw-hq-01"}
+        assert "fw-hq-01" in masker.mask_result(payload)["groupby1"]
+        assert "fw-hq-01" not in full_masker.mask_result(payload)["groupby1"]
+
+    @pytest.mark.parametrize("dimension", ["euid", "srccountry", "dstcity", "catdesc"])
+    def test_the_deliberately_clear_dimensions_stay_clear(
+        self, masker: OutputMasker, dimension: str
+    ) -> None:
+        """Guards the obvious wrong fix. These four were each measured and
+        rejected as findings during the #80 sweep: euid is an internal row id
+        and documented join key, the geo pair is computed enrichment and a
+        first-class aggregation dimension, and catdesc is a FortiGuard
+        taxonomy label. Typing them would burn readable values for nothing.
+        """
+        value = {
+            "euid": "4471",
+            "srccountry": "Canada",
+            "dstcity": "Ottawa",
+            "catdesc": "Search Engines",
+        }[dimension]
+        out = masker.mask_result({"groupby1": f"{dimension}:{value}"})["groupby1"]
+        assert value in out
