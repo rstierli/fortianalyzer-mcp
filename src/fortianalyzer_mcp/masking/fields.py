@@ -134,12 +134,27 @@ HOSTNAME = "hostname"
 USERNAME = "username"
 DOMAIN = "domain"
 EMAIL = "email"
+#: Device serials. Separate from HOSTNAME because the string alphabet is
+#: lowercase and a serial is not: masked as a hostname, ``FGT60FTK20000001``
+#: comes back ``fgt60ftk20000001``, which is no longer the serial. The serial
+#: cipher base32-shields the value first, so case and the hyphen survive.
+#: Settled on #40; matches the type that shipped on fortimanager-mcp.
+SERIAL = "serial"
 TEXT = "text"  # free text: embedded IOCs are masked in place
 #: Holds either an address or a name depending on the record. Masks as
 #: whichever it parses as; the two token forms stay distinguishable on the
 #: way back (a hostname token carries the ``host-`` prefix, an IP token
 #: parses as an IP), so the round trip is unambiguous.
 IP_OR_HOST = "ip_or_host"
+
+#: Like IP_OR_HOST, plus a device serial. Needed for target[].value under
+#: name=="device": measured fixture data shows this slot carries either an
+#: endpoint hostname or the device's own serial (see the "sn" field type's
+#: docstring for why a serial cannot round-trip as a hostname -- case is
+#: lost). Kept separate from IP_OR_HOST rather than teaching every
+#: IP_OR_HOST field to also try serial-shape, since none of the others
+#: (endpoint, host_name) are documented to ever carry one.
+IP_HOST_OR_SERIAL = "ip_host_or_serial"
 
 FIELD_TYPES: dict[str, str] = {
     # --- IP carriers (log fields + alert/event_details variants)
@@ -496,14 +511,40 @@ COMPOSITE_ID_DEVTYPE: dict[str, str] = {
 #: opts in via ``FAZ_MASK_DEVICE_IDENTITY``; see the module docstring.
 DEVICE_IDENTITY_TYPES: dict[str, str] = {
     "devname": HOSTNAME,
-    "devid": HOSTNAME,
-    "sn": HOSTNAME,
-    "serialno": HOSTNAME,
-    "csf": HOSTNAME,
-    "sndetected": HOSTNAME,
-    "snclosest": HOSTNAME,
+    # This repo's own tools layer documents devid as the SERIAL-carrying
+    # spelling, in three places: fortiview_tools.py builds
+    # [{"devid": <serial>}] for a serial-shaped value and notes that "a
+    # serial under devname silently matches nothing", and report_tools.py
+    # routes "serials -> devid, names -> devname". Typed HOSTNAME it kept
+    # the exact round-trip bug SERIAL was added to fix: a serial came back
+    # lowercased, and it minted a different token from the same serial
+    # under sn on the same list_devices row.
+    #
+    # IP_HOST_OR_SERIAL rather than a flat SERIAL because devid is
+    # polymorphic in practice, holding a device NAME on the surfaces the
+    # #80 sweep sampled. Same reasoning, and the same type, as the
+    # "device" target slot.
+    "devid": IP_HOST_OR_SERIAL,
+    # The serial-carrying keys take SERIAL rather than HOSTNAME, so they
+    # round-trip byte-exact. Only keys already in this table move; the
+    # spelling variants found in #80 (module_sn, tunnel_sn) are not added
+    # here, because which table they belong in is still Roland's call.
+    #
+    # Safe even where one of these turns out to carry something that is not
+    # a serial: the serial cipher shields arbitrary bytes through base32, so
+    # it accepts strictly more than the hostname alphabet does. The visible
+    # change is the token prefix, sn- instead of host-.
+    "sn": SERIAL,
+    "serialno": SERIAL,
+    "csf": HOSTNAME,  # Security Fabric name, a label rather than a serial
+    "sndetected": SERIAL,
+    "snclosest": SERIAL,
     "fortigate": HOSTNAME,  # fortiview: reporting device, comma-joined when aggregated
-    "detectkey": HOSTNAME,  # ueba endpoints: serial of the detecting appliance
+    # This table's own comment called it a serial, and it was still typed as
+    # a hostname, so it kept the exact round-trip bug the serial type was
+    # added to fix. Found by review after the first pass moved only the
+    # sn-spelled keys.
+    "detectkey": SERIAL,  # ueba endpoints: serial of the detecting appliance
     # eventmgmt alert subject_details: {alertid, devs, epids, euids}. Same
     # class as devname, and until it was listed here it defeated the flag
     # rather than following it: the device stayed clear under "devs" while
@@ -521,7 +562,7 @@ DEVICE_IDENTITY_TYPES: dict[str, str] = {
 TARGET_NAME_TYPES: dict[str, str] = {
     "ip": IP,
     "domain": DOMAIN,
-    "device": IP_OR_HOST,
+    "device": IP_HOST_OR_SERIAL,
     "endpoint": IP_OR_HOST,
     "user": USERNAME,
     # Live webfilter alerts carry the browsed destination as a host_name

@@ -290,6 +290,11 @@ def masker(monkeypatch: pytest.MonkeyPatch) -> OutputMasker:
 
 
 @pytest.fixture
+def engine() -> FPEEngine:
+    return FPEEngine(KEY)
+
+
+@pytest.fixture
 def full_masker(monkeypatch: pytest.MonkeyPatch) -> OutputMasker:
     monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
     return OutputMasker(FPEEngine(KEY), mask_device_identity=True)
@@ -396,8 +401,8 @@ class TestFreeTextSubstitution:
         assert upper_token != lower_token
         assert upper_token in masked["msg"]
         assert lower_token in masked["msg"]
-        assert engine.unmask_username(upper_token) == "Admin"
-        assert engine.unmask_username(lower_token) == "admin"
+        assert engine.unmask_token(upper_token) == "Admin"
+        assert engine.unmask_token(lower_token) == "admin"
 
     def test_uppercase_short_values_are_not_substituted_into_prose(self, masker: OutputMasker):
         masked = masker.mask_result({"user": "abc", "msg": "ABC is a short code"})
@@ -547,11 +552,20 @@ class TestFreeTextSubstitution:
         )
         assert BAD_DOMAIN not in masked["extrainfo"]
 
-    def test_ip_or_host_field_holding_an_address_masks_as_an_ip(self, masker: OutputMasker):
-        import ipaddress
+    def test_ip_or_host_field_holding_an_address_masks_as_an_ip(
+        self, masker: OutputMasker, engine: FPEEngine
+    ):
+        """An IP_OR_HOST field holding an address masks as an address.
 
+        The discrimination used to be implicit: an IP token parsed as an
+        IP and a hostname token carried the host- marker. Under v2 both
+        are marked, so the type is stated rather than inferred, which is
+        the clearer assertion and the same property.
+        """
         masked = masker.mask_result({"epname": GATEWAY_IP})
-        ipaddress.ip_address(masked["epname"])  # still a valid address, not a host- token
+
+        assert masked["epname"].startswith("ip4-")
+        assert engine.v2_open(masked["epname"]) == GATEWAY_IP
 
     def test_ip_or_host_field_holding_a_name_masks_as_a_hostname(self, masker: OutputMasker):
         masked = masker.mask_result({"epname": ENDPOINT_NAME})
@@ -752,6 +766,33 @@ class TestTargetDeviceIdentityConsistency:
         masked = full_masker.mask_result(ALERT)
         assert masked["target"][4]["value"] == masked["devid"]  # same identifier, same token
         assert DEV_SERIAL not in str(masked)
+
+    def test_a_real_shaped_serial_masks_with_the_sn_token_not_as_a_hostname(
+        self, full_masker: OutputMasker
+    ):
+        """TARGET_NAME_TYPES["device"] was IP_OR_HOST, which has no serial
+        branch: a real FortiGate-shaped serial masked as a lowercased
+        hostname token instead of the case-preserving serial one, breaking
+        correlation with the identical value under "sn" (masks reversibly
+        via SERIAL) and losing case on unmask. DEV_SERIAL above predates
+        this fix and does not have the real serial shape, so it never
+        exercised this branch -- this uses one that does."""
+        serial = "FGT60FTK20000001"
+        masked = full_masker.mask_result(
+            {"sn": serial, "target": [{"name": "device", "value": serial}]}
+        )
+        assert serial not in str(masked)
+        assert masked["target"][0]["value"] == masked["sn"]  # same identifier, same token
+        assert masked["sn"].startswith("sn-")
+
+    def test_an_endpoint_shaped_device_target_still_masks_as_a_hostname(
+        self, full_masker: OutputMasker
+    ):
+        """The polymorphic device slot must not regress the far more common
+        hostname/endpoint-name case while gaining serial detection."""
+        masked = full_masker.mask_result({"target": [{"name": "device", "value": ENDPOINT_NAME}]})
+        assert ENDPOINT_NAME not in str(masked)
+        assert masked["target"][0]["value"].startswith("host-")
 
 
 class TestUrlHostMasking:
@@ -1088,7 +1129,7 @@ class TestSoarIndicatorPair:
         out = masker.mask_result({"data": [row]})["data"][0]
 
         assert PEER_IP not in str(out)
-        assert engine.unmask_ip(out["value"]) == PEER_IP
+        assert engine.unmask_token(out["value"]) == PEER_IP
         assert out["enrichment-reputation"] == "Malicious"  # verdict stays readable
 
     def test_indicator_domain_is_masked(self, masker: OutputMasker):
@@ -1279,12 +1320,12 @@ class TestFortiViewResolvedName:
         out = masker.mask_result({"data": [row]})["data"][0]
 
         assert BAD_DOMAIN not in str(out)
-        assert FPEEngine(KEY).unmask_hostname(out["dstip_hostname"]) == BAD_DOMAIN
+        assert FPEEngine(KEY).unmask_token(out["dstip_hostname"]) == BAD_DOMAIN
 
     def test_address_form_stays_reversible(self, masker: OutputMasker):
         out = masker.mask_result({"dstip_hostname": PEER_IP})["dstip_hostname"]
 
-        assert FPEEngine(KEY).unmask_ip(out) == PEER_IP
+        assert FPEEngine(KEY).unmask_token(out) == PEER_IP
 
     @pytest.mark.parametrize("key", ["srcip_hostname", "dstip_hostname"])
     def test_both_columns_take_the_resolved_form_reversibly(self, masker: OutputMasker, key: str):
@@ -1295,7 +1336,7 @@ class TestFortiViewResolvedName:
 
         assert BAD_DOMAIN not in out
         assert not out.startswith("masked-unrepresentable-")
-        assert FPEEngine(KEY).unmask_hostname(out) == BAD_DOMAIN
+        assert FPEEngine(KEY).unmask_token(out) == BAD_DOMAIN
 
 
 class TestIncidentWorkflowPrincipals:
@@ -2598,3 +2639,77 @@ class TestAuditConfirmedLeaks:
         value, secret = payloads[key]
         out = masker.mask_result({"breakdowns": {key: [{"value": value, "hits": 3}]}})
         assert secret not in str(out)
+
+
+class TestDevidCarriesASerial:
+    """``devid`` is documented by this repo as the SERIAL-carrying key,
+    but it was typed HOSTNAME while ``sn`` moved to SERIAL.
+
+    Three places in the tools layer say so:
+
+        fortiview_tools.py:51   a serial-shaped value -> [{"devid": <serial>}]
+        fortiview_tools.py:145  under devid (a serial under devname
+                                silently matches nothing)
+        report_tools.py:416     serials -> devid, names -> devname
+
+    So the same serial arrives under ``sn`` and under ``devid`` on one
+    ``list_devices`` row, and before this the two produced different
+    tokens and only one of them round-tripped. Measured on ``89a3689``
+    with the flag on:
+
+        sn     sn-<kid>-...    unmasks to FGT60FTK20000001
+        devid  host-<kid>-...  unmasks to fgt60ftk20000001   CORRUPTED
+
+    which is the exact failure the SERIAL type was added to fix, in the
+    commit that fixed it for ``target[].value`` and stopped there.
+
+    ``devid`` is polymorphic in practice (a name on some surfaces, a
+    serial on others), so it takes the same ``IP_HOST_OR_SERIAL`` the
+    ``device`` target slot takes rather than a flat SERIAL, on the same
+    stated criterion: only carriers documented to hold a serial get it.
+    """
+
+    SERIAL_VALUE = "FGT60FTK20000001"
+    NAME_VALUE = "edge-fw-02"
+
+    def _on(self, monkeypatch: pytest.MonkeyPatch) -> OutputMasker:
+        monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
+        return OutputMasker(FPEEngine(KEY), mask_device_identity=True)
+
+    def test_a_serial_under_devid_gets_the_same_token_as_under_sn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        out = self._on(monkeypatch).mask_result(
+            {"sn": self.SERIAL_VALUE, "devid": self.SERIAL_VALUE}
+        )
+        assert self.SERIAL_VALUE not in str(out)
+        assert out["devid"] == out["sn"]
+
+    def test_a_serial_under_devid_round_trips_with_its_case(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The functional half. A serial masked through the hostname
+        alphabet comes back lowercased, and a lowercased serial is not the
+        serial: FortiManager will not match it."""
+        masker = self._on(monkeypatch)
+        token = masker.mask_result({"devid": self.SERIAL_VALUE})["devid"]
+        assert ArgUnmasker(FPEEngine(KEY)).resolve_scalar(token) == self.SERIAL_VALUE
+
+    def test_a_device_name_under_devid_still_masks_as_a_hostname(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The regression guard. devid holds a NAME on the surfaces the
+        #80 sweep sampled, so the serial branch must not capture those."""
+        out = self._on(monkeypatch).mask_result(
+            {"devname": self.NAME_VALUE, "devid": self.NAME_VALUE}
+        )
+        assert self.NAME_VALUE not in str(out)
+        assert out["devid"] == out["devname"]
+
+    def test_devid_still_follows_the_device_identity_flag(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Retyping must not change which table it lives in."""
+        monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
+        off = OutputMasker(FPEEngine(KEY), mask_device_identity=False)
+        assert off.mask_result({"devid": self.SERIAL_VALUE})["devid"] == self.SERIAL_VALUE
