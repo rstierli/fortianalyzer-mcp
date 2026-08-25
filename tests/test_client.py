@@ -595,3 +595,80 @@ class TestSystemTimezoneDetection:
         monkeypatch.setattr(client, "get_system_status", fake_status)
         tz = await client.get_system_timezone()
         assert tz is None
+
+
+class TestCaBundleAndVerifyGuidance:
+    """`FORTIANALYZER_CA_BUNDLE` and the warning that names it (#126).
+
+    The warning told the operator to "trust the FAZ CA (set the CA bundle)".
+    Two things were wrong with that. Trusting the CA is not sufficient: a
+    factory FortiAnalyzer certificate is self-signed with the serial as CN and
+    carries no subjectAltName, so with that certificate trusted as the CA
+    bundle a request by IP still fails CERTIFICATE_VERIFY_FAILED on an address
+    mismatch. And the setting it told the operator to set did not exist.
+    """
+
+    def test_ca_bundle_path_reaches_the_transport(self, tmp_path) -> None:
+        bundle = tmp_path / "corp-ca.pem"
+        bundle.write_text("-----BEGIN CERTIFICATE-----\n")
+
+        client = FortiAnalyzerClient(
+            host="faz.example.com", api_token="t", verify_ssl=True, ca_bundle=str(bundle)
+        )
+
+        assert client.resolve_verify() == str(bundle)
+
+    def test_verify_disabled_beats_a_ca_bundle(self, tmp_path) -> None:
+        """An explicit FORTIANALYZER_VERIFY_SSL=false is never silently upgraded."""
+        bundle = tmp_path / "corp-ca.pem"
+        bundle.write_text("-----BEGIN CERTIFICATE-----\n")
+
+        client = FortiAnalyzerClient(
+            host="faz.example.com", api_token="t", verify_ssl=False, ca_bundle=str(bundle)
+        )
+
+        assert client.resolve_verify() is False
+
+    def test_no_bundle_keeps_the_system_trust_store(self) -> None:
+        client = FortiAnalyzerClient(host="faz.example.com", api_token="t", verify_ssl=True)
+        assert client.resolve_verify() is True
+
+    def test_a_missing_bundle_fails_closed(self) -> None:
+        """A typo'd path must not fall back to the system trust store, which
+        would verify against the wrong root and look like success."""
+        with pytest.raises(ValueError, match="CA bundle"):
+            FortiAnalyzerClient(
+                host="faz.example.com",
+                api_token="t",
+                verify_ssl=True,
+                ca_bundle="/nonexistent/corp-ca.pem",
+            )
+
+    @pytest.mark.asyncio
+    async def test_the_warning_names_a_setting_that_exists(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The old text pointed at a 'CA bundle' knob this server never had."""
+        stub = MagicMock()
+        stub.login.return_value = (0, {"status": {"code": 0, "message": "OK"}})
+        stub.get.return_value = (0, {"status": {"code": 0}})
+        monkeypatch.setattr("fortianalyzer_mcp.api.client.FortiManager", lambda *a, **kw: stub)
+
+        client = FortiAnalyzerClient(host="faz.example.com", api_token="t", verify_ssl=False)
+
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="fortianalyzer_mcp.api.client"):
+            try:
+                await client.connect()
+            except Exception:
+                pass
+
+        blob = " ".join(r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+
+        assert "FORTIANALYZER_VERIFY_SSL=false" in blob
+        # Names the setting that now exists, rather than a vague "the CA bundle".
+        assert "FORTIANALYZER_CA_BUNDLE" in blob
+        # States the real blocker.
+        assert "subjectAltName" in blob or "SAN" in blob
