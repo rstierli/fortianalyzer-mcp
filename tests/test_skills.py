@@ -792,7 +792,12 @@ class TestSkillsFlag:
         from fortianalyzer_mcp.utils.config import Settings
 
         monkeypatch.delenv("FAZ_SKILLS_ENABLED", raising=False)
-        assert Settings(FORTIANALYZER_HOST="192.0.2.1").FAZ_SKILLS_ENABLED is False
+        # _env_file=None so the assertion is about the DEFAULT, not about
+        # whatever the developer's .env happens to say. delenv clears the
+        # process env; it cannot clear the dotenv source Settings also
+        # reads, so without this the test fails for anyone whose .env
+        # sets the flag.
+        assert Settings(FORTIANALYZER_HOST="192.0.2.1", _env_file=None).FAZ_SKILLS_ENABLED is False
 
 
 class TestNestedWarningRedaction:
