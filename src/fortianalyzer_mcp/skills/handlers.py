@@ -1332,8 +1332,14 @@ async def run_threat_intel(params: ThreatIntelParams) -> ThreatIntelResult:
             value = row.get("value")
             canonical = _INDICATOR_TYPE_CANONICAL.get(str(row.get("type") or "").lower())
             if not value or canonical is None:
+                # Name the uuid when the row carries one, and the type
+                # always, but never the value: this branch runs precisely
+                # when the type is NOT IP/URL/Domain, so the value has no
+                # shape the free-text scan recognises and a hostname-class
+                # one would ride through the warning verbatim (#130).
+                uuid = row.get("indicator-uuid")
                 warnings.append(
-                    f"linked indicator {row.get('indicator-uuid') or value!r} skipped: "
+                    f"linked indicator{f' {uuid!r}' if uuid else ''} skipped: "
                     f"type {row.get('type')!r} is not IP/URL/Domain or value is missing"
                 )
                 continue
@@ -1373,7 +1379,14 @@ async def run_threat_intel(params: ThreatIntelParams) -> ThreatIntelResult:
             (r for r in rows if str(r.get("value")) == value), None
         )
         if matched is None and rows:
-            matched = rows[0]
+            # A row whose value never matched the request describes some
+            # other subject, and its enrichment fields would be reported
+            # under this indicator. Keep it only when its own type is a
+            # class the masker can type the record's value from, which is
+            # the normalised-form case the fallback exists for (#130).
+            first = rows[0]
+            if _INDICATOR_TYPE_CANONICAL.get(str(first.get("type") or "").lower()):
+                matched = first
         if matched is None:
             warnings.append(
                 f"no stored enrichment for {indicator_type} {value!r} "
