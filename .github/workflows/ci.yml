@@ -86,6 +86,10 @@ jobs:
         run: |
           uv run ruff check src/ tests/
 
+      - name: Check types
+        run: |
+          uv run mypy src/
+
   security:
     runs-on: ubuntu-latest
     steps:
