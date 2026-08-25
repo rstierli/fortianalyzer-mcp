@@ -146,6 +146,23 @@ class ArgUnmasker:
             return marked
         if vtype in (IP, MAC, IP_OR_HOST):
             return self._unmask_by_type(vtype, candidate)
+        # A masked Host header comes back as ``<token>:<port>``, because the
+        # masker splits the pair rather than burning it whole. Without the
+        # mirror here that value passed straight through, so a model copying a
+        # ported host out of a response into a query argument got no
+        # restoration and matched zero rows: the split claimed to preserve the
+        # query-back pivot while only half building it.
+        #
+        # Decompose, resolve, reassemble, exactly as ``resolve_url`` already
+        # does for a URL's host and port. Strictly a no-op unless the head
+        # genuinely resolves, so an ordinary ``host:port`` a caller typed by
+        # hand reaches the appliance as written rather than being rewritten by
+        # a failed lookup.
+        head, sep, port = candidate.partition(":")
+        if sep and head and port.isascii() and port.isdigit() and len(port) <= 5:
+            resolved = self.resolve_scalar(head, vtype)
+            if resolved != head:
+                return f"{resolved}:{port}"
         return value
 
     # -- masked URLs (#40 url/referralurl) ---------------------------------- #

@@ -3048,3 +3048,270 @@ class TestDevidCarriesASerial:
         monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
         off = OutputMasker(FPEEngine(KEY), mask_device_identity=False)
         assert off.mask_result({"devid": self.SERIAL_VALUE})["devid"] == self.SERIAL_VALUE
+
+
+# --------------------------------------------------------------------------- #
+# groupby dimension names from the shipped alert-handler catalogue (#80)
+# --------------------------------------------------------------------------- #
+
+#: Every dimension name below was read out of the live handler catalogue
+#: (``get_alert_handlers(handler_type="both")``), not invented here: 55
+#: distinct names appear across the shipped rules, and these are the ones
+#: carrying an identifier that the flat allowlist did not type.
+#:
+#: The mechanism is the whole finding. ``COMPOSITE_PREFIXED`` masks
+#: ``"<fieldname>:<value>"`` by looking the INNER name up in the same type
+#: table, so ``groupby3`` being covered buys nothing when the name inside
+#: it is not. Measured on ``329ba81``, one masker, one key:
+#:
+#:     srcip:203.0.113.5        -> srcip:ip4-<kid>-<ciphertext>-<tag>
+#:     attackerip:203.0.113.5   -> attackerip:203.0.113.5
+#:
+#: Same value, same composite key, same record: the covered spelling mints
+#: a token and the uncovered spelling publishes the plaintext beside it.
+GROUPBY_IDENTIFIER_DIMENSIONS = [
+    ("attackerip", "203.0.113.5", "srcip"),
+    ("victimip", "203.0.113.5", "dstip"),
+    ("host_ip", "203.0.113.5", "srcip"),
+    ("dst_domain", "corp.example.com", "qname"),
+    ("http_host", "corp.example.com", "qname"),
+    ("net_remote_server", "corp.example.com", "dstendpoint"),
+    ("remotename", "corp.example.com", "hostname"),
+    ("user_name", "alice", "user"),
+    ("user_id", "alice", "user"),
+    ("enduser", "alice", "user"),
+    ("mail_from", "alice@example.com", "from"),
+]
+
+
+class TestGroupbyDimensionNamesCarryTheirType:
+    """The #80 residual: 55 dimension names ship in the handler catalogue
+    and the identifier-bearing ones were not in the type table."""
+
+    @pytest.mark.parametrize(
+        ("dimension", "value", "twin"),
+        GROUPBY_IDENTIFIER_DIMENSIONS,
+        ids=[d for d, _, _ in GROUPBY_IDENTIFIER_DIMENSIONS],
+    )
+    def test_the_dimension_masks_like_its_covered_twin(
+        self, masker: OutputMasker, dimension: str, value: str, twin: str
+    ) -> None:
+        out = masker.mask_result({"groupby1": f"{dimension}:{value}"})["groupby1"]
+        assert value not in out, (
+            f"{dimension} published {value!r} verbatim while its twin "
+            f"{twin} masks the same value in the same position"
+        )
+
+    @pytest.mark.parametrize(
+        ("dimension", "value", "twin"),
+        GROUPBY_IDENTIFIER_DIMENSIONS,
+        ids=[d for d, _, _ in GROUPBY_IDENTIFIER_DIMENSIONS],
+    )
+    def test_the_dimension_agrees_with_its_twin(
+        self, masker: OutputMasker, dimension: str, value: str, twin: str
+    ) -> None:
+        """Determinism is the reason this matters: if the two spellings of one
+        value minted different tokens, a record carrying both would still
+        hand over the pairing."""
+        got = masker.mask_result({"groupby1": f"{dimension}:{value}"})["groupby1"]
+        want = masker.mask_result({"groupby1": f"{twin}:{value}"})["groupby1"]
+        assert got.split(":", 1)[1] == want.split(":", 1)[1]
+
+    def test_logdev_name_follows_the_device_identity_flag(
+        self, masker: OutputMasker, full_masker: OutputMasker
+    ) -> None:
+        """It is estate identity, the same class as devname, so it must be
+        clear with the flag off and masked with it on.
+
+        Running this flag-off only is what made `devname` itself read as a
+        leak during the sweep, so both directions are asserted.
+        """
+        payload = {"groupby1": "logdev_name:fw-hq-01"}
+        assert "fw-hq-01" in masker.mask_result(payload)["groupby1"]
+        assert "fw-hq-01" not in full_masker.mask_result(payload)["groupby1"]
+
+    @pytest.mark.parametrize("dimension", ["euid", "srccountry", "dstcity", "catdesc"])
+    def test_the_deliberately_clear_dimensions_stay_clear(
+        self, masker: OutputMasker, dimension: str
+    ) -> None:
+        """Guards the obvious wrong fix. These four were each measured and
+        rejected as findings during the #80 sweep: euid is an internal row id
+        and documented join key, the geo pair is computed enrichment and a
+        first-class aggregation dimension, and catdesc is a FortiGuard
+        taxonomy label. Typing them would burn readable values for nothing.
+        """
+        value = {
+            "euid": "4471",
+            "srccountry": "Canada",
+            "dstcity": "Ottawa",
+            "catdesc": "Search Engines",
+        }[dimension]
+        out = masker.mask_result({"groupby1": f"{dimension}:{value}"})["groupby1"]
+        assert value in out
+
+
+class TestTheNewNamesDoNotBurnRoutineShapes:
+    """#124 types four names that were previously untyped, and typing a name
+    changes what happens to values that do not fit the type.
+
+    An adversarial review measured the trade: on main these rode out in CLEAR
+    (a leak), and once typed they fail CLOSED to an irreversible placeholder.
+    Failing closed is right, but a placeholder is not a token: it cannot be
+    unmasked, so the analyst loses the query-back pivot. Two of the three
+    shapes it found are routine enough to be worth handling rather than
+    burning, and both are introduced by this PR rather than pre-existing.
+
+    Deliberately NOT handled here: ``enduser:CORP\\alice``. A domain-qualified
+    principal burns identically under the already-typed twin ``user`` on
+    main, so it is a question about the USERNAME mint in general and not
+    something this PR introduces.
+    """
+
+    def test_a_host_header_keeps_its_port_and_masks_the_host(self, masker: OutputMasker) -> None:
+        """``http_host`` is the HTTP Host header, which is ``host[:port]``.
+
+        The port is not an identifier and the host is, so burning the pair
+        loses both the reversibility of the host and the readability of the
+        port. ``_mask_url_host`` already splits a URL's host from the rest for
+        the same reason.
+        """
+        out = masker.mask_result({"groupby1": "http_host:corp.example.com:8080"})["groupby1"]
+
+        assert "corp.example.com" not in out
+        assert out.endswith(":8080"), f"port should survive, got {out!r}"
+        assert "unrepresentable" not in out, f"host should mint a token, got {out!r}"
+
+    def test_the_ported_host_mints_the_same_token_as_the_bare_host(
+        self, masker: OutputMasker
+    ) -> None:
+        """Otherwise one host has two identities depending on the port."""
+        ported = masker.mask_result({"groupby1": "http_host:corp.example.com:8080"})["groupby1"]
+        bare = masker.mask_result({"groupby1": "http_host:corp.example.com"})["groupby1"]
+
+        assert ported.split("http_host:")[1].rsplit(":", 1)[0] == bare.split("http_host:")[1]
+
+    def test_the_null_envelope_sender_is_not_an_identifier(self, masker: OutputMasker) -> None:
+        """``<>`` is the SMTP null return path, a protocol constant.
+
+        Every bounce and DSN carries it, so burning it turns the most common
+        value on the surface into an irreversible placeholder while naming
+        nobody.
+        """
+        out = masker.mask_result({"groupby1": "mail_from:<>"})["groupby1"]
+        assert out == "mail_from:<>"
+
+    @pytest.mark.parametrize(
+        "value",
+        ["2001:db8::1", "[2001:db8::1]:8080", "corp.example.com:abc"],
+        ids=["ipv6-bare", "ipv6-bracketed", "non-numeric-tail"],
+    )
+    def test_a_colon_that_is_not_a_port_is_not_split(
+        self, masker: OutputMasker, value: str
+    ) -> None:
+        """My first version of the port split cut in the wrong place.
+
+        It used the LAST colon, so ``2001:db8::1`` ends in a digit and split
+        into a burned ``2001:db8:`` plus a stray ``:1``. The comment above it
+        claimed IPv6 fell through unchanged, which it did not. Only a value
+        with exactly one colon and a numeric tail is a ``host:port``.
+        """
+        out = masker.mask_result({"groupby1": f"http_host:{value}"})["groupby1"]
+        body = out.split("http_host:", 1)[1]
+
+        assert value not in body, "the value itself must not survive in clear"
+        assert not body.endswith(":1"), f"split at the wrong colon: {body!r}"
+
+    @pytest.mark.parametrize(
+        ("value", "splits"),
+        [
+            ("corp.example.com:8080", True),
+            ("corp.example.com:0", True),
+            ("corp.example.com:00080", True),
+            ("a:1:2", False),
+            (":8080", False),
+            ("host:", False),
+            ("corp.example.com:abc", False),
+        ],
+        ids=[
+            "ordinary",
+            "port-zero",
+            "leading-zeros",
+            "two-colons",
+            "empty-host",
+            "empty-port",
+            "non-numeric",
+        ],
+    )
+    def test_the_split_declines_anything_that_is_not_a_host_port(
+        self, masker: OutputMasker, value: str, splits: bool
+    ) -> None:
+        """The gate is ``vtype == DOMAIN``, which is wider than ``http_host``.
+
+        Eight fields are DOMAIN-typed (``botnetdomain``, ``domain``,
+        ``domainctrldomain``, ``dst_domain``, ``http_host``, ``qname``,
+        ``scertcname``, ``srcdomain``), so this runs on all of them. A domain
+        cannot legally contain a colon, so any colon-bearing value here is
+        already anomalous; what matters is that the split never LOSES
+        information. Where it declines, the value burns exactly as it did
+        before, and where it fires, the host masks reversibly and the tail is
+        carried through untouched.
+
+        The recursive call cannot loop: ``partition`` hands it the segment
+        before the first colon, and a minted token contains no colon.
+        """
+        out = masker.mask_result({"qname": value})["qname"]
+
+        if splits:
+            tail = value.split(":", 1)[1]
+            assert out.endswith(f":{tail}"), f"tail not carried through: {out!r}"
+            assert "unrepresentable" not in out
+        else:
+            assert "unrepresentable" in out, f"expected a whole-value burn, got {out!r}"
+        assert value not in out
+
+    def test_the_ported_token_round_trips_as_an_argument(self) -> None:
+        """The half of this change I claimed and had not built.
+
+        The justification for splitting the port is that burning the pair
+        destroys the query-back pivot. That is only true if the model can
+        hand the token back. An adversarial review found it could not: the
+        bare token resolved and ``<token>:8080`` passed through untouched, so
+        a model copying a ported host out of a response into a query argument
+        got no restoration and matched zero rows.
+
+        ``resolve_url`` already decomposes, resolves and reassembles a URL
+        including its port; this is the same move for a bare host.
+        """
+        engine = FPEEngine(KEY)
+        masker = OutputMasker(engine)
+        unmasker = ArgUnmasker(engine)
+
+        ported = masker.mask_result({"http_host": "corp.example.com:8080"})["http_host"]
+
+        assert unmasker.unmask_args({"http_host": ported}) == {"http_host": "corp.example.com:8080"}
+
+    def test_an_unresolvable_head_leaves_the_argument_alone(self) -> None:
+        """No behaviour change for anything that is not a token plus a port.
+
+        The split must be a no-op unless the head genuinely resolves, so an
+        ordinary ``host:port`` a caller typed by hand reaches the appliance
+        exactly as written rather than being rewritten by a failed lookup.
+        """
+        unmasker = ArgUnmasker(FPEEngine(KEY))
+
+        assert unmasker.unmask_args({"http_host": "corp.example.com:8080"}) == {
+            "http_host": "corp.example.com:8080"
+        }
+
+    def test_a_unicode_digit_tail_is_not_treated_as_a_port(self) -> None:
+        """``str.isdigit`` alone accepts Unicode digits.
+
+        Harmless in itself, since a port names nobody, but it meant a tail
+        this code never validated was echoed verbatim on the strength of a
+        check that looked like it had validated it. ASCII is what a port is.
+        """
+        value = "corp.example.com:٨٠٨٠"
+        out = OutputMasker(FPEEngine(KEY)).mask_result({"http_host": value})["http_host"]
+
+        assert "unrepresentable" in out, f"expected a whole-value burn, got {out!r}"
+        assert "corp.example.com" not in out
