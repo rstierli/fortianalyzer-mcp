@@ -1260,3 +1260,164 @@ class TestPassTwoRefusesKeptValues:
         )
 
         assert out == {"msg": f"seen on {self.TOKEN} overnight"}
+
+
+class TestSubstitutionPlanIsBuiltOncePerResponse:
+    """#73 item 7c, re-measured. The item names peak memory as the concern.
+
+    Memory was never the problem. Measured at ``329ba81`` it is ~1.1 KB per
+    distinct identifier and linear, about half the ~2 KB the issue states.
+    **Time** was the problem, and it was quadratic: pass 2 calls ``mask_text``
+    once per TEXT field and each call rebuilt and recompiled the whole
+    n-branch alternation, so n texts over n identifiers cost n x O(n).
+
+        ids    secs   fitted
+        250    0.04     -
+        500    0.14   O(n^1.8)
+       1000    0.51   O(n^1.9)
+       2000    2.01   O(n^2.0)
+
+    Extrapolated, 10k distinct identifiers is ~50s in one call.
+    """
+
+    def test_the_plan_is_compiled_once_regardless_of_row_count(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The whole fix in one assertion: rows must not multiply compiles."""
+        masker = OutputMasker(FPEEngine(KEY))
+
+        calls: list[int] = []
+        original = OutputMasker._build_substitution_plan
+
+        def spy(self, mapping, keep):  # type: ignore[no-untyped-def]
+            calls.append(len(mapping))
+            return original(self, mapping, keep)
+
+        monkeypatch.setattr(OutputMasker, "_build_substitution_plan", spy)
+
+        rows = [{"hostname": f"fw-site-{i:03d}", "msg": f"row {i} saw traffic"} for i in range(40)]
+        masker.mask_result({"data": rows})
+
+        assert len(calls) == 1, (
+            f"expected one substitution plan for the response, got {len(calls)}. "
+            "Rebuilding per TEXT field is what made this quadratic."
+        )
+
+    def test_a_value_masked_in_row_one_is_substituted_in_a_later_row(self) -> None:
+        """The case a naive cache breaks.
+
+        A hostname masked in a structured field must still be substituted in
+        prose many rows later, which only works if the cached plan covers the
+        whole mapping rather than whatever was known when it was first built.
+        """
+        masker = OutputMasker(FPEEngine(KEY))
+
+        rows: list[dict[str, str]] = [{"hostname": "fw-hq-01", "msg": "first row"}]
+        rows += [{"msg": f"filler {i}"} for i in range(1, 50)]
+        rows.append({"msg": "later mention of fw-hq-01 in prose"})
+
+        out = masker.mask_result({"data": rows})
+
+        assert "fw-hq-01" not in out["data"][-1]["msg"]
+        assert out["data"][-1]["msg"] != "later mention of fw-hq-01 in prose"
+
+    def test_a_pass_two_overwrite_invalidates_the_plan(self) -> None:
+        """The bug an adversarial review found in the first version of this.
+
+        That version keyed the cache on ``len(mapping)``, on the belief that
+        pass 2 never writes to the map. It does: ``_mask_filter_entries`` runs
+        in pass 2 and reaches ``_mask_scalar``, which writes
+        ``mapping[value] = token``. When the value is already present under a
+        different type that write is an OVERWRITE, so the length does not
+        move and a size key never fires.
+
+        Here ``fw-hq-01`` is typed HOSTNAME in pass 1 and re-typed USERNAME by
+        the filter entry. The later TEXT field spells it in a different case,
+        so it resolves through the folded table rather than by exact lookup,
+        and a stale plan hands back the hostname token where the uncached path
+        hands back the username one.
+
+        The assertion is deliberately against the CURRENT behaviour of the
+        uncached path rather than against a token spelling: the point is that
+        caching changes nothing, not that either answer is the right one.
+        """
+        masker = OutputMasker(FPEEngine(KEY), mask_device_identity=True)
+        payload = {
+            "data": [{"devname": "fw-hq-01", "msg": "structured row"}],
+            "filter_applied": [["user", "=", "fw-hq-01"]],
+            "tail": [{"msg": "later mention of FW-HQ-01 in prose"}],
+        }
+
+        out = masker.mask_result(payload)
+        token = out["tail"][0]["msg"].split("later mention of ")[1].split(" in prose")[0]
+
+        assert token.startswith("user-"), (
+            f"expected the username token the filter entry re-typed it to, got {token!r}. "
+            "A host- token means the cached plan served a mapping entry that had "
+            "since been overwritten."
+        )
+
+    def test_a_burned_value_recorded_by_setdefault_reaches_pass_two(self) -> None:
+        """The cleartext leak an adversarial review constructed.
+
+        I claimed I could not build a payload where the ``setdefault`` hole
+        diverged. The reviewer built one, and it is worse than a divergence:
+        the raw value rides out while its own burn placeholder sits two keys
+        away, which is exactly the token-beside-plaintext pairing the masker
+        exists to prevent.
+
+        The chain needs four things in one response, which is why it is rare
+        and why hand-written tests missed it:
+
+        1. a tracked write, so a plan can exist at all
+        2. a PASS 1 route into ``mask_text`` so the plan is built early. Here
+           ``grpby`` carrying a non-JSON string takes ``_mask_json_blob``'s
+           fallback. ``_mask_device_vdom`` comma parts and
+           ``_mask_url_host``'s unparseable-URL fallback do the same.
+        3. ``_burn_and_record`` recording a burn via ``mapping.setdefault``,
+           which in CPython never routes through a subclass ``__setitem__``
+        4. a later TEXT field naming the burned value
+
+        Any ordinary ``mapping[k] = v`` between 3 and 4 rebuilds the plan and
+        the leak vanishes, which is why it was about 0.5% of fuzz payloads
+        and deterministic when the shape lines up.
+        """
+        masker = OutputMasker(FPEEngine(KEY), mask_device_identity=True)
+        payload = {
+            "data": [
+                {"devname": "fw-hq-01"},
+                {"grpby": "context line"},
+                {"groupby1": {"customdim": "j.doe.contractor"}},
+                {"msg": "observed j.doe.contractor in prose"},
+            ]
+        }
+
+        out = masker.mask_result(payload)
+
+        assert "j.doe.contractor" not in out["data"][3]["msg"], (
+            "a value burned in groupby1 rode out in clear in a later TEXT "
+            "field, publishing the placeholder beside the plaintext"
+        )
+
+    def test_a_grown_mapping_invalidates_the_plan(self) -> None:
+        """Correctness must not rest on pass 2 leaving ``mapping`` alone.
+
+        Measured on ``329ba81``, it does: the free-text scan mints through the
+        engine rather than writing to ``mapping``, and both write sites are
+        pass-1 paths. The plan is keyed on ``len(mapping)`` anyway, so a future
+        route that does add an entry mid-pass rebuilds instead of substituting
+        against a stale alternation. This asserts the guard, not the
+        observation.
+        """
+        masker = OutputMasker(FPEEngine(KEY))
+        mapping = {"fw-hq-01": "host-tok-1"}
+        keep: frozenset[str] = frozenset()
+
+        first = masker.mask_text("about fw-hq-01", mapping, keep)
+        assert "fw-hq-01" not in first
+
+        mapping["fw-branch-02"] = "host-tok-2"
+        second = masker.mask_text("about fw-branch-02", mapping, keep)
+        assert "fw-branch-02" not in second, (
+            "a value added to mapping after the plan was built was not picked up"
+        )

@@ -67,6 +67,7 @@ import json
 import logging
 import os
 import re
+from dataclasses import dataclass
 from functools import wraps
 from typing import Any
 from urllib.parse import unquote
@@ -203,6 +204,114 @@ _DEVVDS_RE = re.compile(r"^(?P<dev>[^\[\]]+)\[(?P<vdom>[^\[\]]*)\]$")
 #: Values shorter than this are not substituted into free text: a two or
 #: three character username would match inside unrelated words.
 _MIN_SUBSTITUTION_LEN = 4
+
+
+class _TrackedMapping(dict[str, str]):
+    """A raw -> token map that counts every write.
+
+    The plan cache needs to know when the map has changed, and SIZE is not
+    enough: a value already present can be re-typed to a different token,
+    which changes what the alternation must resolve to while leaving the
+    length identical. ``_mask_filter_entries`` does exactly that, in pass 2
+    (see ``_plan_for``).
+    """
+
+    __slots__ = ("version",)
+
+    version: int
+
+    def __new__(cls, *args: Any, **kwargs: Any) -> "_TrackedMapping":
+        # The slot is initialised in __new__, not __init__, because unpickling
+        # reconstructs a dict subclass by feeding items in BEFORE __init__
+        # runs. Without this, ``__setitem__`` raises AttributeError on
+        # ``self.version``. Nothing pickles the mapping today; this keeps a
+        # latent crash from becoming a live one.
+        self = super().__new__(cls, *args, **kwargs)
+        self.version = 0
+        return self
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    # EVERY mutating entry point, not just __setitem__. In CPython
+    # ``setdefault``, ``update``, ``pop``, ``popitem``, ``clear``, ``|=`` and
+    # ``del`` all mutate the underlying dict WITHOUT routing through
+    # ``__setitem__``, so overriding that alone leaves silent holes. This is
+    # not hypothetical: ``_burn_and_record`` calls ``mapping.setdefault(value,
+    # burned)``, and a version counter that missed it would be the same
+    # stale-plan bug this class exists to prevent, reintroduced through a new
+    # mechanism.
+    def __setitem__(self, key: str, value: str) -> None:
+        super().__setitem__(key, value)
+        self.version += 1
+
+    def __delitem__(self, key: str) -> None:
+        super().__delitem__(key)
+        self.version += 1
+
+    def setdefault(self, key: str, default: str = "") -> str:
+        before = len(self)
+        result = super().setdefault(key, default)
+        if len(self) != before:
+            self.version += 1
+        return result
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        super().update(*args, **kwargs)
+        self.version += 1
+
+    def pop(self, *args: Any, **kwargs: Any) -> Any:
+        result = super().pop(*args, **kwargs)
+        self.version += 1
+        return result
+
+    def popitem(self) -> tuple[str, str]:
+        result = super().popitem()
+        self.version += 1
+        return result
+
+    def clear(self) -> None:
+        super().clear()
+        self.version += 1
+
+    def __ior__(self, other: Any) -> "_TrackedMapping":  # type: ignore[misc,override]
+        # Delegates rather than calling dict.__ior__, so the bump lives in
+        # exactly one place.
+        self.update(other)
+        return self
+
+
+def _version_of(mapping: dict[str, str]) -> int | None:
+    """``None`` for anything we do not ourselves track, forcing a rebuild.
+
+    An isinstance check rather than ``getattr(mapping, "version", None)``: the
+    duck-typed form would trust any object an external caller passed that
+    happened to carry an unrelated ``version`` attribute, and treat its value
+    as a cache key. Contrived, but the failure mode is a stale plan, which is
+    the bug class this whole mechanism exists to close.
+    """
+    return mapping.version if isinstance(mapping, _TrackedMapping) else None
+
+
+@dataclass(frozen=True)
+class _SubstitutionPlan:
+    """One compiled alternation over the response's known raw values."""
+
+    version: int
+    keep: frozenset[str]
+    mapping: dict[str, str]
+    pattern: re.Pattern[str]
+    folded: dict[str, str]
+    ambiguous: set[str]
+
+
+#: Cached per response rather than per TEXT field. A ContextVar rather than an
+#: instance attribute because one OutputMasker serves concurrent requests, and
+#: an attribute would let one response's plan leak into another's.
+_SUB_PLAN: contextvars.ContextVar["_SubstitutionPlan | None"] = contextvars.ContextVar(
+    "_faz_substitution_plan", default=None
+)
+
 
 _PLACEHOLDER_MARK = "masked-unrepresentable-"
 
@@ -1014,29 +1123,16 @@ class OutputMasker:
         out = _EMAIL_RE.sub(email_sub, out)
         return self._substitute_known(out, mapping, keep)
 
-    def _substitute_known(
-        self,
-        text: str,
-        mapping: dict[str, str] | None,
-        keep: frozenset[str] = frozenset(),
-    ) -> str:
-        """Replace values that were masked elsewhere in this response.
+    def _build_substitution_plan(
+        self, mapping: dict[str, str], keep: frozenset[str]
+    ) -> "_SubstitutionPlan | None":
+        """Compile the alternation over every known raw value, once.
 
-        Hostnames and domains cannot be recognized by pattern, but they can
-        be recognized by identity: a value masked in a structured field of
-        the same response is the same identifier wherever it appears in
-        prose, and gets the same token. Longest first, so a domain is not
-        partially rewritten by one of its own labels.
-        Matching is case-insensitive: hostnames, domains and emails are
-        case-insensitive identifiers and mask to the same token whatever
-        their spelling, so an echo that re-cases one is the same value.
-        The exact spelling still wins the token lookup, because usernames
-        are case-sensitive principals and ``Admin``/``admin`` must keep
-        their own tokens when both were masked. One alternation in one
-        pass, so a token already substituted is never re-scanned.
+        This used to happen inside :meth:`_substitute_known`, which pass 2
+        calls once per TEXT field. n texts over n identifiers therefore
+        rebuilt and recompiled an n-branch alternation n times, which is
+        what made a large response quadratic in time (#73 item 7c).
         """
-        if not mapping:
-            return text
         raws = [
             raw
             for raw in sorted(mapping, key=len, reverse=True)
@@ -1048,7 +1144,7 @@ class OutputMasker:
             if len(raw) >= _MIN_SUBSTITUTION_LEN and raw not in keep
         ]
         if not raws:
-            return text
+            return None
         # An inexact (case-only) match may reuse a token only when exactly one
         # raw owns that folded form. Usernames are case-sensitive principals,
         # so two of them differing only in case make a third spelling
@@ -1076,6 +1172,120 @@ class OutputMasker:
             + "|".join(re.escape(raw) for raw in raws)
             + r")(?![A-Za-z0-9._-])"
         )
+        version = _version_of(mapping)
+        assert version is not None  # only called when _plan_for has one
+        return _SubstitutionPlan(
+            version=version,
+            keep=keep,
+            mapping=mapping,
+            pattern=pattern,
+            folded=folded,
+            ambiguous=ambiguous,
+        )
+
+    def _build_substitution_plan_uncached(
+        self, mapping: dict[str, str], keep: frozenset[str]
+    ) -> "_SubstitutionPlan | None":
+        """Build without touching the cache, for a caller-supplied plain dict."""
+        raws = [
+            raw
+            for raw in sorted(mapping, key=len, reverse=True)
+            if len(raw) >= _MIN_SUBSTITUTION_LEN and raw not in keep
+        ]
+        if not raws:
+            return None
+        folded: dict[str, str] = {}
+        ambiguous: set[str] = set()
+        for raw in raws:
+            key = raw.casefold()
+            if key in folded and folded[key] != mapping[raw]:
+                ambiguous.add(key)
+            folded.setdefault(key, mapping[raw])
+        pattern = re.compile(
+            r"(?<![A-Za-z0-9._-])(?ai:"
+            + "|".join(re.escape(raw) for raw in raws)
+            + r")(?![A-Za-z0-9._-])"
+        )
+        return _SubstitutionPlan(
+            version=-1,
+            keep=keep,
+            mapping=mapping,
+            pattern=pattern,
+            folded=folded,
+            ambiguous=ambiguous,
+        )
+
+    def _plan_for(
+        self, mapping: dict[str, str], keep: frozenset[str]
+    ) -> "_SubstitutionPlan | None":
+        """The cached plan for this response, rebuilt whenever it cannot serve.
+
+        Keyed on the mapping OBJECT plus a write counter, and the counter is
+        the load-bearing half.
+
+        An earlier version of this keyed on ``len(mapping)`` on the belief that
+        pass 2 never writes to the map. That is false, and the counterexample
+        is deterministic: ``_mask_filter_entries`` runs in pass 2 and reaches
+        ``_mask_scalar``, which writes ``mapping[value] = token``. Writes also
+        reach the map through ``setdefault`` (``_burn_and_record``), not only
+        through ``__setitem__``, which is why the counter lives on every
+        mutating method rather than on one. When the
+        value is already present under a different type the write is an
+        OVERWRITE, so the length does not move, a size key does not fire, and
+        a later case-variant in a TEXT field resolves through the stale
+        ``folded`` table to the previous token. Measured: a device name typed
+        HOSTNAME in pass 1 and re-typed USERNAME by a filter entry produced a
+        host token where main produced a user token.
+
+        Counting writes catches growth and overwrite alike. A caller passing a
+        plain dict has no counter, so it gets a rebuild every call, which is
+        the pre-cache behaviour and correct if slower.
+
+        The plan holds the mapping itself rather than its ``id()``, so the
+        object cannot be collected and have its identity reused underneath a
+        cached plan.
+        """
+        version = _version_of(mapping)
+        if version is None:
+            return self._build_substitution_plan_uncached(mapping, keep)
+        plan = _SUB_PLAN.get()
+        if (
+            plan is not None
+            and plan.mapping is mapping
+            and plan.version == version
+            and plan.keep == keep
+        ):
+            return plan
+        plan = self._build_substitution_plan(mapping, keep)
+        _SUB_PLAN.set(plan)
+        return plan
+
+    def _substitute_known(
+        self,
+        text: str,
+        mapping: dict[str, str] | None,
+        keep: frozenset[str] = frozenset(),
+    ) -> str:
+        """Replace values that were masked elsewhere in this response.
+
+        Hostnames and domains cannot be recognized by pattern, but they can
+        be recognized by identity: a value masked in a structured field of
+        the same response is the same identifier wherever it appears in
+        prose, and gets the same token. Longest first, so a domain is not
+        partially rewritten by one of its own labels.
+        Matching is case-insensitive: hostnames, domains and emails are
+        case-insensitive identifiers and mask to the same token whatever
+        their spelling, so an echo that re-cases one is the same value.
+        The exact spelling still wins the token lookup, because usernames
+        are case-sensitive principals and ``Admin``/``admin`` must keep
+        their own tokens when both were masked. One alternation in one
+        pass, so a token already substituted is never re-scanned.
+        """
+        if not mapping:
+            return text
+        plan = self._plan_for(mapping, keep)
+        if plan is None:
+            return text
 
         def swap(match: re.Match[str]) -> str:
             found = match.group(0)
@@ -1083,17 +1293,17 @@ class OutputMasker:
             if exact is not None:
                 return exact
             key = found.casefold()
-            if key in ambiguous:
+            if key in plan.ambiguous:
                 return self.placeholder(found)
-            return folded.get(key) or self.placeholder(found)
+            return plan.folded.get(key) or self.placeholder(found)
 
-        return pattern.sub(swap, text)
+        return plan.pattern.sub(swap, text)
 
     # -- the two passes -------------------------------------------------- #
 
     def mask_result(self, obj: Any) -> Any:
         """Mask a tool result: structured pass, then free-text pass."""
-        mapping: dict[str, str] = {}
+        mapping: dict[str, str] = _TrackedMapping()
         keep = frozenset() if self._mask_device_identity else self._device_identity_values(obj)
         staged = self._mask_structured(obj, mapping, keep)
         return self._mask_free_text(staged, mapping, keep)
