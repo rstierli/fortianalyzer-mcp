@@ -1161,6 +1161,92 @@ class TestSoarIndicatorPair:
     def test_value_without_a_type_sibling_is_left_alone(self, masker: OutputMasker):
         assert masker.mask_result({"value": "high"})["value"] == "high"
 
+    def test_missing_type_fails_closed_when_the_row_proves_itself(self, masker: OutputMasker):
+        # #130 ruling. The proving sibling is what separates an indicator row
+        # from the generic buckets two tests above, which stay clear.
+        row = {"value": PEER_IP, "enrichment-uuid": "e-9"}
+        out = masker.mask_result({"data": [row]})["data"][0]
+
+        assert PEER_IP not in str(out)
+        assert out["value"].startswith("masked-unrepresentable-")
+
+    def test_undocumented_type_fails_closed_when_the_row_proves_itself(self, masker: OutputMasker):
+        # Live on 8.0 the appliance accepts types outside its documented
+        # enum, so the type naming a class we cannot mint is the live case.
+        for kind in ("Mac", "Host", "Email"):
+            row = {"value": PEER_IP, "type": kind, "indicator-uuid": "i-1"}
+            out = masker.mask_result({"data": [row]})["data"][0]
+            assert out["value"].startswith("masked-unrepresentable-"), kind
+
+    def test_hash_stays_readable_even_when_the_row_proves_itself(self, masker: OutputMasker):
+        # #129 was decided on its own merits and today's ruling does not
+        # reopen it: a hash identifies a file, and no feed matches a
+        # tokenised digest, so masking it costs utility for no safety.
+        digest = "d41d8cd98f00b204e9800998ecf8427e"
+        row = {"value": digest, "type": "Hash", "indicator-uuid": "i-2"}
+        out = masker.mask_result({"data": [row]})["data"][0]
+
+        assert out["value"] == digest
+
+    def test_a_detail_row_under_enrichment_detail_fails_closed(self, masker: OutputMasker):
+        # #133. These rows carry no proving sibling of their own, which is
+        # exactly why the uuid path leaked; the enclosing key is the proof.
+        out = masker.mask_result({"enrichment-detail": [{"source": "vt", "value": PEER_IP}]})
+
+        assert PEER_IP not in str(out)
+        assert out["enrichment-detail"][0]["value"].startswith("masked-unrepresentable-")
+        assert out["enrichment-detail"][0]["source"] == "vt"
+
+    def test_a_recognised_type_still_masks_reversibly_beside_a_proving_sibling(
+        self, masker: OutputMasker
+    ):
+        # Fail-closed must not swallow the cases that already work: a
+        # recognised type still mints a reversible token, not a placeholder.
+        engine = FPEEngine(KEY)
+        row = {"value": PEER_IP, "type": "IP", "enrichment-status": "done"}
+        out = masker.mask_result({"data": [row]})["data"][0]
+
+        assert engine.unmask_token(out["value"]) == PEER_IP
+
+    def test_a_placeholdered_indicator_does_not_ride_out_in_prose(self, masker: OutputMasker):
+        # The same rule the reversible case already has: masked under one
+        # key and clear two keys away hands the value over anyway. The
+        # skills layer puts the raw indicator into `warnings` whenever the
+        # row has no indicator-uuid, and a row proven by one of the other
+        # four siblings reaches exactly that branch.
+        name = "srv-fileshare-01"
+        out = masker.mask_result(
+            {
+                "data": [{"value": name, "type": "Host", "enrichment-status": "done"}],
+                "msg": f"beacon from {name} observed",
+            }
+        )
+
+        assert name not in str(out)
+        assert out["data"][0]["value"] == out["msg"].split("beacon from ")[1].split(" observed")[0]
+
+    def test_a_container_value_on_a_proven_row_burns(self, masker: OutputMasker):
+        # A list or dict under `value` is still a value with no type we can
+        # class. Returning early on the shape left both identifiers raw
+        # inside the very subtree the enclosing-key arm exists to close.
+        out = masker.mask_result(
+            {"enrichment-detail": [{"source": "vt", "value": [PEER_IP, "00:00:5e:00:53:11"]}]}
+        )
+
+        assert PEER_IP not in str(out)
+        assert "00:00:5e:00:53:11" not in str(out)
+
+    def test_documented_residual_an_unproven_row_still_rides_clear(self, masker: OutputMasker):
+        # Accepted fail-open (#130). A live row with neither a recognised
+        # type nor any proving sibling still passes through, because closing
+        # it means fail-closing every groupby bucket, whose shape is also
+        # {"value": ..., "hits": N}. Measured at the time: 15 tests over the
+        # #109/#124 bucket decisions. This pins the residual so it is a
+        # decision on record rather than an oversight.
+        out = masker.mask_result({"data": [{"value": PEER_IP, "source": "vt"}]})["data"][0]
+
+        assert out["value"] == PEER_IP
+
     def test_indicator_echo_in_prose_carries_the_same_token(self, masker: OutputMasker):
         # The skills layer names the indicator in its caller-facing warning.
         # Masked under one key and clear two keys away is the exact failure

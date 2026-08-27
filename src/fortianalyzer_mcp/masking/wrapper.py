@@ -315,6 +315,42 @@ _SUB_PLAN: contextvars.ContextVar["_SubstitutionPlan | None"] = contextvars.Cont
 
 _PLACEHOLDER_MARK = "masked-unrepresentable-"
 
+#: Sibling keys that prove a record is a SOAR indicator row rather than one
+#: of the many other things spelled ``value`` (#130). The ruling is fail
+#: closed for an indicator ``value`` whose ``type`` names nothing we can
+#: mint, but ``_mask_indicator_pair`` runs on every dict a composite handler
+#: has not consumed, so an unscoped rule also placeholders every groupby
+#: bucket, whose shape is ``{"value": ..., "hits": N}``. Measured at the
+#: time: 15 tests over the #109/#124 bucket decisions. The record has to
+#: prove itself first, the same way ``_mask_device_name`` makes the shape
+#: decide rather than the key name.
+_INDICATOR_PROVING_SIBLINGS: frozenset[str] = frozenset(
+    {
+        "indicator-uuid",
+        "enrichment-uuid",
+        "enrichment-reputation",
+        "enrichment-confidence",
+        "enrichment-status",
+    }
+)
+
+#: Indicator types deliberately left readable. ``Hash`` identifies a FILE,
+#: and an analyst looks a digest up against threat intelligence where a
+#: tokenised one matches nothing (#129). The #130 ruling is about types
+#: riding through unrecognised, not about reopening a type already chosen.
+_INDICATOR_TYPES_READABLE: frozenset[str] = frozenset({"hash"})
+
+#: Keys whose subtree is indicator detail. These rows carry no proving
+#: sibling of their own, which is exactly why the ``enrichment_uuid`` path
+#: leaked (#133), so the enclosing key is the proof instead. A ContextVar
+#: rather than an attribute for the same reason ``_SUB_PLAN`` is one: a
+#: single masker serves concurrent requests.
+_INDICATOR_DETAIL_KEYS: frozenset[str] = frozenset({"enrichment-detail"})
+
+_IN_INDICATOR_DETAIL: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_faz_in_indicator_detail", default=False
+)
+
 #: Dimension names whose flat key is served by a composite handler rather
 #: than by a ``FIELD_TYPES`` entry. ``_mask_breakdowns`` has to consult this
 #: as well as the type table: a bucket under ``url`` carries exactly what a
@@ -389,6 +425,19 @@ def _device_name_in(obj: dict[str, Any]) -> str | None:
     if not _DEVICE_SHAPE_SIBLINGS & {k.lower() for k in obj if isinstance(k, str)}:
         return None
     return key
+
+
+def _indicator_row_is_proven(obj: dict[str, Any]) -> bool:
+    """Does this record prove it is a SOAR indicator row?
+
+    Either it carries a sibling only an indicator row carries, or it sits
+    under an indicator-detail key. The second arm exists because the detail
+    rows behind ``enrichment_uuid`` carry no such sibling, which is the
+    whole of #133.
+    """
+    if _IN_INDICATOR_DETAIL.get():
+        return True
+    return any(_find_key(obj, sibling) is not None for sibling in _INDICATOR_PROVING_SIBLINGS)
 
 
 def _find_key(obj: dict[str, Any], name: str) -> str | None:
@@ -1440,7 +1489,7 @@ class OutputMasker:
 
     def _mask_indicator_pair(
         self, obj: dict[str, Any], mapping: dict[str, str], keep: frozenset[str]
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         """SOAR ``value``/``type``: the IOC itself, typed by its sibling.
 
         ``get_indicator_enrichment`` and ``get_linked_indicators`` return
@@ -1451,28 +1500,68 @@ class OutputMasker:
         instead, exactly as ``obf_url`` decides for ``threat`` -- SOAR
         writes it on every indicator row and it names the value's class.
 
-        Only IP, Domain and URL are recognised, which is the set the reader
-        tools accept. Any other ``type`` (or none) leaves ``value`` alone,
-        so the generic use of the name is untouched.
+        Only IP, Domain and URL mint a reversible token, which is the set
+        the reader tools accept. Anything else on a record that PROVES
+        itself an indicator row fails closed to a placeholder (#130): the
+        appliance was measured live accepting types outside its own
+        documented enum, and a ``value`` whose class we cannot mint used to
+        ride out in clear. ``Hash`` is the deliberate exception (#129).
+
+        Proof is required because this method runs on every dict a
+        composite handler has not consumed, not only on SOAR rows. Without
+        it the same rule placeholders every groupby bucket, whose shape is
+        also ``{"value": ..., "hits": N}``, and the severity band
+        ``{"value": "high", "type": "string"}`` with it.
+
+        Documented residual, accepted rather than overlooked: a row with
+        neither a recognised type nor any proving sibling still passes
+        through. Closing that means reinstating the bucket damage above,
+        to cover a shape no live capture has yet produced.
         """
         key = _find_key(obj, "value")
-        type_key = _find_key(obj, "type")
-        if key is None or type_key is None:
+        if key is None:
             return {}
         value = obj[key]
+        if isinstance(value, list | dict):
+            # A container under ``value`` is still a value whose class we
+            # cannot name, and returning early on the shape left every
+            # string in it raw inside the subtree the detail arm exists to
+            # close. Burn rather than walk: the allowlist would mask the
+            # keys it knows and pass the rest, which is the same fail-open
+            # ``_mask_entry`` refuses for COMPOSITE_TARGET.
+            if not _indicator_row_is_proven(obj):
+                return {}
+            return {key: self._burn_strings(value, keep)}
         if not isinstance(value, str) or not value.strip() or value.strip() in SKIP_VALUES:
             return {}
-        kind = obj[type_key]
-        if not isinstance(kind, str):
-            return {}
-        lowered = kind.strip().lower()
+        type_key = _find_key(obj, "type")
+        kind = obj[type_key] if type_key is not None else None
+        lowered = kind.strip().lower() if isinstance(kind, str) else ""
         if lowered == "ip":
             return {key: self._mask_scalar(IP, value, mapping, keep=keep)}
         if lowered == "domain":
             return {key: self._mask_scalar(DOMAIN, value, mapping, keep=keep)}
         if lowered == "url":
             return {key: self._mask_url_full(value, mapping, keep)}
-        return {}
+        if lowered in _INDICATOR_TYPES_READABLE:
+            return {}
+        if value in keep:
+            # A value the deployment chose to leave readable stays readable
+            # here too, the same rule _burn_strings applies before burning.
+            return {}
+        if not _indicator_row_is_proven(obj):
+            return {}
+        token = self.placeholder(value)
+        # Record it, the way ``_mask_scalar`` records its own fail-closed
+        # placeholders (#73 item 4). Without this the identifier is
+        # suppressed here and rides out verbatim in any TEXT field of the
+        # same response, which is the failure the second pass exists for:
+        # the skills layer puts the raw indicator into ``warnings`` when
+        # the row carries no ``indicator-uuid``. ``setdefault`` rather than
+        # assignment so a reversible token minted for the same value
+        # elsewhere keeps precedence over this irreversible one.
+        mapping.setdefault(value, token)
+        return {key: token}
 
     def _mask_threat_pair(
         self, obj: dict[str, Any], mapping: dict[str, str], keep: frozenset[str]
@@ -1634,6 +1723,25 @@ class OutputMasker:
         return f"{prefix}{netloc}/{token}"
 
     def _mask_entry(
+        self, key: str, value: Any, mapping: dict[str, str], keep: frozenset[str] = frozenset()
+    ) -> Any:
+        """Dispatch one key, flagging the indicator-detail subtree first.
+
+        The flag is what lets ``_mask_indicator_pair`` fail closed on rows
+        that prove nothing about themselves (#133). Set here rather than in
+        ``_mask_structured`` because this is the only place with the key in
+        hand, and reset in a ``finally`` so a sibling key after the detail
+        subtree is not judged by it.
+        """
+        if key.lower() in _INDICATOR_DETAIL_KEYS:
+            token = _IN_INDICATOR_DETAIL.set(True)
+            try:
+                return self._mask_entry_typed(key, value, mapping, keep)
+            finally:
+                _IN_INDICATOR_DETAIL.reset(token)
+        return self._mask_entry_typed(key, value, mapping, keep)
+
+    def _mask_entry_typed(
         self, key: str, value: Any, mapping: dict[str, str], keep: frozenset[str] = frozenset()
     ) -> Any:
         lowered = key.lower()
