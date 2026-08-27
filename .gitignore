@@ -148,6 +148,7 @@ tests/.env.test
 .claude/
 CLAUDE.md
 SKILL.md
+docs/agents/
 .cursor/
 .aider*
 
