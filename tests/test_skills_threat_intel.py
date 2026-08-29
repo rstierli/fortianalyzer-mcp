@@ -271,6 +271,86 @@ class TestThreatIntel:
         assert result.indicators[0].record is None
         assert any("no stored enrichment" in w for w in result.warnings)
 
+    async def test_unmatched_row_of_unrecognised_type_is_not_attached(self):
+        """A row the reader returned for a different subject buys nothing.
+
+        The value never matched, so its enrichment fields describe some
+        other indicator, and an unrecognised ``type`` means the ``value``
+        inside the attached record is not maskable by context either.
+        """
+        stray = {
+            "value": "srv-fileshare-01",
+            "type": "Host",
+            "enrichment-reputation": "Malicious",
+            "enrichment-status": "Completed",
+        }
+        with (
+            t(GET_ENRICH, return_value=ok(data=[stray])),
+            t(GET_FORTIVIEW_DATA, return_value=ok(data=THREATS)),
+        ):
+            result = await handlers.run_threat_intel(
+                ThreatIntelParams(indicators=[{"value": "203.0.113.9", "type": "IP"}])
+            )
+        assert result.indicators[0].record is None
+        assert result.indicators[0].reputation is None
+        assert any("no stored enrichment" in w for w in result.warnings)
+        assert "srv-fileshare-01" not in result.model_dump_json()
+
+    async def test_unmatched_row_of_recognised_type_is_still_attached(self):
+        """The fallback keeps working where the value only differs by form.
+
+        The reader is queried per indicator, so a single row that does not
+        string-match is usually the same subject normalised. Keep it when
+        its ``type`` is a class the masker can type the ``value`` from.
+        """
+        normalised = dict(ENRICHED_DOMAIN, value="GOOD.example.com.")
+        with (
+            t(GET_ENRICH, return_value=ok(data=[normalised])),
+            t(GET_FORTIVIEW_DATA, return_value=ok(data=THREATS)),
+        ):
+            result = await handlers.run_threat_intel(
+                ThreatIntelParams(indicators=[{"value": "good.example.com", "type": "Domain"}])
+            )
+        assert result.indicators[0].record == normalised
+        assert result.indicators[0].reputation == "Good"
+
+    async def test_skip_warning_names_the_type_not_the_value(self):
+        """A skipped row has no recognised type, so its value has no shape.
+
+        The free-text scan covers IPv4, MAC and email, and the row is
+        skipped precisely because it is none of those, so a hostname-class
+        value would ride through the warning verbatim. The type is the
+        diagnostic content; the value is not.
+        """
+        linked = [{"value": "srv-fileshare-01", "type": "Host"}]
+        with (
+            t(GET_LINKED, return_value=ok(data=linked)),
+            t(GET_ENRICH, side_effect=enrich_map({})),
+            t(GET_FORTIVIEW_DATA, return_value=ok(data=THREATS)),
+        ):
+            result = await handlers.run_threat_intel(
+                ThreatIntelParams(alert_id="AL0001", indicators=EXPLICIT_TWO)
+            )
+        skip = [w for w in result.warnings if "skipped" in w]
+        assert len(skip) == 1
+        assert "'Host'" in skip[0]
+        assert "srv-fileshare-01" not in result.model_dump_json()
+
+    async def test_skip_warning_still_names_the_uuid_when_present(self):
+        linked = [{"value": "srv-fileshare-01", "type": "Host", "indicator-uuid": "iu-0009"}]
+        with (
+            t(GET_LINKED, return_value=ok(data=linked)),
+            t(GET_ENRICH, side_effect=enrich_map({})),
+            t(GET_FORTIVIEW_DATA, return_value=ok(data=THREATS)),
+        ):
+            result = await handlers.run_threat_intel(
+                ThreatIntelParams(alert_id="AL0001", indicators=EXPLICIT_TWO)
+            )
+        skip = [w for w in result.warnings if "skipped" in w]
+        assert len(skip) == 1
+        assert "iu-0009" in skip[0]
+        assert "srv-fileshare-01" not in result.model_dump_json()
+
     async def test_threat_landscape_failure_degrades_to_gap(self):
         with (
             t(GET_ENRICH, return_value=ok(data=[ENRICHED_IP])),
