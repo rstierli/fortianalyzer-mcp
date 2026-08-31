@@ -1236,6 +1236,52 @@ class TestSoarIndicatorPair:
         assert PEER_IP not in str(out)
         assert "00:00:5e:00:53:11" not in str(out)
 
+    def test_an_indicator_echoed_under_a_nested_detail_key_is_burned(
+        self, masker: OutputMasker
+    ) -> None:
+        # #137. The domain masks correctly under its own value/type pair,
+        # and the same string used to ride out raw under data.id and
+        # links.self: two ordinary VT-shaped nested keys the allowlist has
+        # never heard of, sitting in the same subtree as the token.
+        indicator = "bad.example.com"
+        payload = {
+            "value": indicator,
+            "type": "Domain",
+            "indicator-uuid": "i-1",
+            "enrichment-detail": [
+                {
+                    "source": "vt",
+                    "data": {"id": indicator, "type": "domain"},
+                    "links": {"self": f"https://vt.example/gui/domain/{indicator}/detection"},
+                    "reference_url": f"https://vt.example/gui/domain/{indicator}",
+                }
+            ],
+        }
+
+        out = masker.mask_result(payload)
+
+        assert indicator not in str(out)
+        # The row's own diagnostic context is untouched: this is not a
+        # burn-everything fix, only the nested containers the allowlist
+        # cannot type.
+        assert out["enrichment-detail"][0]["source"] == "vt"
+
+    def test_a_detail_key_with_no_indicator_inside_is_left_alone(
+        self, masker: OutputMasker
+    ) -> None:
+        """Guards the boundary: a nested container with nothing identifying
+        in it must not be mangled into placeholders it doesn't need."""
+        out = masker.mask_result(
+            {
+                "value": "203.0.113.9",
+                "type": "IP",
+                "indicator-uuid": "i-2",
+                "enrichment-detail": [{"source": "vt", "data": {"malicious": 3, "harmless": 60}}],
+            }
+        )
+
+        assert out["enrichment-detail"][0]["data"] == {"malicious": 3, "harmless": 60}
+
     def test_documented_residual_an_unproven_row_still_rides_clear(self, masker: OutputMasker):
         # Accepted fail-open (#130). A live row with neither a recognised
         # type nor any proving sibling still passes through, because closing

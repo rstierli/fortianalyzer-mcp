@@ -917,6 +917,34 @@ class OutputMasker:
             }
         return value
 
+    def _burn_values_and_record(
+        self, value: Any, mapping: dict[str, str], keep: frozenset[str]
+    ) -> Any:
+        """Like ``_burn_and_record``, but dict KEYS are never burned.
+
+        ``_burn_and_record`` burns keys too, which is right for
+        ``_mask_target``'s shape, where the identifier itself is a dict key
+        (``{"<ip>": {...}}``). An arbitrary nested object under an unknown
+        key (#137's ``data``, ``links``) has no such convention: its keys
+        are ordinary field names (``id``, ``self``, ``malicious``), never
+        identifiers, and burning them would turn a VT scan-count field into
+        an unreadable placeholder for no safety gain. Only leaf string
+        values are candidates here.
+        """
+        if isinstance(value, str):
+            burned = self._burn_strings(value, keep)
+            if isinstance(burned, str) and burned != value:
+                mapping.setdefault(value, burned)
+            return burned
+        if isinstance(value, list | tuple):
+            return [self._burn_values_and_record(item, mapping, keep) for item in value]
+        if isinstance(value, dict):
+            return {
+                key: self._burn_values_and_record(item, mapping, keep)
+                for key, item in value.items()
+            }
+        return value
+
     def _mask_composite_container(
         self, key: str, value: Any, mapping: dict[str, str], keep: frozenset[str]
     ) -> Any:
@@ -1863,6 +1891,43 @@ class OutputMasker:
                     else self._mask_structured(item, mapping, keep)
                     for item in value
                 ]
+        if (
+            vtype is None
+            and _IN_INDICATOR_DETAIL.get()
+            and lowered not in _INDICATOR_DETAIL_KEYS
+            and isinstance(value, dict | list)
+        ):
+            # An unknown CONTAINER key inside an indicator-detail subtree
+            # (#137): the allowlist has no entry for a detail provider's own
+            # nested vocabulary (VT's ``data.id``, ``links.self``), and the
+            # allowlist recursion below knows none of their inner names
+            # either, so the indicator rode out raw there even on a row
+            # whose ``value`` masks correctly. Burn rather than walk -- the
+            # same refusal ``_mask_indicator_pair`` already makes for a
+            # container under ``value`` itself.
+            #
+            # Two things this must NOT catch, both excluded above:
+            #
+            # - An unknown SCALAR sibling (``source: "vt"``) is the row's own
+            #   deliberately readable diagnostic context, pinned by
+            #   ``test_a_detail_row_under_enrichment_detail_fails_closed``.
+            #   Burning it would be new collateral damage, not a leak fix.
+            # - The enclosing key itself (``enrichment-detail``). The flag
+            #   is set for THIS call, on THIS key's value -- the list of
+            #   rows -- and that list must still reach ``_mask_structured``
+            #   so each row's own ``value``/``type`` pair is typed by
+            #   ``_mask_indicator_pair`` first. Burning it here instead
+            #   would burn the row's keys along with its values, destroying
+            #   the ``value``/``type`` pair before it is ever read.
+            #
+            # ``_burn_values_and_record``, not ``_burn_and_record``: this
+            # container's keys are ordinary field names (VT's ``id``,
+            # ``self``), never identifiers, so only leaf string VALUES are
+            # candidates -- see that method's docstring. Recording into
+            # ``mapping`` (not ``_burn_strings``) so the same identifier
+            # still resolves if it also appears in a TEXT field elsewhere
+            # in the response (#73 item 4).
+            return self._burn_values_and_record(value, mapping, keep)
         if isinstance(value, dict | list):
             return self._mask_structured(value, mapping, keep)
         return value  # TEXT values are deliberately left for pass 2
