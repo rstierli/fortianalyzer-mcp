@@ -1421,3 +1421,38 @@ class TestSubstitutionPlanIsBuiltOncePerResponse:
         assert "fw-branch-02" not in second, (
             "a value added to mapping after the plan was built was not picked up"
         )
+
+
+class TestSubstitutionBoundaryExcludesTheFF3PadChar:
+    """#73 item 7b, pinned rather than fixed.
+
+    ``_PAD_CHAR`` (``~``, ``fpe_engine.py``) pads a short string up to the
+    cipher's minimum length before encryption, and FF3 is a permutation over
+    the WHOLE alphabet including that padding position, so the ciphertext a
+    short HOSTNAME/USERNAME value produces can legitimately contain a
+    literal ``~``. ``@`` is excluded from the same class for the parallel
+    reason on the email side. The substitution boundary class
+    (``[A-Za-z0-9._-]`` in ``_build_substitution_plan``) does not include
+    either, so a token containing one is not "one word" to anything that
+    walks text by that boundary.
+
+    Harmless today: pass 2 runs once over the response's ORIGINAL text and
+    never re-scans its own substitutions, so nothing ever asks the boundary
+    class "is this token one word?" This test does not close the gap --
+    closing it needs the #40-class format decision the item itself defers
+    -- it only pins today's boundary class so that changing it (narrowing,
+    widening, or a future re-scan that would finally make the gap live) is
+    a conscious diff here rather than a silent one.
+    """
+
+    def test_the_pad_and_at_characters_are_excluded_from_the_boundary_class(self) -> None:
+        masker = OutputMasker(FPEEngine(KEY))
+        plan = masker._build_substitution_plan_uncached({"fw-hq-01": "host-tok-1"}, frozenset())
+        assert plan is not None
+        source = plan.pattern.pattern
+
+        assert "~" not in source, (
+            "the FF3 pad character has entered the boundary class -- update "
+            "this pin deliberately, and re-check whether #73 item 7b still applies"
+        )
+        assert "@" not in source
