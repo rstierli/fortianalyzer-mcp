@@ -15,7 +15,7 @@ change when the flag flips, or the comparison is measuring nothing.
 
 import pytest
 
-from fortianalyzer_mcp.masking.fields import DEVICE_IDENTITY_TYPES, SERIAL
+from fortianalyzer_mcp.masking.fields import DEVICE_IDENTITY_TYPES, FIELD_TYPES, SERIAL
 from fortianalyzer_mcp.masking.fpe_engine import FPEEngine
 from fortianalyzer_mcp.masking.wrapper import _TOKEN_PREFIX_SHAPE_RE, OutputMasker
 
@@ -102,7 +102,9 @@ class TestTheFlagStillGatesIt:
 class TestTheTypeTable:
     def test_every_serial_carrying_key_takes_the_serial_type(self):
         # csf is deliberately excluded: the Security Fabric name is an
-        # operator label, not a serial.
+        # operator label, not a serial. It moved to FIELD_TYPES on #80
+        # (promoted to mask unconditionally rather than only with
+        # FAZ_MASK_DEVICE_IDENTITY on), so it is checked there now.
         #
         # detectkey is here because the first pass missed it. It was typed
         # HOSTNAME while this very table's comment on it read "serial of the
@@ -110,7 +112,7 @@ class TestTheTypeTable:
         # added to fix. Matching on the sn- spelling was not enough.
         for key in ("sn", "serialno", "sndetected", "snclosest", "detectkey"):
             assert DEVICE_IDENTITY_TYPES[key] == SERIAL, key
-        assert DEVICE_IDENTITY_TYPES["csf"] != SERIAL
+        assert FIELD_TYPES["csf"] != SERIAL
 
     # There is deliberately NO automated check that a key whose comment says
     # "serial" is typed SERIAL, though detectkey is exactly the miss such a

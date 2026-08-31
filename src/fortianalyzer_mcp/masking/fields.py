@@ -373,6 +373,22 @@ FIELD_TYPES: dict[str, str] = {
     "pivot_filter": TEXT,  # hunt sweep: same clause shape
     "entity_ref": TEXT,  # investigate_deep: caller's entity, may be a bare IP
     "headline": TEXT,  # skill summaries; first interpolated an identifier in #89
+    # #80: the Security Fabric group name, promoted OUT of
+    # DEVICE_IDENTITY_TYPES rather than left there. It is the org/customer
+    # name (arguably more sensitive than the device serials it used to sit
+    # beside), so it masks unconditionally rather than only with
+    # FAZ_MASK_DEVICE_IDENTITY on. NOT a one-line dict move on its own: csf
+    # frequently equals a device's own devname (the fabric root's own
+    # hostname), and _device_identity_values's keep-set walk keys off
+    # DEVICE_IDENTITY_TYPES membership, so removing csf from that dict
+    # without also updating the walk would have unmasked it flag-off while
+    # devname masked flag-on -- and with the flag OFF (no correlation
+    # concern), the two staying different would have handed over the
+    # token-to-name pairing the keep set exists to withhold. The walk keys
+    # csf explicitly now (see _device_identity_values), so it still resolves
+    # into the keep set with the flag off, unconditional typing here
+    # notwithstanding.
+    "csf": HOSTNAME,
 }
 
 #: Tool-argument keys whose value names *fields*, not values, and which the
@@ -598,7 +614,6 @@ DEVICE_IDENTITY_TYPES: dict[str, str] = {
     # alternately-spelled key, and typing the alias differently from the
     # key it aliases would reopen the exact round-trip bug that move fixed.
     "serial number": SERIAL,
-    "csf": HOSTNAME,  # Security Fabric name, a label rather than a serial
     "sndetected": SERIAL,
     "snclosest": SERIAL,
     "fortigate": HOSTNAME,  # fortiview: reporting device, comma-joined when aggregated

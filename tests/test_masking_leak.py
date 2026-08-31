@@ -323,6 +323,50 @@ class TestNoIdentifierSurvives:
         assert leaked == {}, f"masking leaked: {leaked}"
 
 
+class TestCsfPromotedButKeepSetPreserved:
+    """#80: csf moved from DEVICE_IDENTITY_TYPES to FIELD_TYPES (masks
+    unconditionally now, org/customer name rather than a device serial),
+    but the Security Fabric group name is conventionally the fabric root's
+    own hostname, so csf frequently equals a sibling devname.
+
+    sthayduk's finding: a naive promotion (just moving the dict entry)
+    drops csf from ``_device_identity_values``'s keep-set walk as a side
+    effect, since that walk keys off ``DEVICE_IDENTITY_TYPES`` membership.
+    With the flag off, devname stays clear (correct) while csf -- now
+    typed unconditionally and no longer walked -- masks to a token, and
+    that token is IDENTICAL to what devname would get with the flag ON
+    (same value, same type, same deterministic cipher). That hands over
+    the exact token-to-name pairing the keep set exists to prevent.
+    """
+
+    def test_csf_equal_to_devname_stays_clear_with_the_flag_off(self, masker: OutputMasker) -> None:
+        payload = {"devname": DEV_NAME, "csf": DEV_NAME}
+        out = masker.mask_result(payload)
+
+        assert out == {"devname": DEV_NAME, "csf": DEV_NAME}
+
+    def test_csf_equal_to_devname_masks_to_the_same_token_with_the_flag_on(
+        self, full_masker: OutputMasker
+    ) -> None:
+        payload = {"devname": DEV_NAME, "csf": DEV_NAME}
+        out = full_masker.mask_result(payload)
+
+        assert DEV_NAME not in str(out)
+        assert out["csf"] == out["devname"]
+
+    def test_csf_alone_still_stays_clear_with_the_flag_off(self, masker: OutputMasker) -> None:
+        """The regression a naive promotion introduces: with no matching
+        devname anywhere in the response, csf's own value must still
+        follow the flag rather than masking unconditionally now that it
+        types via FIELD_TYPES."""
+        out = masker.mask_result({"csf": FABRIC})
+        assert out == {"csf": FABRIC}
+
+    def test_csf_alone_masks_with_the_flag_on(self, full_masker: OutputMasker) -> None:
+        out = full_masker.mask_result({"csf": FABRIC})
+        assert FABRIC not in str(out)
+
+
 class TestCompositeKeys:
     def test_prefixed_groupby_masks_only_the_value_half(self, masker: OutputMasker):
         masked = masker.mask_result({"groupby1": f"qname:{BAD_DOMAIN}"})

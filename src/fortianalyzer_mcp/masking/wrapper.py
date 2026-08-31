@@ -351,6 +351,17 @@ _IN_INDICATOR_DETAIL: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "_faz_in_indicator_detail", default=False
 )
 
+#: Keys that must feed ``_device_identity_values``'s keep-set walk even
+#: though they are not in ``DEVICE_IDENTITY_TYPES`` (#80). ``csf`` types
+#: unconditionally via ``FIELD_TYPES`` now, so unlike a ``DEVICE_IDENTITY_TYPES``
+#: key -- which is simply absent from ``self._field_types`` flag-off and
+#: never reaches ``_mask_scalar`` -- it would mask on its own with the flag
+#: off if this walk forgot it. csf frequently equals a device's own
+#: ``devname`` (the fabric root's own hostname); dropping it from the walk
+#: would have masked csf's value while ``devname`` stayed clear two keys
+#: away, the exact token-to-name pairing this keep set exists to prevent.
+_KEEP_SET_KEYS_OUTSIDE_DEVICE_IDENTITY: frozenset[str] = frozenset({"csf"})
+
 #: Dimension names whose flat key is served by a composite handler rather
 #: than by a ``FIELD_TYPES`` entry. ``_mask_breakdowns`` has to consult this
 #: as well as the type table: a bucket under ``url`` carries exactly what a
@@ -1417,6 +1428,17 @@ class OutputMasker:
         one hazard this set has: whatever lands in it is exempted from
         masking inside ``target``, so a value carrying a comma exempts each
         part independently of whether that part names a device.
+
+        ``csf`` is walked by name (``_KEEP_SET_KEYS_OUTSIDE_DEVICE_IDENTITY``)
+        rather than by ``DEVICE_IDENTITY_TYPES`` membership (#80). It types
+        unconditionally now, via ``FIELD_TYPES``, so with the flag off it
+        would otherwise mask on its own -- unlike every other key here,
+        which is simply absent from ``self._field_types`` flag-off and
+        never reaches ``_mask_scalar`` at all. Keeping it in this walk is
+        what makes ``_mask_scalar``'s keep-set check (#73 item 5) exempt
+        it too, so a masked key can still land in the keep set: the
+        exemption follows the VALUE's estate-identity status, not whether
+        the key that carries it happens to mask unconditionally.
         """
         out: set[str] = set()
 
@@ -1426,7 +1448,11 @@ class OutputMasker:
                 if shaped is not None:
                     out.add(node[shaped].strip())
                 for key, value in node.items():
-                    if key.lower() in DEVICE_IDENTITY_TYPES:
+                    if key.lower() in _KEEP_SET_KEYS_OUTSIDE_DEVICE_IDENTITY and isinstance(
+                        value, str
+                    ):
+                        out.update(part.strip() for part in value.split(","))
+                    elif key.lower() in DEVICE_IDENTITY_TYPES:
                         if isinstance(value, str):
                             out.update(part.strip() for part in value.split(","))
                         elif isinstance(value, list | tuple):
