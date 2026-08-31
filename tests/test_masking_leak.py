@@ -3236,6 +3236,75 @@ class TestGroupbyDimensionNamesCarryTheirType:
         assert value in out
 
 
+class TestGroupbyTextDimensionsAreScanned:
+    """#125: ``_mask_prefixed`` returned a TEXT dimension's bucket untouched.
+
+    A flat ``msg`` key gets the free-text scan because the KEY is typed
+    TEXT. The ``"field:value"`` composite spelling (``groupby1``/``groupby2``)
+    has the same key typed TEXT and used to return early instead, so an
+    embedded IOC rode out in clear under one spelling and masked under the
+    other. ``TestBreakdownsTextDimensions`` already pins the dict-shaped
+    ``breakdowns`` bucket at parity with its flat twin; this is the same
+    invariant for the prefixed-string shape.
+    """
+
+    def test_an_embedded_ioc_is_masked_in_a_text_dimension_bucket(
+        self, masker: OutputMasker
+    ) -> None:
+        out = masker.mask_result({"groupby1": f"msg:Admin login from {ENDPOINT_IP} failed"})[
+            "groupby1"
+        ]
+        assert ENDPOINT_IP not in out
+        assert out.startswith("msg:")
+
+    def test_logdesc_is_covered_too(self, masker: OutputMasker) -> None:
+        out = masker.mask_result({"groupby1": f"logdesc:Traffic from {PEER_IP} denied"})["groupby1"]
+        assert PEER_IP not in out
+
+    def test_a_bucket_value_gets_what_the_flat_field_gets(self, masker: OutputMasker) -> None:
+        text = f"session from {SRC_NAME} blocked"
+        flat = masker.mask_result({"msg": text})["msg"]
+        bucket = masker.mask_result({"groupby1": f"msg:{text}"})["groupby1"]
+
+        assert bucket == f"msg:{flat}"
+
+    def test_a_value_masked_elsewhere_resolves_inside_the_bucket(
+        self, masker: OutputMasker
+    ) -> None:
+        """The sharp case pass 2 exists for: a hostname cannot be recognised
+        by pattern, so it only masks here because this response already
+        mapped it elsewhere."""
+        payload = {
+            "rows": [{"hostname": SRC_NAME}],
+            "groupby1": f"msg:session from {SRC_NAME} blocked",
+        }
+        masked = masker.mask_result(payload)
+
+        assert SRC_NAME not in str(masked)
+        assert masked["rows"][0]["hostname"] in masked["groupby1"]
+
+    def test_plain_text_with_no_ioc_is_left_alone(self, masker: OutputMasker) -> None:
+        """``mask_text`` only acts on recognised patterns; prose with nothing
+        to find must come back unchanged, same as the flat key does."""
+        out = masker.mask_result({"groupby1": "msg:Server certificate is re-signed as untrusted"})
+        assert out["groupby1"] == "msg:Server certificate is re-signed as untrusted"
+
+    def test_an_identifier_dimension_is_unaffected(self, masker: OutputMasker) -> None:
+        """Guards the boundary: only the TEXT arm changes. An identifier
+        dimension still goes through ``_mask_scalar``, not the free-text
+        scan, and still mints the same token as its flat twin."""
+        out = masker.mask_result({"groupby1": f"srcip:{ENDPOINT_IP}"})["groupby1"]
+        flat = masker.mask_result({"srcip": ENDPOINT_IP})["srcip"]
+
+        assert out == f"srcip:{flat}"
+
+    def test_an_untyped_dimension_still_passes_through(self, masker: OutputMasker) -> None:
+        """Guards the other boundary: ``vtype is None`` must still return
+        early, unaffected by the TEXT arm's new behaviour."""
+        out = masker.mask_result({"groupby1": "catdesc:Search Engines"})["groupby1"]
+        assert out == "catdesc:Search Engines"
+
+
 class TestTheNewNamesDoNotBurnRoutineShapes:
     """#124 types four names that were previously untyped, and typing a name
     changes what happens to values that do not fit the type.

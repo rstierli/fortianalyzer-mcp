@@ -676,8 +676,16 @@ class OutputMasker:
         if not sep or not raw:
             return value
         vtype = self._field_types.get(field.lower())
-        if vtype is None or vtype == TEXT:
+        if vtype is None:
             return value
+        if vtype == TEXT:
+            # A TEXT dimension's flat twin (a bare ``msg`` key) already gets
+            # the free-text scan; returning here instead left the composite
+            # spelling of the same value unscanned (#125). ``mask_text`` is
+            # the same call the ``breakdowns`` bucket shape already routes a
+            # TEXT dimension through (``TestBreakdownsTextDimensions``), so
+            # this brings ``field:value`` to parity with both.
+            return f"{field}{sep}{self.mask_text(raw, mapping, keep)}"
         return f"{field}{sep}{self._mask_scalar(vtype, raw, mapping, keep=keep)}"
 
     def _mask_json_blob(self, value: str, mapping: dict[str, str], keep: frozenset[str]) -> str:
