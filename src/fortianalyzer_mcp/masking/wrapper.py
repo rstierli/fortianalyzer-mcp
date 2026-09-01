@@ -351,6 +351,32 @@ _IN_INDICATOR_DETAIL: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "_faz_in_indicator_detail", default=False
 )
 
+#: Descriptive threat-intel classification fields that carry no identifying
+#: risk, observed live inside FortiGuard-CTS's ``enrichment-detail`` shape
+#: (#144): the same global classification of an indicator for every caller
+#: who looks it up, not anything specific to who queried it. Without this,
+#: ``_burn_values_and_record``'s enclosing-key fallback (added for #133/#137
+#: to fail closed on a detail provider's own unrecognised nested vocabulary)
+#: burned these alongside the actual identifying value and its embedding
+#: URL, destroying exactly what a SOC analyst needs to triage a hit ("why is
+#: this malicious, how confident, what kill-chain phase") for no safety
+#: gain. Scoped to keys, not a blanket exemption: an unrecognised key still
+#: burns, so a provider field this list has not seen still fails closed.
+_INDICATOR_DETAIL_SAFE_KEYS: frozenset[str] = frozenset(
+    {
+        "wf_cate",
+        "ioc_cate",
+        "ioc_tags",
+        "confidence",
+        "kill_chain_phases",
+        "created",
+        "modified",
+        "malware_name",
+        "av_cate",
+        "spam_cates",
+    }
+)
+
 #: Keys that must feed ``_device_identity_values``'s keep-set walk even
 #: though they are not in ``DEVICE_IDENTITY_TYPES`` (#80). ``csf`` types
 #: unconditionally via ``FIELD_TYPES`` now, so unlike a ``DEVICE_IDENTITY_TYPES``
@@ -941,6 +967,11 @@ class OutputMasker:
         identifiers, and burning them would turn a VT scan-count field into
         an unreadable placeholder for no safety gain. Only leaf string
         values are candidates here.
+
+        A dict key in ``_INDICATOR_DETAIL_SAFE_KEYS`` is the one exception:
+        its value is left exactly as received, not recursed into, because
+        that value is a known-safe descriptive classification field, not an
+        identifier (#144). Everything else still burns.
         """
         if isinstance(value, str):
             burned = self._burn_strings(value, keep)
@@ -951,7 +982,11 @@ class OutputMasker:
             return [self._burn_values_and_record(item, mapping, keep) for item in value]
         if isinstance(value, dict):
             return {
-                key: self._burn_values_and_record(item, mapping, keep)
+                key: (
+                    item
+                    if isinstance(key, str) and key.lower() in _INDICATOR_DETAIL_SAFE_KEYS
+                    else self._burn_values_and_record(item, mapping, keep)
+                )
                 for key, item in value.items()
             }
         return value

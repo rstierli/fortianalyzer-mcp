@@ -1326,6 +1326,63 @@ class TestSoarIndicatorPair:
 
         assert out["enrichment-detail"][0]["data"] == {"malicious": 3, "harmless": 60}
 
+    def test_fortiguard_cts_descriptive_fields_survive_while_the_indicator_burns(
+        self, masker: OutputMasker
+    ) -> None:
+        # #144. Live-captured shape (values replaced with RFC 5737/2606
+        # documentation forms): the enclosing-key fallback that closes #133
+        # used to burn every unrecognised string under `data`, including
+        # FortiGuard's own descriptive classification of the indicator --
+        # identical for every caller who looks it up, not anything that
+        # identifies who queried it. The identifying value and the URL that
+        # embeds it must still burn; the classification fields must not.
+        domain = "bad.example.com"
+        out = masker.mask_result(
+            {
+                "enrichment-detail": [
+                    {
+                        "source": "FortiGuard-CTS",
+                        "data": {
+                            "request": {"value": domain},
+                            "response": [
+                                {
+                                    "av_cate": "",
+                                    "created": "2019-01-04T08:06:29Z",
+                                    "wf_cate": "Malicious Websites",
+                                    "ioc_cate": "Malware CnC",
+                                    "ioc_tags": ["Malware CnC", "ELF Malware"],
+                                    "modified": "2019-01-04T08:06:34Z",
+                                    "confidence": "High",
+                                    "spam_cates": [],
+                                    "malware_name": "",
+                                    "reference_url": (
+                                        f"https://ioc.fortiguard.com/search?query={domain}"
+                                        "&filter=indicator"
+                                    ),
+                                    "kill_chain_phases": ["command-and-control"],
+                                }
+                            ],
+                        },
+                    }
+                ]
+            }
+        )
+
+        assert domain not in str(out)
+        row = out["enrichment-detail"][0]["data"]["response"][0]
+        assert row["created"] == "2019-01-04T08:06:29Z"
+        assert row["wf_cate"] == "Malicious Websites"
+        assert row["ioc_cate"] == "Malware CnC"
+        assert row["ioc_tags"] == ["Malware CnC", "ELF Malware"]
+        assert row["modified"] == "2019-01-04T08:06:34Z"
+        assert row["confidence"] == "High"
+        assert row["kill_chain_phases"] == ["command-and-control"]
+        # The identifying value and its embedding URL still burn.
+        assert out["enrichment-detail"][0]["data"]["request"]["value"].startswith(
+            "masked-unrepresentable-"
+        )
+        assert row["reference_url"].startswith("masked-unrepresentable-")
+
     def test_documented_residual_an_unproven_row_still_rides_clear(self, masker: OutputMasker):
         # Accepted fail-open (#130). A live row with neither a recognised
         # type nor any proving sibling still passes through, because closing
