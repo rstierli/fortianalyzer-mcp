@@ -47,10 +47,16 @@ still passes through in clear on the list path (e.g. the issue's own bare `{"rec
 Closing it would mean reinstating the bucket-surface collateral damage above, to cover a shape with no
 live capture. Pinned by a dedicated test so it reads as a decision rather than an oversight.
 
-**Not live-verified:** the `enrichment-detail` enclosing-key arm that closes #133 is inferred from this
-repo's fixtures, not measured against a live `enrichment_uuid` response — SOAR detail-endpoint access
-wasn't available to confirm it. Accepted without further live verification; revisit if a live capture
-ever contradicts the fixture shape.
+**Live-verified (2026-09-01):** the `enrichment-detail` enclosing-key arm that closes #133 was measured
+against a real `enrichment_uuid` response from a licensed SOAR estate (`detail_level="extended"`, a
+`Malicious`-reputation Domain indicator). The identifying value and the URL that embeds it both came back
+as `masked-unrepresentable-...` — the fix holds on the live shape, not only the fixture. The live shape is
+considerably richer than the fixture (`tests/test_soar_tools.py`'s `{"source": "vt", "value": "..."}`
+undersells it — see #144), which surfaced a related-but-distinct gap: the same enclosing-key mechanism
+also burns descriptive threat-intel classification fields (category, confidence, kill-chain phase,
+timestamps) that carry no identifying risk. That over-masking question is tracked separately in #144
+rather than folded into this ADR, since it's a scoping call on a live-estate-of-one sample, not a
+reopening of the fail-closed decision itself.
 
 Implemented in `masking/wrapper.py` (`_mask_indicator_pair`, `_indicator_row_is_proven`), landed via #136
 on top of #131's handler-side gating (`matched = rows[0]` only attaches a recognised-type row; the skip
