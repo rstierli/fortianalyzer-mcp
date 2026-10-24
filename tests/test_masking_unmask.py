@@ -59,6 +59,58 @@ class TestScalarResolution:
         # validator rejects it loudly instead of us guessing a real value.
         assert unmasker.resolve_scalar("host-###") == "host-###"
 
+    def test_embedded_token_resolves_mid_string(self, unmasker: ArgUnmasker, engine: FPEEngine):
+        # #73 item 8: a TEXT-typed value (e.g. `srcuuid_name`) masks an
+        # embedded IOC in place outbound (`OutputMasker.mask_text`), so the
+        # inbound side must find it the same way -- not only check whether
+        # the WHOLE value is a token, which it never is for a label.
+        token = engine.mint("hostname", "edge-fw-01")
+        assert unmasker.resolve_scalar(f"host {token}") == "host edge-fw-01"
+        assert unmasker.resolve_scalar(f"unreachable: {token}") == "unreachable: edge-fw-01"
+        # A label with no token at all is untouched, same as always.
+        assert unmasker.resolve_scalar("Printer Floor 3") == "Printer Floor 3"
+
+    def test_embedded_token_at_the_very_start_of_a_bare_scalar_is_a_documented_residual(
+        self, unmasker: ArgUnmasker, engine: FPEEngine
+    ):
+        # Same shape ambiguity as ``TestRoundTripDocumentedLimits``'s devvds
+        # residual, one step upstream of it: a candidate that STARTS WITH a
+        # recognised marker prefix is dispatched by ``unmask_token`` to the
+        # legacy v1 decoder for the WHOLE remaining string before this fix's
+        # embedded scan ever runs, and that decode fails closed -- by design,
+        # the same guard that keeps a devvds ``"<token>[<vdom>]"`` from being
+        # half-resolved into "the caller probably meant the device half".
+        #
+        # That guard has to stay for a BARE scalar (no ``vtype``, as here):
+        # nothing distinguishes this call from one resolving a devvds/HOSTNAME
+        # value on this string alone. See the next test for the TEXT-typed
+        # field case, where the field name supplies exactly that context and
+        # the fix does apply.
+        token = engine.mint("hostname", "edge-fw-01")
+        text = f"{token} is unreachable"
+        assert unmasker.resolve_scalar(text) == text
+
+    def test_embedded_token_at_the_very_start_resolves_for_a_text_typed_field(
+        self, unmasker: ArgUnmasker, engine: FPEEngine
+    ):
+        # #73 item 8 follow-up: a TEXT field (`srcuuid_name` and friends)
+        # carries the context a bare scalar lacks, so ``resolve_scalar`` can
+        # tell this apart from a devvds/HOSTNAME value and run the embedded
+        # scan even when the token opens the string -- without loosening
+        # ``unmask_token``'s legacy-prefix guard itself, which stays exactly
+        # as strict as it was for every other caller.
+        token = engine.mint("hostname", "edge-fw-01")
+        text = f"{token} is unreachable"
+        assert unmasker.resolve_scalar(text, "text") == "edge-fw-01 is unreachable"
+
+    def test_embedded_shape_that_is_not_really_a_token_is_left_alone(self, unmasker: ArgUnmasker):
+        # Looks v2-shaped (marker, 4-hex kid, 8-hex tag) but was never
+        # minted by this engine: the tag will not verify, and a shape match
+        # over free text is far more likely to be coincidental than a real
+        # token, so it must not raise or corrupt the surrounding text.
+        text = "host host-dead-notreallyatoken-deadbeef needs review"
+        assert unmasker.resolve_scalar(text) == text
+
 
 class TestPrefixedGroupBy:
     """``groupby1``/``groupby2`` are ``"<field>:<value>"``; the output side
@@ -257,6 +309,26 @@ class TestFilterExpressions:
         user = engine.mask_username("jdoe")
         out = unmasker.unmask_filter(f'srcip=="{ip}" and user=="{user}" and action=="deny"')
         assert out == 'srcip=="192.0.2.102" and user=="jdoe" and action=="deny"'
+
+    @pytest.mark.parametrize(
+        "template",
+        [
+            "srcip=={a} and dstip=={b}",
+            "(srcip=={a}) or (dstip=={b})",
+        ],
+    )
+    def test_unquoted_multi_clause_resolves_every_clause(
+        self, unmasker: ArgUnmasker, engine: FPEEngine, template: str
+    ):
+        # An unquoted value ends at whitespace or a paren. If it ran on, the
+        # first clause would swallow the rest of the expression and no later
+        # clause would resolve: the appliance would get tokens, silently.
+        a = engine.mask_ip("192.0.2.102")
+        b = engine.mask_ip("198.51.100.7")
+
+        out = unmasker.unmask_filter(template.format(a=a, b=b))
+
+        assert out == template.format(a="192.0.2.102", b="198.51.100.7")
 
     def test_unquoted_and_operators_preserved(self, unmasker: ArgUnmasker, engine: FPEEngine):
         ip = engine.mask_ip("192.0.2.102")

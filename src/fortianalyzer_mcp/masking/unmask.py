@@ -61,6 +61,7 @@ from fortianalyzer_mcp.masking.fields import (
     IP_OR_HOST,
     MAC,
     SKIP_VALUES,
+    TEXT,
 )
 from fortianalyzer_mcp.masking.fpe_engine import (
     FPEEngine,
@@ -85,11 +86,26 @@ logger = logging.getLogger(__name__)
 # after "!" (bare "!f==v" negation is served). The cost is that a dotted spelling ("foo.srcip") no
 # longer resolves as srcip, which prices at zero: a dotted field matches
 # nothing at the appliance, so such a clause only ever produced zero rows.
+#
+# The value group is conditional on whether the clause is quoted (#73 item 8):
+# unquoted stays exactly as strict as before -- no space, quote or paren can
+# be part of it, since those are what an unquoted clause's own boundary is
+# built from. A QUOTED value only needs to stop at its own closing quote, so
+# it may contain anything but a quote character, including whitespace and
+# parens -- excluding both quote characters rather than just the matching one
+# is pre-existing (the unquoted branch already excluded both), so a quoted
+# value still cannot itself carry a literal quote of either kind.
+#
+# The conditional tests the inner ``q`` group, not ``quote``: ``quote`` always
+# participates (empty when unquoted, so ``(?P=quote)`` and the caller's
+# ``match.start("quote")`` keep working), and ``re`` counts an empty match as
+# matched. Keyed on ``quote``, an unquoted value would take the quoted branch
+# and run on through every later clause.
 _FILTER_CLAUSE_RE = re.compile(
     r"(?<![^\s()!&])"
     r"(?P<field>[A-Za-z_][A-Za-z0-9_]*)"
     r"\s*(?P<op>==|!=|<=|>=|=~|!~|<|>|=(?![=~])|~|!contain\b|\bcontain\b|\b(?ai:like)\b)\s*"
-    r"(?P<quote>[\"']?)(?P<value>[^\"'\s()]+)(?P=quote)"
+    r"(?P<quote>(?P<q>[\"'])?)(?P<value>(?(q)[^\"']+|[^\"'\s()]+))(?P=quote)"
 )
 _FILTER_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -138,6 +154,17 @@ class ArgUnmasker:
         except VerificationBudgetExhausted:
             raise
         except MaskingError:
+            if vtype == TEXT:
+                # A TEXT value's token can open the string (#73 item 8
+                # follow-up): unmask_token's legacy v1 prefix dispatch just
+                # tried to decrypt the WHOLE candidate as one token and
+                # failed, because the token is actually only the first part
+                # of a label. The embedded scan finds just the token and
+                # leaves the rest of the label as written. Scoped to TEXT
+                # specifically -- a bare scalar or a HOSTNAME-typed field
+                # (devvds) gets none of this and keeps failing closed below,
+                # since there the whole value is supposed to BE the token.
+                return self._engine.unmask_embedded(value)
             # Marker present but payload will not decrypt: leave it alone so
             # the downstream validator rejects it instead of us guessing.
             logger.warning("argument carries a masking marker but does not decrypt; passed through")
@@ -163,7 +190,13 @@ class ArgUnmasker:
             resolved = self.resolve_scalar(head, vtype)
             if resolved != head:
                 return f"{resolved}:{port}"
-        return value
+        # A free-text value may carry a token mid-string rather than being
+        # one (#73 item 8): a TEXT field masks an embedded IOC in place
+        # outbound, so the label handed back as a filter value needs the
+        # same in-place treatment inbound. Reuses the whole-string token's
+        # own shape/tag verification (``FPEEngine.unmask_embedded``); a
+        # value with nothing embedded comes back unchanged.
+        return self._engine.unmask_embedded(value)
 
     # -- masked URLs (#40 url/referralurl) ---------------------------------- #
 
@@ -394,6 +427,11 @@ class ArgUnmasker:
                 # comma-joined multi-values, same convention as the output side
                 if "," in value:
                     return ",".join(self.resolve_scalar(part, vtype) for part in value.split(","))
+                return self.resolve_scalar(value, vtype)
+            if vtype == TEXT:
+                # No comma-splitting here, unlike above: a TEXT label is a
+                # free-form string (an object name, a log message) and a
+                # literal comma is part of it, not a multi-value separator.
                 return self.resolve_scalar(value, vtype)
             return self.resolve_scalar(value)
         if isinstance(value, list):

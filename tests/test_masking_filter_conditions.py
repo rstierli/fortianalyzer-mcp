@@ -82,6 +82,37 @@ class TestFilterConditionDicts:
         result = unmasker.unmask_args({"filters": [{"field": "dstport", "op": "eq", "value": 443}]})
         assert result["filters"][0]["value"] == 443
 
+    def test_text_field_resolves_a_token_embedded_in_its_label(self) -> None:
+        # #73 item 8. `srcuuid_name` is TEXT (free-form label, not IP/MAC),
+        # so the sibling-field type lookup this class otherwise relies on
+        # does not apply here -- the fix has to find the token itself,
+        # mid-string, the same way ``mask_text`` placed it there outbound.
+        engine = _engine()
+        unmasker = ArgUnmasker(engine)
+        token = engine.mint("hostname", "edge-fw-01")
+        condition = {"field": "srcuuid_name", "op": "eq", "value": f"host {token}"}
+
+        result = unmasker.unmask_args({"filters": [condition]})
+
+        assert result["filters"][0]["value"] == "host edge-fw-01"
+
+    def test_text_field_resolves_a_token_that_opens_its_label(self) -> None:
+        # Follow-up to the test above: the token sits at the very START of
+        # the label this time (e.g. a device name with nothing before it in
+        # the free-text object name), which collides with unmask_token's
+        # legacy v1 prefix dispatch for a BARE scalar. Reaching this test
+        # through the real field-name dispatch (rather than calling
+        # resolve_scalar directly) proves the TEXT type actually flows
+        # through to it in production, not just when a test passes it by hand.
+        engine = _engine()
+        unmasker = ArgUnmasker(engine)
+        token = engine.mint("hostname", "edge-fw-01")
+        condition = {"field": "srcuuid_name", "op": "eq", "value": f"{token} (unreachable)"}
+
+        result = unmasker.unmask_args({"filters": [condition]})
+
+        assert result["filters"][0]["value"] == "edge-fw-01 (unreachable)"
+
 
 class TestAliasFieldNames:
     """The advertised English aliases must type a value like their canonical target.
@@ -140,12 +171,26 @@ class TestFilterConditionModels:
 
 
 class TestMeasuredStringFilterBehaviour:
-    """Freeze what unmask_filter does today, including what it cannot do.
+    """Freeze what unmask_filter does today, including what it still cannot do.
 
-    The embedded-token case is asserted as broken on purpose: it predates this
-    work, a compiler cannot turn a phrase into a token, and fixing it needs
-    substring resolution inside resolve_scalar. Asserting it keeps the
-    limitation visible and forces a future fix to update this test knowingly.
+    Originally the embedded-token case here was asserted as broken for TWO
+    stacked reasons: `_FILTER_CLAUSE_RE`'s ``value`` group,
+    ``[^"'\\s()]+``, excluded whitespace even inside quotes, so a multi-word
+    quoted phrase was never captured as a clause value at all -- nothing for
+    a substring scan to run on, even after #73 item 8 added one
+    (``FPEEngine.unmask_embedded``). That regex has since been loosened
+    (quoted values now stop at the closing quote, like any quoted string,
+    rather than at the first space) so the v2 case below resolves.
+
+    ``test_token_embedded_in_a_quoted_phrase_does_not_resolve`` stays broken
+    on purpose for a DIFFERENT, deeper reason: it uses ``mask_username``
+    directly, a v1 token with no trailing tag, so it has no self-terminating
+    boundary inside free text for ``unmask_embedded`` to find regardless of
+    what the surrounding regex captures. That is a real, permanent
+    architectural residual (documented in ``fpe_engine.py`` on
+    ``unmask_embedded``), not a regex gap -- fixing it would need every v1
+    form to grow the v2 envelope's tag, which is a format change far outside
+    this issue.
     """
 
     def test_quoted_token_resolves(self) -> None:
@@ -166,6 +211,16 @@ class TestMeasuredStringFilterBehaviour:
         token = engine.mask_username("jdoe")
         expression = f'msg contain "login failed for {token}"'
         assert unmasker.unmask_filter(expression) == expression
+
+    def test_v2_token_embedded_in_a_quoted_phrase_now_resolves(self) -> None:
+        # The v2/mint() case the docstring above describes: same shape as
+        # the test above, but a tag-terminated token, so unmask_embedded CAN
+        # find it once the regex actually hands it the quoted phrase.
+        engine = _engine()
+        unmasker = ArgUnmasker(engine)
+        token = engine.mint("hostname", "edge-fw-01")
+        expression = f'msg contain "login failed for {token}"'
+        assert unmasker.unmask_filter(expression) == 'msg contain "login failed for edge-fw-01"'
 
 
 class TestCompilerRequiresModelsNotDicts:

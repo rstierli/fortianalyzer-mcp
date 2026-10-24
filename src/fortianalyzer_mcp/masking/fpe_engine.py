@@ -261,6 +261,27 @@ _V2_SHAPE_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: Same envelope shape as ``_V2_SHAPE_RE``, for a token embedded inside a
+#: larger string rather than being the whole string (#73 item 8: a TEXT
+#: field masks an embedded IOC in place outbound, so a token can arrive
+#: back mid-sentence too, e.g. ``"host <token>"``).
+#:
+#: ``\b`` replaces ``^``/``$``. That is safe here in a way a naive reading
+#: of ``_V2_SHAPE_RE``'s own comment might suggest it isn't: the payload
+#: alphabet (``_STR_ALPHABET``) excludes whitespace and every ASCII
+#: punctuation character that is not itself ``-._~``, so ordinary
+#: surrounding prose already stops the greedy ``ct`` group before the
+#: fixed-width tag is reached, without needing the ``$`` anchor
+#: ``_V2_SHAPE_RE`` relies on. Two payload characters remain a residual
+#: ambiguity shared with the outbound scan's own env-detection helper
+#: (``_v2_envelope_around`` in ``wrapper.py``): a ``.`` or ``-`` right at
+#: the boundary between a token and ordinary text can, in principle, be
+#: read as either. Nothing here is any worse than that existing case.
+_V2_EMBEDDED_RE = re.compile(
+    r"\b(?:ip4|ip6|mac|sn|url|host|user)-[0-9a-f]{4}-[a-z0-9._~-]+-[0-9a-f]{8}\b",
+    re.IGNORECASE,
+)
+
 V2_TYPES = frozenset(
     {"ipv4", "ipv6", "mac", "serial", "hostname", "username", "domain", "email_local", "url_tail"}
 )
@@ -944,6 +965,43 @@ class FPEEngine:
         if candidate.startswith("sn-"):
             return self.unmask_serial(candidate)
         return None
+
+    def unmask_embedded(self, text: str) -> str:
+        """Resolve every v2-shaped token embedded anywhere inside ``text``.
+
+        ``unmask_token`` requires the WHOLE string to be a token, which is
+        right for an argument that IS one. A TEXT field can carry a token
+        mid-sentence instead (#73 item 8): ``srcuuid_name`` masks an
+        embedded IOC in place on the way out (``OutputMasker.mask_text``),
+        so the inbound side has to find it the same way -- a plain
+        whole-string check never fires on a label.
+
+        Only the v2 envelope is reachable this way, by construction: the
+        v1 forms (``mask_hostname`` etc.) have no trailing tag, so nothing
+        marks where their ciphertext ends inside surrounding text -- a
+        length-unbounded payload embedded in free text has no reliable
+        right boundary to find. The tag is exactly what makes a v2 token
+        self-delimiting, which is what makes this method possible at all.
+
+        A candidate that fails to open (ordinary text that happens to fit
+        the shape, a foreign key id, a token for a different engine) is
+        left exactly as written rather than raising. That is the opposite
+        default from ``unmask_token``: a value that IS a token and fails
+        to open is a corrupted or forged argument worth surfacing, but
+        here most shape matches over free text are not tokens at all, and
+        refusing the whole string over one coincidental match would make
+        ordinary prose unusable.
+        """
+
+        def _open(match: re.Match[str]) -> str:
+            try:
+                return self.v2_open(match.group(0))
+            except VerificationBudgetExhausted:
+                raise
+            except MaskingError:
+                return match.group(0)
+
+        return _V2_EMBEDDED_RE.sub(_open, text)
 
     # ------------------------------------------------------------------ #
     # String FPE core (padding + chunking)                               #
