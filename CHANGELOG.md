@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The appliance timezone now resolves on hosts whose system zoneinfo lacks the legacy aliases.** FortiAnalyzer reports its zone under `TZ` as a legacy IANA alias such as `US/Eastern`. Ubuntu 24.04 ships those aliases only in `tzdata-legacy`, which is not installed by default, so `zoneinfo` raised `ZoneInfoNotFoundError`, the client cached the failure for the life of the process, and every relative time-range query ran on naive timestamps with `timezone: unknown` in the response, which undoes the #13 fix on exactly the hosts where the host clock and the appliance clock differ. `tzdata` is now a declared dependency, so `zoneinfo` has a complete database to fall back on; it is inert where the system database is complete. A host already showing the warning needs the package installed into its venv and a restart, because the negative lookup is cached per process.
+
 ## [2.14.0] - 2026-10-26
 
 Minor release. **Upgrade if you use `search_devices` or `list_tasks` with more than one condition.** Since 2.13.0 those tools OR'd conditions together, so they returned more rows than the filter matched, and `os_version_filter` never matched (#146). Also in this release: `in` on those two tools; a v2 masking-token envelope with forgery refusal (v1 tokens still accepted by default); masking fixes from the #80 sweep and #73; masked tokens inside TEXT values now resolve when sent back; and the server now answers MCP clients at once and connects to FortiAnalyzer in the background, so an unreachable appliance no longer stalls startup or leaves the tools dead until a restart.
