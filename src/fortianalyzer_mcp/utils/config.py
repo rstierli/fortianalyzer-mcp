@@ -7,7 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, ValidationError, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # Compute project root (3 levels up from this file: utils -> fortianalyzer_mcp -> src -> project)
@@ -330,6 +330,16 @@ def get_settings() -> Settings:
         ValidationError: If required settings are missing or invalid
     """
     _check_env_file_permissions()
-    # Required fields (FORTIANALYZER_HOST) come from the environment at
-    # runtime; pydantic-settings raises if they are missing.
-    return Settings()  # type: ignore[call-arg]
+    try:
+        # Required fields (FORTIANALYZER_HOST) come from the environment at
+        # runtime; pydantic-settings raises if they are missing.
+        return Settings()  # type: ignore[call-arg]
+    except ValidationError as exc:
+        if not _ENV_FILE.exists():
+            exc.add_note(
+                f"No .env file was read: {_ENV_FILE} does not exist. That path is derived "
+                "from the package location, so it only resolves in a source checkout or an "
+                "editable install (pip install -e .); a .env in the working directory is "
+                "not read either. Set the variables in the environment instead."
+            )
+        raise

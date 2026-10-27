@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A settings error now says when no `.env` was read, and which path was checked (#143).** `utils/config.py` finds the `.env` by walking four parents up from itself, which is right for a `src/` checkout and an editable install and wrong for a regular `pip install .` or a wheel, where the walk lands two levels above `site-packages`. The file was then dropped from the settings sources with nothing logged, and with `env_file=None` pydantic-settings reads no dotenv from anywhere, the working directory included. The first symptom was a validation error naming a field the user had set in the file, with nothing in it to search for. The error now carries a note with the absolute path that was checked, that a working-directory `.env` is not read either, and to set the variables in the environment. It rides the exception as a note rather than a log line because both transports load settings at import, before logging is configured, so a log line at that point never reaches the console; a healthy start prints nothing new. The README states which installs read a `.env`.
+
 ## [2.14.0] - 2026-10-26
 
 Minor release. **Upgrade if you use `search_devices` or `list_tasks` with more than one condition.** Since 2.13.0 those tools OR'd conditions together, so they returned more rows than the filter matched, and `os_version_filter` never matched (#146). Also in this release: `in` on those two tools; a v2 masking-token envelope with forgery refusal (v1 tokens still accepted by default); masking fixes from the #80 sweep and #73; masked tokens inside TEXT values now resolve when sent back; and the server now answers MCP clients at once and connects to FortiAnalyzer in the background, so an unreachable appliance no longer stalls startup or leaves the tools dead until a restart.
