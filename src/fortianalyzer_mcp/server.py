@@ -705,6 +705,12 @@ def run_http() -> None:
         host=settings.MCP_SERVER_HOST,
         port=settings.MCP_SERVER_PORT,
         log_level=settings.LOG_LEVEL.lower(),
+        # Bound the wait for open connections at shutdown. Without it uvicorn
+        # waits for every one before the lifespan shutdown, and an MCP client
+        # keeps a standing event stream open, so a stop waited for the
+        # supervisor's SIGKILL (90 s under systemd). 5 s lets an in-flight
+        # response finish and fits inside Docker's 10 s stop window.
+        timeout_graceful_shutdown=5,
     )
 
 
