@@ -4,8 +4,10 @@ Based on FNDN FortiAnalyzer 7.6.5 API specifications.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
+import threading
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, cast
@@ -26,6 +28,49 @@ logger = logging.getLogger(__name__)
 
 # API Version for FortiAnalyzer 7.6.4
 API_VERSION = 3
+
+
+async def _in_daemon_thread[**P, T](
+    func: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs
+) -> T:
+    """Run blocking pyfmg I/O on a daemon thread and await the result.
+
+    ``asyncio.to_thread`` runs on the loop's default executor, and its workers
+    are joined on the way out: ``asyncio.run()`` waits for them when it closes
+    the loop, and the interpreter waits again at exit. A request still in
+    flight when the server stops, such as the startup login or token probe
+    against an unreachable FortiAnalyzer whose connect task was just
+    cancelled, then held a stdio server open for up to
+    ``FORTIANALYZER_TIMEOUT`` after stdin closed. A daemon thread is not
+    joined: cancelling the await abandons the request, and the thread ends
+    with the process. Callers still serialize on ``_io_lock``, as before.
+    """
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[T] = loop.create_future()
+
+    def _set_result(result: T) -> None:
+        if not future.done():  # done means the await was cancelled
+            future.set_result(result)
+
+    def _set_exception(exc: BaseException) -> None:
+        if not future.done():
+            future.set_exception(exc)
+
+    def _deliver(setter: Callable[[Any], None], value: Any) -> None:
+        # The loop is closed if the server stopped while this request ran.
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(setter, value)
+
+    def _run() -> None:
+        try:
+            result = func(*args, **kwargs)
+        except BaseException as exc:
+            _deliver(_set_exception, exc)
+        else:
+            _deliver(_set_result, result)
+
+    threading.Thread(target=_run, name="faz-io", daemon=True).start()
+    return await future
 
 
 class FortiAnalyzerClient:
@@ -49,6 +94,9 @@ class FortiAnalyzerClient:
     # session returns on a per-request basis (not a clean no-session error), so a
     # long-lived client must re-login on it instead of retrying the dead session.
     _RECONNECTABLE_ERROR_CODES = frozenset({-2, -11, -20, -21})
+    # Seconds allowed for the session logout on disconnect. Shutdown waits
+    # for it, so it is capped well below FORTIANALYZER_TIMEOUT (default 30).
+    _LOGOUT_TIMEOUT = 5
 
     def __init__(
         self,
@@ -203,11 +251,36 @@ class FortiAnalyzerClient:
                         "No authentication provided. Set API token or username/password."
                     )
 
-                code, response = await asyncio.to_thread(self._fmg.login)
+                code, response = await _in_daemon_thread(self._fmg.login)
 
                 if code != 0:
                     error_msg = response.get("status", {}).get("message", "Login failed")
                     raise AuthenticationError(f"FortiAnalyzer login failed: {error_msg}")
+
+                if self.api_token:
+                    # An API-token login makes no request: pyfmg makes the
+                    # session id up on the client. Probe the appliance once,
+                    # still under _io_lock and before _connected is set, so
+                    # connect() (and /health with it) never reports a
+                    # FortiAnalyzer it has not reached. A transport error
+                    # fails the connect below like a failed password login.
+                    # A non-zero code fails closed: FortiAnalyzer answers an
+                    # invalid token with -11 "No permission for the resource"
+                    # rather than a distinct auth error, and this server reads
+                    # /sys/status itself (get_system_status,
+                    # get_system_timezone), so a token that cannot read it is
+                    # not a working configuration either. Twin of
+                    # fortimanager-mcp#31.
+                    probe_code, probe = await _in_daemon_thread(self._fmg.get, "/sys/status")
+                    if probe_code != 0:
+                        if not isinstance(probe, dict):
+                            # pyfmg returns (100, <Response>) for a non-JSON body.
+                            raise ConnectionError(f"/sys/status answered without JSON-RPC: {probe}")
+                        detail = probe.get("status", {}).get("message", "unknown error")
+                        raise AuthenticationError(
+                            f"FortiAnalyzer token verification failed: {detail}",
+                            code=probe_code,
+                        )
 
                 self._connected = True
                 self._ever_connected = True
@@ -224,15 +297,34 @@ class FortiAnalyzerClient:
                 raise ConnectionError(f"Failed to connect to FortiAnalyzer: {e}") from e
 
     async def disconnect(self) -> None:
-        """Disconnect and cleanup resources."""
+        """Disconnect and cleanup resources.
+
+        Runs on every server shutdown, so it must not wait out a request
+        timeout against an unreachable FortiAnalyzer.
+        """
         if not self._connected or not self._fmg:
             return
 
-        logger.info("Disconnecting from FortiAnalyzer")
+        fmg = self._fmg
+        if self.api_token:
+            # With an API token pyfmg's "session" is a UUID made up on the
+            # client and every request carries the token, so there is no
+            # server session to end. A sys/logout did nothing useful and, with
+            # the appliance unreachable, held shutdown for the full
+            # FORTIANALYZER_TIMEOUT.
+            self._fmg = None
+            self._connected = False
+            logger.info("Disconnected from FortiAnalyzer (API token: no session to log out)")
+            return
 
+        logger.info("Disconnecting from FortiAnalyzer")
+        # pyfmg hands its own timeout to requests, so this bounds the logout
+        # request itself; asyncio.wait_for would only stop waiting for it.
+        # fmg is dropped below, so nothing needs restoring.
+        fmg.timeout = min(self.timeout, self._LOGOUT_TIMEOUT)
         try:
             async with self._io_lock:
-                await asyncio.to_thread(self._fmg.logout)
+                await _in_daemon_thread(fmg.logout)
         except Exception as e:
             logger.warning(f"Logout failed: {e}")
         finally:
@@ -556,7 +648,7 @@ class FortiAnalyzerClient:
         # Make request off the event loop; serialized via the I/O lock so the
         # shared requests.Session is never used from two threads at once.
         async with self._io_lock:
-            response = await asyncio.to_thread(
+            response = await _in_daemon_thread(
                 fmg.sess.post,
                 fmg._url,
                 data=json.dumps(json_request),
@@ -637,7 +729,7 @@ class FortiAnalyzerClient:
             # Run the blocking pyfmg verb off the event loop; serialized via
             # the I/O lock (shared requests.Session is not thread-safe).
             async with self._io_lock:
-                code, response = await asyncio.to_thread(lambda: method(url, **kwargs))
+                code, response = await _in_daemon_thread(method, url, **kwargs)
             return self._handle_response(code, response, f"{verb.upper()} {url}")
 
         return await self._execute_resilient(_factory, idempotent=verb.lower() == "get")

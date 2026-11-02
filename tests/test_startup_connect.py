@@ -7,9 +7,13 @@ connect left every tool answering "Not connected" until a restart.
 """
 
 import asyncio
+import json
 import os
+import socket
+import subprocess
 import sys
 import time
+import urllib.request
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -129,3 +133,79 @@ class TestStdioHandshake:
 
         assert result.server_info.name
         assert elapsed < CONNECT_TIMEOUT / 2, f"initialize took {elapsed:.1f}s"
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port: int = s.getsockname()[1]
+        return port
+
+
+def _health(port: int) -> dict[str, Any] | None:
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1) as r:
+            body: dict[str, Any] = json.loads(r.read())
+            assert r.status == 200
+            return body
+    except OSError:  # not listening yet (URLError is an OSError)
+        return None
+
+
+class TestHealthInTokenMode:
+    def test_health_reports_an_unreachable_fortianalyzer_as_not_connected(self) -> None:
+        """API-token login makes no request, so the client called itself
+        connected and /health said so against an appliance it never reached.
+        The token connect now probes /sys/status first. /health stays HTTP
+        200 (it is a liveness check); only the flag changes."""
+        port = _free_port()
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if not k.startswith(("FORTIANALYZER_", "MCP_", "FAZ_"))
+        }
+        env.update(
+            PYTHONPATH=REPO_SRC,
+            MCP_SERVER_MODE="http",
+            MCP_SERVER_HOST="127.0.0.1",
+            MCP_SERVER_PORT=str(port),
+            MCP_AUTH_TOKEN="dummy-mcp-auth",
+            LOG_LEVEL="WARNING",
+            FORTIANALYZER_HOST=UNREACHABLE_HOST,
+            FORTIANALYZER_API_TOKEN="dummy-api-token",
+            FORTIANALYZER_USERNAME="",
+            FORTIANALYZER_PASSWORD="",
+            FORTIANALYZER_CA_BUNDLE="",
+            FORTIANALYZER_TIMEOUT=str(CONNECT_TIMEOUT),
+            MASKING_ENABLED="false",
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "fortianalyzer_mcp"],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        seen: list[dict[str, Any]] = []
+        try:
+            deadline = time.monotonic() + 30
+            while not seen and time.monotonic() < deadline:
+                assert proc.poll() is None, f"server exited early, rc={proc.returncode}"
+                body = _health(port)
+                if body is None:
+                    time.sleep(0.2)
+                else:
+                    seen.append(body)
+            assert seen, "/health never answered"
+            # Before the fix the flag was true within a second of startup.
+            for _ in range(4):
+                time.sleep(0.5)
+                body = _health(port)
+                assert body is not None
+                seen.append(body)
+        finally:
+            proc.kill()
+            proc.wait()
+
+        assert all(b["status"] == "healthy" for b in seen)
+        assert [b["fortianalyzer_connected"] for b in seen] == [False] * len(seen)
