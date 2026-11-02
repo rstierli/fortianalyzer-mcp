@@ -290,6 +290,8 @@ def test_token_mode_exits_promptly_after_fortianalyzer_went_away(
     elapsed = server.stop()
 
     assert elapsed < EXIT_BUDGET, f"{mode} exit took {elapsed:.1f}s"
+    # Connected for real: the token probe reached the stub before it went silent.
+    assert "get /sys/status" in faz_stub.answered
     assert not any("sys/logout" in a for a in faz_stub.answered)
 
 
@@ -309,14 +311,16 @@ def test_session_logout_is_capped_after_fortianalyzer_went_away(
     assert elapsed < budget, f"{mode} exit took {elapsed:.1f}s"
 
 
-def test_stdio_exits_promptly_with_a_login_in_flight(
-    faz_stub: FazStub, start_server: Callable[..., McpServer]
+@pytest.mark.parametrize("token", [False, True], ids=["login", "token-probe"])
+def test_stdio_exits_promptly_with_a_connect_in_flight(
+    faz_stub: FazStub, start_server: Callable[..., McpServer], token: bool
 ) -> None:
-    """stdin closing while the startup login still waits on FortiAnalyzer:
-    asyncio.run() used to join that worker thread before exiting."""
+    """stdin closing while the startup login, or the token probe, still waits
+    on FortiAnalyzer: asyncio.run() used to join that worker thread before
+    exiting."""
     faz_stub.silent.set()
-    server = start_server("stdio", faz_stub.host, token=False)
-    server.wait_until(lambda: faz_stub.held > 0, "the login to reach the stub")
+    server = start_server("stdio", faz_stub.host, token=token)
+    server.wait_until(lambda: faz_stub.held > 0, "the connect to reach the stub")
 
     elapsed = server.stop()
 

@@ -38,10 +38,10 @@ async def _in_daemon_thread[**P, T](
     ``asyncio.to_thread`` runs on the loop's default executor, and its workers
     are joined on the way out: ``asyncio.run()`` waits for them when it closes
     the loop, and the interpreter waits again at exit. A request still in
-    flight when the server stops, such as the startup login against an
-    unreachable FortiAnalyzer whose connect task was just cancelled, then
-    held a stdio server open for up to ``FORTIANALYZER_TIMEOUT`` after stdin
-    closed. A daemon thread is not joined: cancelling the await abandons the
+    flight when the server stops, such as the startup login or token probe
+    against an unreachable FortiAnalyzer whose connect task was just
+    cancelled, then held a stdio server open for up to
+    ``FORTIANALYZER_TIMEOUT`` after stdin closed. A daemon thread is not joined: cancelling the await abandons the
     request, and the thread ends with the process. Callers still serialize
     on ``_io_lock``, as before.
     """
@@ -256,6 +256,31 @@ class FortiAnalyzerClient:
                 if code != 0:
                     error_msg = response.get("status", {}).get("message", "Login failed")
                     raise AuthenticationError(f"FortiAnalyzer login failed: {error_msg}")
+
+                if self.api_token:
+                    # An API-token login makes no request: pyfmg makes the
+                    # session id up on the client. Probe the appliance once,
+                    # still under _io_lock and before _connected is set, so
+                    # connect() (and /health with it) never reports a
+                    # FortiAnalyzer it has not reached. A transport error
+                    # fails the connect below like a failed password login.
+                    # A non-zero code fails closed: FortiAnalyzer answers an
+                    # invalid token with -11 "No permission for the resource"
+                    # rather than a distinct auth error, and this server reads
+                    # /sys/status itself (get_system_status,
+                    # get_system_timezone), so a token that cannot read it is
+                    # not a working configuration either. Twin of
+                    # fortimanager-mcp#31.
+                    probe_code, probe = await _in_daemon_thread(self._fmg.get, "/sys/status")
+                    if probe_code != 0:
+                        if not isinstance(probe, dict):
+                            # pyfmg returns (100, <Response>) for a non-JSON body.
+                            raise ConnectionError(f"/sys/status answered without JSON-RPC: {probe}")
+                        detail = probe.get("status", {}).get("message", "unknown error")
+                        raise AuthenticationError(
+                            f"FortiAnalyzer token verification failed: {detail}",
+                            code=probe_code,
+                        )
 
                 self._connected = True
                 self._ever_connected = True

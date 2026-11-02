@@ -3,9 +3,10 @@
 from unittest.mock import MagicMock
 
 import pytest
+from pyFMG.fortimgr import FMGBaseException, FMGConnectionError
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
-from fortianalyzer_mcp.utils.errors import ConnectionError
+from fortianalyzer_mcp.utils.errors import AuthenticationError, ConnectionError
 
 
 class TestFortiAnalyzerClientInit:
@@ -817,6 +818,13 @@ def _token_client(*, connect_on_demand: bool = False) -> FortiAnalyzerClient:
     )
 
 
+def _stub_fortimanager(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    stub = MagicMock()
+    stub.login.return_value = (0, {"status": {"code": 0, "message": "OK"}})
+    monkeypatch.setattr("fortianalyzer_mcp.api.client.FortiManager", lambda *a, **kw: stub)
+    return stub
+
+
 class TestDisconnectDoesNotStallShutdown:
     """disconnect() runs on every shutdown. With an API token pyfmg's "session"
     is a UUID made up on the client, so a sys/logout ends nothing on the
@@ -877,3 +885,141 @@ class TestDisconnectDoesNotStallShutdown:
 
         assert client._fmg is None
         assert not client.is_connected
+
+
+class TestTokenAuthLivenessProbe:
+    """API-token login makes no request in pyfmg, so connect() probes
+    /sys/status once before reporting connected. Without it /health showed
+    connected against an unreachable FortiAnalyzer (twin of fortimanager-mcp#31)."""
+
+    async def test_token_connect_probes_sys_status(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        stub = _stub_fortimanager(monkeypatch)
+        client = _token_client()
+        during: list[tuple[bool, bool]] = []
+
+        def probe(url: str) -> tuple[int, dict[str, str]]:
+            # The probe runs under the I/O lock and before the client calls
+            # itself connected.
+            during.append((client._io_lock.locked(), client._connected))
+            return 0, {"Hostname": "faz-01", "Version": "v7.6.5"}
+
+        stub.get.side_effect = probe
+
+        await client.connect()
+
+        assert client.is_connected
+        stub.get.assert_called_once()
+        assert stub.get.call_args.args[0] == "/sys/status"
+        assert during == [(True, False)]
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            FMGConnectionError("Connection error: ConnectTimeout"),
+            # pyfmg wraps a read timeout in its generic exception.
+            FMGBaseException("Response parser error: ReadTimeout"),
+        ],
+        ids=["connect-error", "read-timeout"],
+    )
+    async def test_transport_error_fails_the_connect(
+        self, monkeypatch: pytest.MonkeyPatch, error: Exception
+    ) -> None:
+        stub = _stub_fortimanager(monkeypatch)
+        stub.get.side_effect = error
+        client = _token_client()
+
+        with pytest.raises(ConnectionError, match="Failed to connect to FortiAnalyzer"):
+            await client.connect()
+
+        assert not client.is_connected
+        assert client._connected is False
+        assert client._fmg is None
+        assert client._ever_connected is False
+
+    async def test_error_code_fails_closed_as_authentication_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FortiAnalyzer answers an invalid token with "No permission" (-11)
+        rather than a distinct auth error, and a token that cannot read
+        /sys/status cannot run the tools that depend on it either."""
+        stub = _stub_fortimanager(monkeypatch)
+        stub.get.return_value = (
+            -11,
+            {"status": {"code": -11, "message": "No permission for the resource"}},
+        )
+        client = _token_client()
+
+        with pytest.raises(AuthenticationError, match="No permission for the resource") as exc:
+            await client.connect()
+
+        assert exc.value.code == -11
+        assert not client.is_connected
+        assert client._fmg is None
+
+    async def test_a_non_json_answer_is_a_connection_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """pyfmg returns (100, <Response>) when the body is not JSON: something
+        answered, but not FortiAnalyzer's JSON-RPC."""
+        stub = _stub_fortimanager(monkeypatch)
+        stub.get.return_value = (100, "<Response [502]>")
+        client = _token_client()
+
+        with pytest.raises(ConnectionError, match=r"Response \[502\]"):
+            await client.connect()
+
+        assert not client.is_connected
+        assert client._fmg is None
+
+    async def test_session_connect_does_not_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Username/password login already makes a round-trip."""
+        stub = _stub_fortimanager(monkeypatch)
+        client = _bare_client()
+
+        await client.connect()
+
+        assert client.is_connected
+        stub.get.assert_not_called()
+
+    async def test_a_failed_probe_counts_as_a_failed_connect(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ensure_connected() records it like a failed password login, so
+        callers queued behind it share the error instead of each probing."""
+        import asyncio
+
+        stub = _stub_fortimanager(monkeypatch)
+        stub.get.side_effect = FMGConnectionError("Connection error: ConnectTimeout")
+        client = _token_client()
+
+        results = await asyncio.gather(
+            client.ensure_connected(),
+            client.ensure_connected(),
+            client.ensure_connected(),
+            return_exceptions=True,
+        )
+
+        assert all(isinstance(r, ConnectionError) for r in results)
+        assert stub.get.call_count == 1
+        assert client._failed_connects == 1
+        assert isinstance(client._last_connect_error, ConnectionError)
+        assert not client.is_connected
+
+    async def test_connect_on_demand_recovers_once_the_probe_passes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stub = _stub_fortimanager(monkeypatch)
+        stub.get.side_effect = [
+            FMGConnectionError("Connection error: ConnectTimeout"),  # startup probe
+            (0, {"Hostname": "faz-01"}),  # probe on the next call
+            (0, {"Hostname": "faz-01"}),  # the call itself
+        ]
+        client = _token_client(connect_on_demand=True)
+
+        with pytest.raises(ConnectionError):
+            await client.ensure_connected()
+        status = await client.get_system_status()
+
+        assert status == {"Hostname": "faz-01"}
+        assert client.is_connected
+        assert stub.get.call_count == 3
