@@ -15,7 +15,9 @@ from typing import Any
 import pytest
 
 import fortianalyzer_mcp.tools.dvm_tools as dvm_tools
+import fortianalyzer_mcp.tools.event_tools as event_tools
 import fortianalyzer_mcp.tools.fortiview_tools as fortiview_tools
+import fortianalyzer_mcp.tools.incident_tools as incident_tools
 import fortianalyzer_mcp.tools.ioc_tools as ioc_tools
 import fortianalyzer_mcp.tools.report_tools as report_tools
 import fortianalyzer_mcp.tools.system_tools as system_tools
@@ -24,7 +26,8 @@ from fortianalyzer_mcp.tools.report_tools import (
     _convert_to_api_time_period,
     _format_period_timedate,
 )
-from fortianalyzer_mcp.utils.errors import ValidationError
+from fortianalyzer_mcp.utils.errors import APIError, ValidationError
+from fortianalyzer_mcp.utils.errors import ConnectionError as FAZConnectionError
 from fortianalyzer_mcp.utils.responses import coerce_num
 from fortianalyzer_mcp.utils.validation import build_device_filter
 
@@ -461,7 +464,13 @@ class TestTimezoneNegativeCache:
         assert await client.get_system_timezone() is None
         assert len(probes) == 1
 
-    async def test_probe_failure_not_cached(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_unreachable_probe_raises_and_is_not_cached(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # FAZ cannot be reached, so the request the caller is about to make
+        # would fail the same way: raise now instead of falling back to naive
+        # time and waiting out a second connect attempt. Still not cached, so
+        # the zone is detected once FAZ is back.
         client = _bare_client()
         probes: list[int] = []
 
@@ -470,9 +479,59 @@ class TestTimezoneNegativeCache:
             raise ConnectionError("FAZ unreachable")
 
         monkeypatch.setattr(client, "get_system_status", failing_status)
+        with pytest.raises(ConnectionError):
+            await client.get_system_timezone()
+        with pytest.raises(ConnectionError):
+            await client.get_system_timezone()
+        assert len(probes) == 2
+
+    async def test_other_probe_failure_falls_back_and_is_not_cached(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A failure that says nothing about reachability keeps the naive
+        # fallback: the real request may still succeed.
+        client = _bare_client()
+        probes: list[int] = []
+
+        async def failing_status() -> dict[str, Any]:
+            probes.append(1)
+            raise APIError("Invalid url", code=-3)
+
+        monkeypatch.setattr(client, "get_system_status", failing_status)
         assert await client.get_system_timezone() is None
         assert await client.get_system_timezone() is None
         assert len(probes) == 2
+
+
+class TestUnreachableFazOneConnectPerCall:
+    """A tool call against an unreachable FAZ makes one connect attempt, not two.
+
+    With connect_on_demand every request connects first, and each failed
+    attempt waits out the connect timeout. The timezone probe used to swallow
+    its failed connect and let the real request make a second one.
+    """
+
+    @pytest.mark.parametrize(
+        ("module", "tool"),
+        [(event_tools, "get_alerts"), (incident_tools, "get_incidents")],
+    )
+    async def test_one_connect_attempt_and_an_error_envelope(
+        self, monkeypatch: pytest.MonkeyPatch, module: Any, tool: str
+    ) -> None:
+        client = FortiAnalyzerClient(host="faz.example.com", api_token="t", connect_on_demand=True)
+        attempts: list[int] = []
+
+        async def unreachable() -> None:
+            attempts.append(1)
+            raise FAZConnectionError("Connection error: ConnectTimeout")
+
+        monkeypatch.setattr(client, "connect", unreachable)
+        _patch_client(monkeypatch, module, client)
+
+        result = await getattr(module, tool)()
+
+        assert result["status"] == "error"
+        assert len(attempts) == 1
 
 
 class TestSearchIpsLogsUnknownTotal:

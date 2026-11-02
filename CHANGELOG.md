@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A tool call against an unreachable FortiAnalyzer now waits out one connect timeout, not two.** Twenty tools resolve a relative time range first, which probes `/sys/status` for the appliance timezone. With `connect_on_demand` every request connects first, so against an unreachable appliance the probe's connect failed, `get_system_timezone()` swallowed the error and fell back to naive time, and the tool's real request then made a second connect attempt that failed the same way. The probe now raises when FortiAnalyzer cannot be reached (a `ConnectionError`, or an error `_is_transient_error` accepts), the rule fortimanager-mcp#106 applies to its version probe; any other probe failure still falls back to naive time, and neither outcome is cached. Every one of those tools already wraps the time-range step in its error handling, so the caller gets the same error envelope, one timeout sooner. Measured against 192.0.2.1 with `FORTIANALYZER_TIMEOUT=3`: `get_alerts` and `get_incidents` fail after 3.0 s with one failed connect (were 6.0 s with two). Tools that anchor on the log clock (`utils/log_clock.py`) catch the probe themselves and are unchanged.
+
 ## [2.14.2] - 2026-11-02
 
 Patch release. **Upgrade if you run the server in Docker, under systemd or in Kubernetes:** stopping it waited out the full `FORTIANALYZER_TIMEOUT` (30 s by default) whenever FortiAnalyzer did not answer, so `docker stop` killed the container instead. A token-mode server now stops at once and a password-mode one within 5 s. Also in this release: with an API token, the server now checks that it can reach FortiAnalyzer before it reports itself connected, so `/health` no longer says `fortianalyzer_connected: true` against an unreachable appliance, and an invalid token fails at connect.
