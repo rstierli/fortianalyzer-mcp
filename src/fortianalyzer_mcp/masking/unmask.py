@@ -149,6 +149,16 @@ class ArgUnmasker:
         if not value or value.strip() in SKIP_VALUES:
             return value
         candidate = value.strip()
+        if vtype == TEXT and self._engine.is_v2_shaped(candidate):
+            # Several tokens joined into one label (an address range masks
+            # to "<token>-<token>") are v2-shaped as a whole but are not one
+            # token. The whole-string attempt below would spend a tag failure
+            # on them before falling back to this same scan; a single token
+            # opens here exactly as it would there. The scan runs on the
+            # stripped value because a token resolved as a whole string has
+            # always come back stripped.
+            resolved = self._engine.unmask_embedded(candidate)
+            return resolved if resolved != candidate else value
         try:
             marked = self._unmask_marked(candidate)
         except VerificationBudgetExhausted:

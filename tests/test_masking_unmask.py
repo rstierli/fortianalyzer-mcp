@@ -1,9 +1,11 @@
 """Tests for Phase 2 tool-argument unmasking (RFC #40)."""
 
+import logging
+
 import pytest
 
-from fortianalyzer_mcp.masking.fields import IP
-from fortianalyzer_mcp.masking.fpe_engine import FPEEngine
+from fortianalyzer_mcp.masking.fields import IP, TEXT
+from fortianalyzer_mcp.masking.fpe_engine import FPEEngine, begin_v2_verification_budget
 from fortianalyzer_mcp.masking.unmask import ArgUnmasker
 from fortianalyzer_mcp.masking.wrapper import OutputMasker, install_masking
 
@@ -110,6 +112,88 @@ class TestScalarResolution:
         # token, so it must not raise or corrupt the surrounding text.
         text = "host host-dead-notreallyatoken-deadbeef needs review"
         assert unmasker.resolve_scalar(text) == text
+
+
+class TestJoinedEmbeddedTokens:
+    """Two tokens joined by a hyphen, as an address-range label masks.
+
+    ``OutputMasker.mask_text`` replaces each address in
+    ``"192.0.2.10-192.0.2.20"`` in place, so the label comes back as two v2
+    tokens with a hyphen between them. The payload alphabet contains the
+    hyphen, so a scan that reads one greedy span over both tokens finds a
+    single candidate whose tag is the second token's and opens neither.
+    """
+
+    LABEL = "192.0.2.10-192.0.2.20"
+
+    def test_masked_range_label_round_trips(self, masker: OutputMasker, unmasker: ArgUnmasker):
+        masked = masker.mask_result({"logs": [{"srcuuid_name": self.LABEL}]})
+        label = masked["logs"][0]["srcuuid_name"]
+        assert "192.0.2" not in label
+
+        assert unmasker.unmask_args({"srcuuid_name": label})["srcuuid_name"] == self.LABEL
+
+    @pytest.mark.parametrize("sep", [".", "~", "--"])
+    def test_other_joins_resolve(self, engine: FPEEngine, unmasker: ArgUnmasker, sep: str):
+        a = engine.mint("ip", "192.0.2.10")
+        b = engine.mint("ip", "192.0.2.20")
+        assert unmasker.resolve_scalar(f"{a}{sep}{b}", TEXT) == f"192.0.2.10{sep}192.0.2.20"
+
+    def test_four_range_labels_in_one_call_raise_no_forgery_alarm(
+        self,
+        masker: OutputMasker,
+        unmasker: ArgUnmasker,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        labels = [f"192.0.2.{n}-192.0.2.{n + 1}" for n in (10, 20, 30, 40)]
+        masked = [masker.mask_result({"srcuuid_name": label})["srcuuid_name"] for label in labels]
+        begin_v2_verification_budget()
+
+        with caplog.at_level(logging.WARNING, logger="fortianalyzer_mcp.masking.fpe_engine"):
+            resolved = [unmasker.resolve_scalar(m, TEXT) for m in masked]
+
+        assert resolved == labels
+        assert caplog.records == []
+
+    def test_a_corrupted_half_stays_as_written(
+        self, engine: FPEEngine, unmasker: ArgUnmasker, caplog: pytest.LogCaptureFixture
+    ):
+        good = engine.mint("ip", "192.0.2.10")
+        bad = engine.mint("ip", "192.0.2.20")
+        bad = bad[:-1] + ("0" if bad[-1] != "0" else "1")
+        begin_v2_verification_budget()
+
+        with caplog.at_level(logging.WARNING, logger="fortianalyzer_mcp.masking.fpe_engine"):
+            resolved = unmasker.resolve_scalar(f"{good}-{bad}", TEXT)
+
+        assert resolved == f"192.0.2.10-{bad}"
+        assert [r.getMessage() for r in caplog.records] == [
+            "v2 token failed tag verification (type=ipv4); refused"
+        ]
+
+    def test_forged_text_tokens_count_one_failure_each_and_still_alarm(
+        self, engine: FPEEngine, unmasker: ArgUnmasker, caplog: pytest.LogCaptureFixture
+    ):
+        token = engine.mint("ip", "192.0.2.10")
+        forged = [token[:-8] + f"{n:08x}" for n in range(8)]
+        assert token not in forged
+        begin_v2_verification_budget()
+
+        with caplog.at_level(logging.WARNING, logger="fortianalyzer_mcp.masking.fpe_engine"):
+            resolved = [unmasker.resolve_scalar(f, TEXT) for f in forged]
+
+        assert resolved == forged
+        # One failure per forged token: seven warnings, then the alarm on the
+        # eighth. Checking each token twice would alarm on the fourth.
+        assert [r.getMessage() for r in caplog.records] == [
+            "v2 token failed tag verification (type=ipv4); refused"
+        ] * 7 + ["v2 tag verification failed 8 times in one call; possible forgery attempt"]
+
+    def test_a_hyphen_suffix_on_one_token_still_resolves(
+        self, engine: FPEEngine, unmasker: ArgUnmasker
+    ):
+        token = engine.mint("ip", "192.0.2.10")
+        assert unmasker.resolve_scalar(f"{token}-dmz", TEXT) == "192.0.2.10-dmz"
 
 
 class TestPrefixedGroupBy:

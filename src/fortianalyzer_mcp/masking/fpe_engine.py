@@ -277,8 +277,19 @@ _V2_SHAPE_RE = re.compile(
 #: (``_v2_envelope_around`` in ``wrapper.py``): a ``.`` or ``-`` right at
 #: the boundary between a token and ordinary text can, in principle, be
 #: read as either. Nothing here is any worse than that existing case.
+#:
+#: The payload may not run across the start of a second envelope, i.e.
+#: ``-<tag>`` followed by a run of ``-``/``.``/``~`` and ``<marker>-<kid>-``. Without that
+#: stop, two tokens joined by a hyphen (an address-range label such as
+#: ``192.0.2.10-192.0.2.20`` masks to exactly that) read as ONE candidate
+#: carrying the second token's tag, so neither opened and every such label
+#: counted tag failures towards the forgery alarm. Each half still has to
+#: pass its own tag check. A single payload containing that whole sequence
+#: is now cut short and fails closed, as an unresolved token.
 _V2_EMBEDDED_RE = re.compile(
-    r"\b(?:ip4|ip6|mac|sn|url|host|user)-[0-9a-f]{4}-[a-z0-9._~-]+-[0-9a-f]{8}\b",
+    r"\b(?:ip4|ip6|mac|sn|url|host|user)-[0-9a-f]{4}-"
+    r"(?:(?!-[0-9a-f]{8}[-.~]+(?:ip4|ip6|mac|sn|url|host|user)-[0-9a-f]{4}-)[a-z0-9._~-])+"
+    r"-[0-9a-f]{8}\b",
     re.IGNORECASE,
 )
 
