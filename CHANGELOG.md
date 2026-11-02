@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.14.1] - 2026-11-02
+
+Patch release. **Upgrade if the server runs on Ubuntu 24.04 or another host without the legacy timezone aliases:** FortiAnalyzer reports its zone as a legacy name such as `US/Eastern`, and without `tzdata` those hosts fell back to naive timestamps for relative time ranges (#154). Also in this release: dependency floors raised past two published advisories (pydantic-settings, starlette) and the unused `httpx` dependency dropped; a settings error now names the `.env` path it checked (#143); and a masked address-range label resolves when it is sent back as a filter.
+
 ### Fixed
 
 - **A settings error now says when no `.env` was read, and which path was checked (#143).** `utils/config.py` finds the `.env` by walking four parents up from itself, which is right for a `src/` checkout and an editable install and wrong for a regular `pip install .` or a wheel, where the walk lands two levels above `site-packages`. The file was then dropped from the settings sources with nothing logged, and with `env_file=None` pydantic-settings reads no dotenv from anywhere, the working directory included. The first symptom was a validation error naming a field the user had set in the file, with nothing in it to search for. The error now carries a note with the absolute path that was checked, that a working-directory `.env` is not read either, and to set the variables in the environment. It rides the exception as a note rather than a log line because both transports load settings at import, before logging is configured, so a log line at that point never reaches the console; a healthy start prints nothing new. The README states which installs read a `.env`.
