@@ -41,9 +41,9 @@ async def _in_daemon_thread[**P, T](
     flight when the server stops, such as the startup login or token probe
     against an unreachable FortiAnalyzer whose connect task was just
     cancelled, then held a stdio server open for up to
-    ``FORTIANALYZER_TIMEOUT`` after stdin closed. A daemon thread is not joined: cancelling the await abandons the
-    request, and the thread ends with the process. Callers still serialize
-    on ``_io_lock``, as before.
+    ``FORTIANALYZER_TIMEOUT`` after stdin closed. A daemon thread is not
+    joined: cancelling the await abandons the request, and the thread ends
+    with the process. Callers still serialize on ``_io_lock``, as before.
     """
     loop = asyncio.get_running_loop()
     future: asyncio.Future[T] = loop.create_future()
