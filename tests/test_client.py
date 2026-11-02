@@ -809,3 +809,71 @@ class TestCaBundleAndVerifyGuidance:
         assert "FORTIANALYZER_CA_BUNDLE" in blob
         # States the real blocker.
         assert "subjectAltName" in blob or "SAN" in blob
+
+
+def _token_client(*, connect_on_demand: bool = False) -> FortiAnalyzerClient:
+    return FortiAnalyzerClient(
+        host="faz.example.com", api_token="t", connect_on_demand=connect_on_demand
+    )
+
+
+class TestDisconnectDoesNotStallShutdown:
+    """disconnect() runs on every shutdown. With an API token pyfmg's "session"
+    is a UUID made up on the client, so a sys/logout ends nothing on the
+    appliance and only blocks for FORTIANALYZER_TIMEOUT when it is unreachable."""
+
+    async def test_token_disconnect_skips_the_logout(self) -> None:
+        client = _token_client()
+        fmg = MagicMock()
+        client._fmg = fmg
+        client._connected = True
+
+        await client.disconnect()
+
+        fmg.logout.assert_not_called()
+        assert client._fmg is None
+        assert not client.is_connected
+
+    async def test_session_disconnect_logs_out_with_a_capped_timeout(self) -> None:
+        """Username/password auth has a real server session, so it still logs
+        out, but on pyfmg's own timeout (which bounds the request itself)
+        capped well below the request timeout."""
+        client = _bare_client()  # timeout defaults to 30
+        fmg = MagicMock()
+        fmg.timeout = client.timeout
+        seen: list[int] = []
+        fmg.logout.side_effect = lambda: seen.append(fmg.timeout)
+        client._fmg = fmg
+        client._connected = True
+
+        await client.disconnect()
+
+        assert seen == [client._LOGOUT_TIMEOUT]
+        assert client._LOGOUT_TIMEOUT <= 5
+        assert client._fmg is None
+        assert not client.is_connected
+
+    async def test_session_logout_keeps_a_shorter_configured_timeout(self) -> None:
+        client = FortiAnalyzerClient(host="faz", username="admin", password="pw", timeout=2)
+        fmg = MagicMock()
+        fmg.timeout = 2
+        seen: list[int] = []
+        fmg.logout.side_effect = lambda: seen.append(fmg.timeout)
+        client._fmg = fmg
+        client._connected = True
+
+        await client.disconnect()
+
+        assert seen == [2]
+
+    async def test_a_failed_session_logout_still_clears_the_state(self) -> None:
+        client = _bare_client()
+        fmg = MagicMock()
+        fmg.logout.side_effect = OSError("connect timeout")
+        client._fmg = fmg
+        client._connected = True
+
+        await client.disconnect()
+
+        assert client._fmg is None
+        assert not client.is_connected
