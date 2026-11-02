@@ -1,0 +1,31 @@
+# Keeps the SHA-pinned actions current (each pin carries its version as a
+# comment, which Dependabot updates with the SHA) and reports dependency
+# releases that fall outside a declared range in pyproject.toml.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      python-minor-and-patch:
+        update-types:
+          - minor
+          - patch

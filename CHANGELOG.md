@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **GitHub Actions are pinned to full commit SHAs, and Dependabot keeps them current.** Twelve `uses:` lines across the three workflows referenced six actions (`actions/checkout`, `actions/setup-python` and the four `docker/*` actions in the image publish workflow) by a mutable major tag, so whoever controls a tag could change what runs in CI and in the image build without any change in this repository. Each is now pinned to the commit its tag pointed at when this was written, with the release as a trailing comment, the convention fortimanager-mcp has used since 1.9.0; `astral-sh/setup-uv` and `codecov/codecov-action` were already pinned. No action changes version. `.github/dependabot.yml` updates the pins weekly as one grouped pull request and watches `pyproject.toml` for releases outside a declared range.
+
 ## [2.14.2] - 2026-11-02
 
 Patch release. **Upgrade if you run the server in Docker, under systemd or in Kubernetes:** stopping it waited out the full `FORTIANALYZER_TIMEOUT` (30 s by default) whenever FortiAnalyzer did not answer, so `docker stop` killed the container instead. A token-mode server now stops at once and a password-mode one within 5 s. Also in this release: with an API token, the server now checks that it can reach FortiAnalyzer before it reports itself connected, so `/health` no longer says `fortianalyzer_connected: true` against an unreachable appliance, and an invalid token fails at connect.
