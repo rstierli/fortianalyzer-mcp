@@ -1,6 +1,7 @@
 # Keeps the SHA-pinned actions current (each pin carries its version as a
 # comment, which Dependabot updates with the SHA) and reports dependency
-# releases that fall outside a declared range in pyproject.toml.
+# releases that fall outside a declared range in pyproject.toml. Minor and
+# patch action bumps arrive as one grouped PR; a major bump gets its own.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -15,6 +16,9 @@ updates:
       github-actions:
         patterns:
           - "*"
+        update-types:
+          - minor
+          - patch
 
   - package-ecosystem: pip
     directory: /
