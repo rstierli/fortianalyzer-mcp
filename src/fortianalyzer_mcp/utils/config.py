@@ -276,8 +276,9 @@ class Settings(BaseSettings):
             handlers=self._get_log_handlers(),
         )
 
-        # Set httpx logging to WARNING to reduce noise
-        logging.getLogger("httpx").setLevel(logging.WARNING)
+        # Set httpx2 logging to WARNING to reduce noise. mcp 2.x uses
+        # httpx2, which logs under its own name, not "httpx".
+        logging.getLogger("httpx2").setLevel(logging.WARNING)
         # Set pyFMG logging based on our log level
         logging.getLogger("pyFMG").setLevel(log_level)
 
