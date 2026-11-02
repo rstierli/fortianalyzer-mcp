@@ -18,6 +18,7 @@ dependencies = [
     "starlette>=0.37.0",
     "uvicorn>=0.30.0",
     "ff3>=1.0.3",
+    "tzdata>=2024.1",
     "pyfmg @ git+https://github.com/rstierli/pyfmg.git@2745202a4254963193b79ab3d5617c9cc67f8ce3",
 ]
 
