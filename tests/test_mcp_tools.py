@@ -99,6 +99,9 @@ def import_tools_with_mock(config: FAZTestConfig):
 class TestResult:
     """Container for test results."""
 
+    # A result record, not a test class: keep pytest from trying to collect it.
+    __test__ = False
+
     def __init__(self, name: str, category: str):
         self.name = name
         self.category = category

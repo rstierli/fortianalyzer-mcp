@@ -157,8 +157,8 @@ the install documented above). A regular `pip install .` or a wheel does not
 read it; pass the settings as environment variables instead. The Docker image is
 unaffected: its Dockerfile installs the package editable, and the Compose example
 above passes the file through `env_file:` as environment variables anyway. When
-no `.env` was read and a required setting is missing, the startup error names
-the path that was checked.
+no `.env` was read and the settings fail to load, the startup error names the
+path that was checked.
 
 Edit `.env` with your FortiAnalyzer settings:
 
