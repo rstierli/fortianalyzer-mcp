@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 import fortianalyzer_mcp.server as server
+from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 
 
 class TestGracefulShutdownBound:
@@ -20,8 +21,9 @@ class TestGracefulShutdownBound:
         lifespan shutdown, with no limit unless one is configured ("Waiting for
         connections to close."). MCP clients hold a standing event stream per
         session, so under systemd every stop sat out TimeoutStopSec (90 s) and
-        ended in SIGKILL. 5 s gives an in-flight response time to finish and
-        still leaves room inside Docker's 10 s stop window.
+        ended in SIGKILL. 3 s gives an in-flight response time to finish; with
+        the password-mode logout that follows (capped at 5 s) the stop still
+        fits inside Docker's 10 s stop window.
         """
         import uvicorn
 
@@ -30,4 +32,7 @@ class TestGracefulShutdownBound:
         monkeypatch.setattr(uvicorn, "run", lambda app, **kw: captured.update(kwargs=kw))
         server.run_http()
 
-        assert captured["kwargs"]["timeout_graceful_shutdown"] == 5
+        bound = captured["kwargs"]["timeout_graceful_shutdown"]
+        assert bound == 3
+        # Connection wait plus the lifespan logout must fit Docker's 10 s.
+        assert bound + FortiAnalyzerClient._LOGOUT_TIMEOUT < 10
