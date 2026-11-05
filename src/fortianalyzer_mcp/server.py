@@ -705,6 +705,15 @@ def run_http() -> None:
         host=settings.MCP_SERVER_HOST,
         port=settings.MCP_SERVER_PORT,
         log_level=settings.LOG_LEVEL.lower(),
+        # Bound the wait for open connections at shutdown. Without it uvicorn
+        # waits for every one before the lifespan shutdown, and an MCP client
+        # keeps a standing event stream open, so a stop waited for the
+        # supervisor's SIGKILL (90 s under systemd). Docker's 10 s stop window
+        # also has to hold the lifespan shutdown that follows, whose
+        # password-mode logout is capped at FortiAnalyzerClient._LOGOUT_TIMEOUT
+        # (5 s): 3 s here lets an in-flight response finish and keeps the sum
+        # at 8 s.
+        timeout_graceful_shutdown=3,
     )
 
 
