@@ -389,12 +389,19 @@ class FortiAnalyzerClient:
         formatting so the bytes-on-wire always match FAZ's clock.
 
         Falls back to ``None`` if FAZ doesn't report a parseable TZ
-        (older versions or unrecognized IANA names). In that case
+        (older versions or unrecognized IANA names), or if the probe
+        fails for any other reason than an unreachable FAZ. In that case
         callers degrade to naive ``datetime.now()`` (legacy behavior).
 
         Returns:
             ``ZoneInfo`` for the FAZ system TZ, or ``None`` if it
             couldn't be determined.
+
+        Raises:
+            ConnectionError: The on-demand connect failed.
+            Exception: A transient error (see ``_is_transient_error``)
+                from a dropped session, re-raised as is. Either way the
+                caller's own request would wait out the same timeout.
         """
         if self._faz_tz_detected:
             return self._faz_tz
