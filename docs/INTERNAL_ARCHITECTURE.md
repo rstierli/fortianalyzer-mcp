@@ -356,7 +356,7 @@ mcp = FastMCP(
 if settings.FAZ_TOOL_MODE == "dynamic":
     register_dynamic_tools(mcp)  # Only 3 discovery tools
 else:
-    # Import all tool modules (77 tools)
+    # Import all tool modules (73 tools)
     from fortianalyzer_mcp.tools import (
         dvm_tools, event_tools, fortiview_tools,
         incident_tools, ioc_tools, log_tools,
@@ -394,7 +394,7 @@ def run_http():
 #### Tool Modes
 
 **Full Mode (default):**
-- All 77 tools loaded (78 with the skills dispatcher enabled)
+- All 73 tools loaded (74 with the skills dispatcher enabled)
 - ~50K+ tokens context
 - Best for large context windows
 
