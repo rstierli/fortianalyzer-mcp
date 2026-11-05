@@ -1,0 +1,23 @@
+# Keeps the SHA-pinned actions current (each pin carries its version as a
+# comment, which Dependabot updates with the SHA). Minor and patch action bumps
+# arrive as one grouped PR; a major bump gets its own. No pip entry: the
+# dependencies in pyproject.toml are floors, so the only update it would raise
+# is the next mcp major, which the deliberate `<3` cap keeps out.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
