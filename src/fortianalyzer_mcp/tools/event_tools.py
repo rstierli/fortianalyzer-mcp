@@ -471,10 +471,53 @@ async def get_alert_incident_stats(
 _VALID_HANDLER_TYPES = {"basic", "correlation", "both"}
 
 
+def _narrow_handler_list(
+    handlers: list[Any], name_filter: str | None, include_rules: bool
+) -> list[Any]:
+    """Apply get_alert_handlers' name_filter and include_rules to one list."""
+    if name_filter:
+        needle = name_filter.lower()
+        handlers = [
+            handler
+            for handler in handlers
+            if isinstance(handler, dict) and needle in str(handler.get("name") or "").lower()
+        ]
+    if include_rules:
+        return handlers
+    slim: list[Any] = []
+    for handler in handlers:
+        if isinstance(handler, dict) and isinstance(handler.get("rule"), list):
+            rest = {key: value for key, value in handler.items() if key != "rule"}
+            slim.append({**rest, "rule_count": len(handler["rule"])})
+        else:
+            slim.append(handler)
+    return slim
+
+
+def _narrow_handler_section(
+    section: Any, name_filter: str | None, include_rules: bool
+) -> tuple[Any, bool]:
+    """Narrow one handler class; the flag says whether its shape was known.
+
+    FortiAnalyzer answers a handler class as ``{"status": ..., "data": [...]}``
+    (7.6.8 and 8.0.2). A bare list is accepted as well. Anything else is
+    returned untouched, because narrowing an unknown shape would either drop
+    data or claim a filter that was never applied.
+    """
+    if isinstance(section, dict) and isinstance(section.get("data"), list):
+        narrowed = _narrow_handler_list(section["data"], name_filter, include_rules)
+        return {**section, "data": narrowed}, True
+    if isinstance(section, list):
+        return _narrow_handler_list(section, name_filter, include_rules), True
+    return section, False
+
+
 @mcp.tool(annotations=READ_ONLY)
 async def get_alert_handlers(
     adom: str | None = None,
     handler_type: str = "both",
+    name_filter: str | None = None,
+    include_rules: bool = True,
 ) -> dict[str, Any]:
     """Get event alert-handler (detection-rule) definitions.
 
@@ -483,17 +526,28 @@ async def get_alert_handlers(
     detection rules the appliance runs — a read-only building block for
     the Wave-2 ``alert_rules`` skill.
 
+    The whole catalogue is large: a stock FortiAnalyzer 8.0.2 ships 111
+    basic handlers, about 390 KB of JSON, and the rule lists are roughly
+    nine tenths of it. Unless you need all of it, call with
+    include_rules=False to see what exists, then with name_filter for the
+    handlers you want in full.
+
     Args:
         adom: ADOM name (default: from config DEFAULT_ADOM)
         handler_type: Which handlers to return: "basic", "correlation" or
             "both" (default: "both")
+        name_filter: Keep only handlers whose name contains this text,
+            ignoring case (default: all handlers)
+        include_rules: When False, each handler's "rule" list is replaced
+            by "rule_count" (default: True)
 
     Returns:
         dict with handler definitions under "data" (keyed by "basic" and/or
-        "correlation")
+        "correlation"). "warnings" is present only when a class could not be
+        narrowed because its payload had an unexpected shape.
 
     Example:
-        >>> result = await get_alert_handlers(handler_type="basic")
+        >>> result = await get_alert_handlers(handler_type="basic", include_rules=False)
         >>> print(result["data"]["basic"])
     """
     try:
@@ -510,7 +564,28 @@ async def get_alert_handlers(
         logger.info(f"Getting {handler_type} alert handlers from ADOM {adom}")
 
         result = await client.get_alert_handlers(adom=adom, handler_type=handler_type)
-        return {"status": "success", "adom": adom, "handler_type": handler_type, "data": result}
+        response: dict[str, Any] = {
+            "status": "success",
+            "adom": adom,
+            "handler_type": handler_type,
+            "data": result,
+        }
+        if (name_filter or not include_rules) and isinstance(result, dict):
+            narrowed: dict[str, Any] = {}
+            warnings: list[str] = []
+            for handler_class, section in result.items():
+                narrowed[handler_class], known = _narrow_handler_section(
+                    section, name_filter, include_rules
+                )
+                if not known:
+                    warnings.append(
+                        f"{handler_class} handler payload had an unrecognized shape; "
+                        "returned without narrowing"
+                    )
+            response["data"] = narrowed
+            if warnings:
+                response["warnings"] = warnings
+        return response
     except Exception as e:
         logger.error(f"Failed to get alert handlers: {e}")
         return {"status": "error", "message": redact(str(e))}
