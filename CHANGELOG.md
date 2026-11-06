@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`get_alert_handlers` can return less than the whole catalogue (#172).** A stock FortiAnalyzer 8.0.2 ships 111 basic handlers and the tool returned all of them with every rule: 391,477 characters of JSON, of which the rule lists are 89%. On the wire that is one server-sent event of 1,090,163 bytes, over the 1 MiB event limit the mcp Python SDK reads with, so a client built on it got `SSE stream ended without a response`; 7.6.8 sits at 1,017,026 bytes, 3% under it. Two optional parameters narrow the answer: `name_filter` keeps the handlers whose name contains the text, ignoring case, and `include_rules=False` replaces each handler's rule list with `rule_count` (78,235 characters for the same 8.0.2 catalogue). Both are off by default, so an existing call returns what it did. A payload whose shape the reader does not recognise is returned whole with a warning.
+
 ### Fixed
 
 - **The `server` field of wireless DNS events is masked (#171, works #80).** A FortiGate wireless DNS event carries the resolver the client asked in `server`, as an address, and repeats that address inside its `reason` text. `reason` is TEXT, so the address there was masked, but `server` had no entry in the type table and the same row returned the raw address two keys away from its own token. It is now typed `IP_OR_HOST`: an address mints the same token the `reason` text carries, and a name in that slot masks reversibly instead of burning to a placeholder. Measured on FortiAnalyzer 7.6.8 and 8.0.2; in the lab responses the key occurs only in log rows.
