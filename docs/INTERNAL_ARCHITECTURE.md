@@ -98,6 +98,8 @@ src/fortianalyzer_mcp/
 │   ├── ioc_tools.py      # IOC analysis
 │   ├── pcap_tools.py     # PCAP search/download
 │   ├── traffic_tools.py  # Policy traffic analysis
+│   ├── soar_tools.py     # SOAR indicator readers
+│   ├── ueba_tools.py     # UEBA endpoint/end-user readers
 │   └── dvm_tools.py      # Device management
 ├── skills/               # Skills layer (beta, FAZ_SKILLS_ENABLED — RFC #44)
 │   ├── catalog.py        # SkillSpec registry + machine-readable catalogue
@@ -360,8 +362,8 @@ else:
     from fortianalyzer_mcp.tools import (
         dvm_tools, event_tools, fortiview_tools,
         incident_tools, ioc_tools, log_tools,
-        pcap_tools, report_tools, system_tools,
-        traffic_tools,
+        pcap_tools, report_tools, soar_tools,
+        system_tools, traffic_tools, ueba_tools,
     )
 ```
 
