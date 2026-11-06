@@ -231,6 +231,12 @@ FIELD_TYPES: dict[str, str] = {
     "dns_name": HOSTNAME,
     "servername": HOSTNAME,
     "serveraddr": HOSTNAME,
+    # Wireless DNS events: the resolver the client asked, as an address.
+    # The row's ``reason`` text repeats that address and the TEXT pass
+    # masks it there, so untyped this was the raw address two keys from
+    # its own token. IP_OR_HOST and not IP because the key does not say
+    # address: a name typed IP would burn to an irreversible placeholder.
+    "server": IP_OR_HOST,
     "remotedevname": HOSTNAME,
     "domainctrlname": HOSTNAME,
     # --- username carriers

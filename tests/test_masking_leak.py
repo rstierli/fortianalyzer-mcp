@@ -1572,6 +1572,49 @@ class TestFortiViewResolvedName:
         assert FPEEngine(KEY).unmask_token(out) == BAD_DOMAIN
 
 
+class TestWirelessEventServer:
+    """``server`` on a wireless DNS event: the resolver the client asked.
+
+    The same address is also written into the row's ``reason`` text, where
+    the TEXT pass masks it. Untyped, ``server`` handed the raw address back
+    two keys away from its own token, measured on 7.6.8 and 8.0.2: the same
+    pairing disclosure as the srcip_hostname class above.
+    """
+
+    ROW = {
+        "logid": "0104043673",
+        "subtype": "wireless",
+        "reason": f'Server {PEER_IP} replied \\"non-existing domain\\"',
+        "server": PEER_IP,
+    }
+
+    def test_the_address_no_longer_survives_in_the_row(self, masker: OutputMasker):
+        out = masker.mask_result({"logs": [dict(self.ROW)]})["logs"][0]
+
+        assert PEER_IP not in str(out)
+
+    def test_server_carries_the_token_the_reason_text_carries(self, masker: OutputMasker):
+        # One address, one token: a different token under ``server`` would
+        # read as a second resolver in the same row.
+        out = masker.mask_result({"logs": [dict(self.ROW)]})["logs"][0]
+
+        assert out["reason"] == f'Server {out["server"]} replied \\"non-existing domain\\"'
+
+    def test_the_address_form_stays_reversible(self, masker: OutputMasker):
+        out = masker.mask_result({"server": PEER_IP})["server"]
+
+        assert FPEEngine(KEY).unmask_token(out) == PEER_IP
+
+    def test_a_name_in_the_slot_masks_reversibly_too(self, masker: OutputMasker):
+        # The key does not say address. Typed IP, a name here would burn to
+        # an irreversible placeholder, so the slot takes either form.
+        out = masker.mask_result({"server": BAD_DOMAIN})["server"]
+
+        assert BAD_DOMAIN not in out
+        assert not out.startswith("masked-unrepresentable-")
+        assert FPEEngine(KEY).unmask_token(out) == BAD_DOMAIN
+
+
 class TestIncidentWorkflowPrincipals:
     """``assigned_to``/``remedy_executor``/``remedy_approver``.
 

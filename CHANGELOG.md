@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The `server` field of wireless DNS events is masked (#171, works #80).** A FortiGate wireless DNS event carries the resolver the client asked in `server`, as an address, and repeats that address inside its `reason` text. `reason` is TEXT, so the address there was masked, but `server` had no entry in the type table and the same row returned the raw address two keys away from its own token. It is now typed `IP_OR_HOST`: an address mints the same token the `reason` text carries, and a name in that slot masks reversibly instead of burning to a placeholder. Measured on FortiAnalyzer 7.6.8 and 8.0.2; in the lab responses the key occurs only in log rows.
+
 ## [2.14.3] - 2026-11-05
 
 Patch release. **Upgrade if you run the HTTP transport under Docker, systemd or Kubernetes:** a server with a current MCP client connected never stopped on SIGTERM, because the client's standing `subscriptions/listen` stream kept uvicorn waiting, so every stop ended in the supervisor's SIGKILL. The 2.14.2 notes said a token-mode server stops at once; that held only with no such stream open. It now stops after about 3 s, and after about 8 s in password mode with the appliance not answering, inside `docker stop`'s 10 s. Also in this release: a tool call against an unreachable FortiAnalyzer gives up after one connect timeout instead of two, and the GitHub Actions are pinned to commit SHAs.
