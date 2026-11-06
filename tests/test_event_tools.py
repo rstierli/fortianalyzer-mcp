@@ -271,6 +271,139 @@ class TestAlertHandlers:
         assert "/eventmgmt/adom/root/config/correlation-handler" in paths
 
 
+def _handler_section() -> dict[str, object]:
+    """One handler class as FortiAnalyzer 7.6.8 and 8.0.2 answer it."""
+    return {
+        "status": {"code": 0, "message": "succeeded"},
+        "data": [
+            {
+                "name": "Botnet-Communication",
+                "handler-id": 1,
+                "enable": True,
+                "rule": [{"name": "r1", "severity": "high"}, {"name": "r2", "severity": "low"}],
+            },
+            {
+                "name": "Risky-App",
+                "handler-id": 2,
+                "enable": False,
+                "rule": [{"name": "r3", "severity": "medium"}],
+            },
+        ],
+    }
+
+
+class TestAlertHandlersNarrowing:
+    """The full catalogue is about 390 KB of JSON on a stock 8.0.2 and the
+    rule lists are most of it, so the reader can be asked for less."""
+
+    @staticmethod
+    def _patch(monkeypatch: pytest.MonkeyPatch, payload: dict[str, object]) -> None:
+        class _Fake:
+            async def get_alert_handlers(self, **kwargs: object) -> dict[str, object]:
+                return payload
+
+        monkeypatch.setattr(event_tools, "get_faz_client", lambda: _Fake())
+
+    async def test_default_call_returns_the_payload_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._patch(monkeypatch, {"basic": _handler_section()})
+
+        result = await event_tools.get_alert_handlers(adom="root", handler_type="basic")
+
+        assert result == {
+            "status": "success",
+            "adom": "root",
+            "handler_type": "basic",
+            "data": {"basic": _handler_section()},
+        }
+
+    async def test_name_filter_keeps_the_matching_handlers_whole(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._patch(monkeypatch, {"basic": _handler_section()})
+
+        result = await event_tools.get_alert_handlers(
+            adom="root", handler_type="basic", name_filter="botnet"
+        )
+
+        section = result["data"]["basic"]
+        assert section["status"] == {"code": 0, "message": "succeeded"}
+        assert section["data"] == [_handler_section()["data"][0]]  # type: ignore[index]
+
+    async def test_include_rules_false_replaces_each_rule_list_with_its_count(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._patch(monkeypatch, {"basic": _handler_section()})
+
+        result = await event_tools.get_alert_handlers(
+            adom="root", handler_type="basic", include_rules=False
+        )
+
+        assert result["data"]["basic"]["data"] == [
+            {"name": "Botnet-Communication", "handler-id": 1, "enable": True, "rule_count": 2},
+            {"name": "Risky-App", "handler-id": 2, "enable": False, "rule_count": 1},
+        ]
+
+    async def test_the_two_compose(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._patch(monkeypatch, {"basic": _handler_section()})
+
+        result = await event_tools.get_alert_handlers(
+            adom="root", handler_type="basic", name_filter="RISKY", include_rules=False
+        )
+
+        assert result["data"]["basic"]["data"] == [
+            {"name": "Risky-App", "handler-id": 2, "enable": False, "rule_count": 1}
+        ]
+
+    async def test_every_requested_class_is_narrowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._patch(monkeypatch, {"basic": _handler_section(), "correlation": _handler_section()})
+
+        result = await event_tools.get_alert_handlers(adom="root", name_filter="botnet")
+
+        assert [h["name"] for h in result["data"]["basic"]["data"]] == ["Botnet-Communication"]
+        assert [h["name"] for h in result["data"]["correlation"]["data"]] == [
+            "Botnet-Communication"
+        ]
+
+    async def test_an_empty_name_filter_is_no_filter(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._patch(monkeypatch, {"basic": _handler_section()})
+
+        result = await event_tools.get_alert_handlers(
+            adom="root", handler_type="basic", name_filter=""
+        )
+
+        assert result["data"] == {"basic": _handler_section()}
+        assert "warnings" not in result
+
+    async def test_a_bare_list_section_is_narrowed_too(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._patch(monkeypatch, {"basic": _handler_section()["data"]})
+
+        result = await event_tools.get_alert_handlers(
+            adom="root", handler_type="basic", name_filter="risky"
+        )
+
+        assert [h["name"] for h in result["data"]["basic"]] == ["Risky-App"]
+
+    async def test_an_unrecognised_section_comes_back_whole_and_says_so(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Narrowing a shape this reader does not know would either drop
+        data or pretend to have filtered it."""
+        self._patch(monkeypatch, {"basic": {"unexpected": "shape"}})
+
+        result = await event_tools.get_alert_handlers(
+            adom="root", handler_type="basic", name_filter="botnet"
+        )
+
+        assert result["data"]["basic"] == {"unexpected": "shape"}
+        assert result["warnings"] == [
+            "basic handler payload had an unrecognized shape; returned without narrowing"
+        ]
+
+
 class TestGetAlertsProjection:
     """Alerts project under the alert vocabulary."""
 
