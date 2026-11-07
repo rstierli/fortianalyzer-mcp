@@ -206,6 +206,31 @@ class TestEnduserScoring:
         assert result.composite_score == 4
         assert result.band == "low"
 
+    async def test_endpoint_whose_address_no_literal_can_hold_degrades_the_entity_filter(self):
+        """Same as the end-user case, on the endpoint path."""
+        endpoint = {"epid": 1025, "epname": "WS-ALPHA", "epip": "value\\"}
+        with (
+            t(GET_ENDPOINTS, return_value=ok(data=[endpoint])),
+            t(GET_ENDPOINT_VULNS, return_value=ok(data=[])),
+            t(GET_FORTIVIEW, return_value=ok(data=[])),
+            t(QUERY_LOGS, return_value=logs_ok(0)),
+        ):
+            result = await handlers.run_risk_assessment(RiskAssessmentParams(epid=1025))
+        assert any("backslash" in w for w in result.warnings)
+
+    async def test_user_whose_name_no_literal_can_hold_degrades_the_entity_filter(self):
+        """A name that ends in a backslash cannot be written into a filter
+        (#164); the score is still produced, with the gap in the warnings."""
+        user = {"euid": 7, "euname": "value\\"}
+        with (
+            t(GET_ENDUSERS, return_value=ok(data=[user])),
+            t(GET_ENDPOINT_VULNS),
+            t(GET_FORTIVIEW, return_value=ok(data=[])),
+            t(QUERY_LOGS, return_value=logs_ok(0)),
+        ):
+            result = await handlers.run_risk_assessment(RiskAssessmentParams(euid=7))
+        assert any("backslash" in w for w in result.warnings)
+
     async def test_user_with_endpoint_link_scopes_vuln_reader(self):
         linked = {"euid": 7, "euname": "alice", "epids": [1025, 2048]}
         with (

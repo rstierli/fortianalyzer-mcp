@@ -42,7 +42,11 @@ from fortianalyzer_mcp.query.fields import (
     is_integer_field,
     resolve_field,
 )
-from fortianalyzer_mcp.utils.validation import ValidationError, sanitize_filter_value
+from fortianalyzer_mcp.utils.validation import (
+    ValidationError,
+    like_filter_pattern,
+    sanitize_filter_value,
+)
 
 FilterOp = Literal[
     "eq",
@@ -265,11 +269,11 @@ def compile_to_string(
         if op in _SYMBOL_OPS:
             clauses.append(f"{field}{_SYMBOL_OPS[op]}{_quote(value, field)}")
         elif op in _LIKE_OPS:
-            # The wildcards go through the sanitiser with the value, so the
-            # whole pattern is escaped and quoted as one literal and cannot
-            # terminate its own clause. Live-checked that a quoted pattern
-            # matches identically to a bare one.
-            clause = f"{field} like {_quote(f'%{value}%', field)}"
+            # The value is written for ``like`` (backslash doubled, ``%`` and
+            # ``_`` escaped) and quoted as one literal with the wildcards, so
+            # it cannot terminate its own clause. Live-checked that a quoted
+            # pattern matches identically to a bare one.
+            clause = f"{field} like {like_filter_pattern(str(value), field)}"
             clauses.append(f"!({clause})" if op == "not_contains" else clause)
         else:  # pragma: no cover - every op in the enum is handled above
             raise ValidationError(f"Filter op '{op}' is not supported on the string dialect.")

@@ -206,15 +206,18 @@ class TestSanitizeFilterValue:
         result = sanitize_filter_value("some value")
         assert result == '"some value"'
 
-    def test_value_with_quotes_escaped(self) -> None:
-        """Values with double quotes should be escaped."""
+    def test_value_with_quotes_switches_quote_character(self) -> None:
+        """A double quote in the value puts the literal in single quotes, as
+        written: ``==`` compares a backslash literally, so an escaped quote
+        would match nothing (measured, issue #164)."""
         result = sanitize_filter_value('say "hello"')
-        assert result == '"say \\"hello\\""'
+        assert result == "'say \"hello\"'"
 
-    def test_value_with_backslash_escaped(self) -> None:
-        """Values with backslashes should be escaped."""
+    def test_value_with_backslash_is_written_once(self) -> None:
+        """One stored backslash matched the one-backslash spelling; a doubled
+        one matched nothing (measured on 7.6.8 and 8.0.2, issue #164)."""
         result = sanitize_filter_value("path\\to")
-        assert result == '"path\\\\to"'
+        assert result == '"path\\to"'
 
     def test_injection_attempt_quoted(self) -> None:
         """Filter injection attempts should be safely quoted."""

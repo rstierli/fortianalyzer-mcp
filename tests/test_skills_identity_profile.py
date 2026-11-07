@@ -138,6 +138,20 @@ class TestIdentityProfile:
             await handlers.run_identity_profile(IdentityProfileParams(euid=11))
         assert logs.call_args.kwargs["filter"].startswith('user=="svc account" and ')
 
+    async def test_euname_no_literal_can_hold_degrades_activity(self):
+        """A name that ends in a backslash cannot be written into a filter
+        (#164). The activity half reports that gap; the identity half stands."""
+        user = {"euid": 12, "euname": "value\\", "eugroup": "services"}
+        with (
+            t(GET_ENDUSERS, return_value=ok(data=[user])),
+            t(GET_ENDPOINTS, return_value=ok(data=[])),
+            t(QUERY_LOGS, return_value=ok(logs=[])) as logs,
+        ):
+            result = await handlers.run_identity_profile(IdentityProfileParams(euid=12))
+        logs.assert_not_called()
+        assert isinstance(result.recent_activity, FeatureGap)
+        assert "backslash" in result.recent_activity.reason
+
     async def test_endpoint_failure_degrades_to_warning(self):
         with (
             t(GET_ENDUSERS, return_value=ok(data=[USER_ALICE])),
