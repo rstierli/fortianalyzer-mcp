@@ -354,10 +354,11 @@ class FPEEngine:
             # Deliberately does not echo the offending value: the key is a secret.
             raise MaskingError("masking key must be 32, 48 or 64 hex characters (AES-128/192/256)")
         self._mask_suffix = mask_suffix.lower().lstrip(".")
-        # The v1 deprecation window. Open by default for one release:
-        # tokens already sitting in a live conversation have to keep
-        # resolving, or closing the window silently breaks every session
-        # that was mid-flight when the server restarted.
+        # The v1 deprecation window. Open by default here, for the v1
+        # primitives and their golden vectors; the server builds its engine
+        # from FAZ_MASKING_ACCEPT_V1_TOKENS, which is closed by default since
+        # 2.15.1, because a re-cased v1 token decrypts to a different value
+        # instead of failing.
         self._accept_v1_tokens = accept_v1_tokens
         self._seen_v1_token = False
         # One-way key fingerprint carried in marked tokens so a token minted
