@@ -6,6 +6,7 @@ Implements the two-step TID-based log search workflow.
 
 import asyncio
 import logging
+import re
 from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
@@ -35,6 +36,10 @@ from fortianalyzer_mcp.utils.responses import (
 )
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import (
+    ADOM_PATTERN,
+    DEVICE_NAME_PATTERN,
+    DEVICE_SERIAL_PATTERN,
+    DEVICE_VM_SERIAL_PATTERN,
     ValidationError,
     build_device_filter,
     get_default_adom,
@@ -1780,6 +1785,260 @@ async def get_logfiles_state(
     except Exception as e:
         logger.error(f"Failed to get log files state: {e}")
         return {"status": "error", "message": redact(str(e))}
+
+
+#: Current log file of a logtype on disk. Rotated files have their own names,
+#: which get_logfiles_state lists.
+_CURRENT_LOG_FILES = {"traffic": "tlog.log", "event": "elog.log"}
+
+#: The logtype a file's name says it holds. The appliance does not check
+#: ``logtype`` against the file (live 7.6.7 serves elog.log under
+#: logtype=traffic), so only this server notices a mismatch, and it matters:
+#: the logtype picks the field vocabulary for ``filters`` and ``fields``.
+_LOGTYPE_OF_FILE_PREFIX = {"tlog": "traffic", "elog": "event"}
+
+#: The endpoint's documented maximum (FNDN 7.2 to 8.0: ``limit`` max 500),
+#: below the logsearch fetch's 1000 that _clamp_limit applies.
+_LOGFILE_SEARCH_LIMIT_MAX = 500
+
+#: A bare file name as get_logfiles_state lists them ("tlog.log",
+#: "tlog.1778137200.log.zst"). No separators, so no path to walk.
+_LOGFILE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def _validate_logfile_name(filename: str) -> str:
+    """Refuse anything that is not a bare log file name."""
+    filename = filename.strip()
+    if not _LOGFILE_NAME_RE.match(filename) or ".." in filename:
+        raise ValidationError(
+            f"Invalid log file name '{filename}'. Pass a name as get_logfiles_state "
+            "lists it, e.g. 'tlog.log'."
+        )
+    return filename
+
+
+def _validate_logfile_device(device: str) -> str:
+    """A serial, uppercased as the appliance stores it, or a device name."""
+    device = (device or "").strip()
+    upper = device.upper()
+    if DEVICE_SERIAL_PATTERN.match(upper) or DEVICE_VM_SERIAL_PATTERN.match(upper):
+        return upper
+    if not DEVICE_NAME_PATTERN.match(device):
+        raise ValidationError(
+            f"Invalid device '{device}'. Pass a serial or a device name (1-64 "
+            "characters: letters, digits, '_', '-', '.'), without a [vdom] suffix."
+        )
+    return device
+
+
+async def _device_serial(
+    client: FortiAnalyzerClient, adom: str, device: str
+) -> str | dict[str, Any]:
+    """Resolve a device to its serial, or return the error response.
+
+    The logfiles endpoints only take a serial. An HA cluster has one per member,
+    so a name can be ambiguous; only the caller knows which member it wants.
+
+    The errors carry the device under ``devname`` and the serials under
+    ``candidates[].devid``, not only in ``message``. Masking types those keys,
+    and what it masks there it also replaces in the message; a value only the
+    message carried would leave in clear under FAZ_MASK_DEVICE_IDENTITY.
+    """
+    if DEVICE_SERIAL_PATTERN.match(device) or DEVICE_VM_SERIAL_PATTERN.match(device):
+        return device
+    stats = await client.get_logstats(adom=adom)
+    data = stats.get("data") if isinstance(stats, dict) else None
+    devices = data.get("devs") if isinstance(data, dict) else None
+    serials = sorted(
+        {
+            str(d["devid"])
+            for d in devices or []
+            if isinstance(d, dict) and d.get("devname") == device and d.get("devid")
+        }
+    )
+    if len(serials) == 1:
+        return serials[0]
+    if serials:
+        return error_response(
+            error="ambiguous_device",
+            message=(
+                f"Device '{device}' logs under {len(serials)} serials in ADOM '{adom}', "
+                "one per HA member. Pass one candidate's devid as device."
+            ),
+            operation="search_log_file",
+            adom=adom,
+            devname=device,
+            candidates=[{"devid": serial, "devname": device} for serial in serials],
+        )
+    return error_response(
+        error="device_not_found",
+        message=f"Device '{device}' has no logs in ADOM '{adom}'.",
+        operation="search_log_file",
+        adom=adom,
+        devname=device,
+        recommendation="get_log_stats lists the devices logging to this ADOM.",
+    )
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def search_log_file(
+    device: str,
+    adom: str | None = None,
+    logtype: str = "traffic",
+    filter: str | None = None,
+    filters: list[FilterCondition] | None = None,
+    fields: list[str] | None = None,
+    vdom: str = "root",
+    filename: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Search one device's raw log file on disk.
+
+    Prefer query_logs. Use this when query_logs and get_log_stats disagree:
+    query_logs reads the log database, so it returns nothing while
+    get_log_stats shows ``log-db-size`` 0 for devices that are logging. This
+    happens on a FortiManager with the FortiAnalyzer feature enabled. This tool
+    reads the file instead, one device at a time, and has no time range:
+    narrow it with filters and page with ``offset``.
+
+    Args:
+        device: Device serial or name. An HA cluster needs a member's serial.
+        adom: ADOM name (default: from config DEFAULT_ADOM)
+        logtype: Log type, e.g. "traffic" or "event". It picks the default
+            file and the field names `filters` and `fields` accept; which rows
+            come back is up to the file.
+        filter: Raw filter string, e.g. "srcip==10.0.0.1", same syntax as
+            query_logs. Mutually exclusive with `filters`.
+        filters: Structured conditions, as in query_logs. Prefer these.
+        fields: Field names; ["*"] for all, omitted for the curated set
+        vdom: VDOM (default: "root")
+        filename: File to search (default: the logtype's current file; only
+            traffic and event have one). get_logfiles_state lists rotated
+            files. The current file grows while you page it, so its pages can
+            shift; a rotated file pages stably.
+        limit: Maximum rows to return (1-500, the endpoint's maximum)
+        offset: Matching rows to skip
+
+    Returns:
+        dict: status, adom, devid (the serial searched), vdom, filename,
+        logtype, filter (as sent), count, total (matching rows in the file, or
+        None), has_more, next_offset (None on the last page), logs,
+        fields_returned, offset, limit, warnings; or an error response
+    """
+    try:
+        adom = validate_adom(adom or get_default_adom())
+        logtype = validate_log_type(logtype)
+        device = _validate_logfile_device(device)
+        vdom = (vdom or "").strip()
+        if not ADOM_PATTERN.match(vdom):
+            raise ValidationError(f"Invalid VDOM name '{vdom}'")
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+            raise ValidationError(f"offset must be a non-negative integer, got {offset!r}")
+        if filters and filter:
+            return error_response(
+                error="conflicting_filter_input",
+                message=(
+                    "Pass either 'filters' (structured conditions) or 'filter' (a raw "
+                    "FortiAnalyzer filter string), not both."
+                ),
+                operation="search_log_file",
+                adom=adom,
+                logtype=logtype,
+            )
+        requested_limit = limit
+        limit = min(_clamp_limit(limit), _LOGFILE_SEARCH_LIMIT_MAX)
+        warnings: list[str] = []
+        if requested_limit != limit:
+            warnings.append(
+                f"Requested limit {requested_limit} was clamped to {limit} "
+                f"(the log file search allows 1-{_LOGFILE_SEARCH_LIMIT_MAX} rows per call)."
+            )
+
+        if filename:
+            filename = _validate_logfile_name(filename)
+            file_logtype = _LOGTYPE_OF_FILE_PREFIX.get(filename.split(".", 1)[0])
+            if file_logtype and file_logtype != logtype:
+                warnings.append(
+                    f"{filename} holds {file_logtype} logs, but filters and fields use "
+                    f"the field names of logtype '{logtype}'. Pass logtype='{file_logtype}'."
+                )
+        else:
+            filename = _CURRENT_LOG_FILES.get(logtype)
+            if not filename:
+                return error_response(
+                    error="filename_required",
+                    message=(
+                        f"Pass filename for logtype '{logtype}': only traffic and event "
+                        "have a default file."
+                    ),
+                    operation="search_log_file",
+                    adom=adom,
+                    logtype=logtype,
+                    recommendation="get_logfiles_state lists the device's log files.",
+                )
+        if filters:
+            filter, filter_warnings = compile_to_string(filters, logtype)
+            warnings.extend(filter_warnings)
+        projection, projection_warnings = resolve_projection(logtype, fields)
+        warnings.extend(projection_warnings)
+
+        client = _get_client()
+        serial = await _device_serial(client, adom, device)
+        if isinstance(serial, dict):
+            return serial
+
+        result = await client.search_logfiles(
+            adom=adom,
+            devid=serial,
+            vdom=vdom,
+            filename=filename,
+            logtype=logtype,
+            filter=filter,
+            limit=limit,
+            offset=offset,
+        )
+        rows = _normalize_logs(result.get("data"))
+        logs = project_rows(rows, projection)
+        # total-count is the number of rows in the file that match the filter,
+        # and offset counts matching rows (measured on a rotated 7.6.7 file).
+        total = _coerce_total(result.get("total-count"))
+        has_more = _compute_has_more(offset, len(rows), limit, total)
+        # The serial goes out as devid, not device: masking types device as a
+        # hostname, which would lowercase the serial and break the round trip,
+        # and would mask it even with device-identity masking off.
+        return {
+            "status": "success",
+            "adom": adom,
+            "devid": serial,
+            "vdom": vdom,
+            "filename": filename,
+            "logtype": logtype,
+            "filter": filter,
+            "count": len(logs),
+            "total": total,
+            "has_more": has_more,
+            "next_offset": offset + len(rows) if has_more else None,
+            "logs": logs,
+            "fields_returned": fields_returned(logs, projection),
+            "offset": offset,
+            "limit": limit,
+            "warnings": warnings,
+        }
+    except ValidationError as e:
+        return error_response(
+            error="validation_error",
+            message=f"Validation error: {e}",
+            operation="search_log_file",
+        )
+    except Exception as e:
+        logger.error(f"Failed to search log file: {e}")
+        return error_response(
+            error="faz_operation_failed",
+            message=str(e),
+            operation="search_log_file",
+            retry_count=getattr(e, "retries_attempted", 0),
+        )
 
 
 @mcp.tool(annotations=READ_ONLY)

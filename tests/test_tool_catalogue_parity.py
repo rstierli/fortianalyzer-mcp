@@ -10,11 +10,11 @@ execute, and listed neither get_api_ratelimit nor update_api_ratelimit.
 This test converts that drift into a failing suite.
 
 **This file's premise only holds when ``FAZ_TOOL_MODE`` is not ``dynamic``.**
-``TOOL_CATALOGUE`` describes the full-mode surface (73 tools), and the three
+``TOOL_CATALOGUE`` describes the full-mode surface (74 tools), and the three
 tests that diff it against ``_registered_tool_names()`` assume that is what
 ``fortianalyzer_mcp.server.mcp`` actually has registered. Running the *whole
 test suite* with ``FAZ_TOOL_MODE=dynamic`` breaks that assumption in a way
-that is easy to misdiagnose as "3 discovery tools instead of 73": dynamic
+that is easy to misdiagnose as "3 discovery tools instead of 74": dynamic
 mode's own ``execute_advanced_tool`` lazily imports all twelve tool modules
 the first time anything actually calls it (``server.py``, by design -- see
 the brief for Task 9), and every one of those modules' ``@mcp.tool()``
@@ -23,7 +23,7 @@ decorators binds unconditionally to the one process-global
 discovery tools already live on. If anything else collected in the same
 pytest session exercises that dispatch path -- ``test_dynamic_mode_filters.py``
 does, via its own ``execute_advanced_tool`` fixture -- the registered set
-measured here is neither 3 nor 73 but 76 (73 + 3, both coexisting on the same
+measured here is neither 3 nor 74 but 77 (74 + 3, both coexisting on the same
 singleton), and whether that lazy import has already fired by the time a
 given test runs depends on collection/execution order rather than on
 anything this file controls. The three tests below are skipped under
@@ -52,11 +52,11 @@ import pytest
 from fortianalyzer_mcp.server import TOOL_CATALOGUE_NAMES
 
 _DYNAMIC_MODE_REASON = (
-    "TOOL_CATALOGUE describes full mode's 73 tools; under a session-wide "
+    "TOOL_CATALOGUE describes full mode's 74 tools; under a session-wide "
     "FAZ_TOOL_MODE=dynamic, execute_advanced_tool's lazy tool-module import "
     "(triggered elsewhere in the suite, e.g. test_dynamic_mode_filters.py) "
-    "registers all 73 full-mode tools alongside dynamic mode's 3 discovery "
-    "tools on the same shared mcp singleton -- 76, not 3 and not 73 -- making "
+    "registers all 74 full-mode tools alongside dynamic mode's 3 discovery "
+    "tools on the same shared mcp singleton -- 77, not 3 and not 74 -- making "
     "a diff against the full-mode catalogue meaningless and order-dependent."
 )
 skip_if_dynamic_mode = pytest.mark.skipif(
