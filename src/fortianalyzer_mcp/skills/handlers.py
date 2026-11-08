@@ -1147,6 +1147,9 @@ async def run_alert_rules(params: AlertRulesParams) -> AlertRulesResult:
         get_alert_handlers,
         adom=params.adom,
         handler_type=params.handler_type,
+        # The skill counts and returns the rules, so it asks for them; the
+        # tool leaves them out by default.
+        include_rules=True,
     )
     if handlers_res is None:
         raise SkillExecutionError(f"could not retrieve alert handlers ({err})")

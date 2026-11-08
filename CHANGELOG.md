@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`get_alert_handlers` leaves the rules out by default.** `include_rules` now defaults to `false`, so each handler's `rule` list is replaced by `rule_count`. With every rule, a stock FortiAnalyzer 8.0.2 catalogue (111 basic handlers) is one server-sent event of 1,090,163 bytes, over the 1 MiB event limit the mcp Python SDK reads with, so a client built on it failed on the plain call with the 2.15 default (#172 added the option and kept the old default). The plain call now returns names, ids and rule counts. **Pass `include_rules=True`** for the full rules, best together with `name_filter`. The `rules` skill asks for them itself and is unchanged.
+
+### Added
+
+- **`scanned_logs` beside `total` in `query_logs` and `fetch_more_logs` (#148).** The `count_only` reply and every row page report how many logs FortiAnalyzer read to find the matches, taken from its `scanned-logs`, when the appliance sends it. It is reported only; `total_is_known` does not depend on it. On #148, `total-count` moved with `limit` on one appliance and did not on 7.6.7, 7.6.8 or 8.0.2, measured over the same closed 15-minute window: on 7.6.7, `count_only` returned 15,107 rows at limit 1, 100 and 1000, and with `action==deny` 3,222 rows with `scanned-logs` 16,195 at all three. Treating a full page as a lower bound, as first proposed there, would have marked those exact counts as floors, so that is not done. This field is there so the appliance that differs can be measured.
+
+### Security
+
+- **SECURITY.md points to GitHub's private vulnerability reporting.** Reports go to the repository's Security tab ("Report a vulnerability"), switched on 2026-11-06; email stays as the fallback.
+
 ## [2.15.1] - 2026-11-08
 
 Patch release. **Upgrade if you run with masking on (`MASKING_ENABLED=true`):** a username token that a model re-cased in its reply could resolve to a different user instead of failing, because the server still accepted the old, untagged v1 token format. v1 tokens are now refused by default. Nothing the server emits is affected: it has minted only v2 tokens since 2.14.0.

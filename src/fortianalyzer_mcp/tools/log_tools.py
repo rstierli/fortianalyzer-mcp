@@ -223,6 +223,19 @@ def _coerce_total(value: Any) -> int | None:
     return None
 
 
+def _scanned_logs(page: dict[str, Any]) -> dict[str, int]:
+    """``scanned_logs`` for a response, or nothing when the appliance sent none.
+
+    How many logs the appliance read to find the matches, beside
+    ``total``. Reported only: nothing here decides whether ``total`` is
+    exact from it. #148 saw ``total-count`` move with ``limit`` on one
+    appliance and not on 7.6.7, 7.6.8 or 8.0.2, and whether this figure
+    moves with it there is not measured yet.
+    """
+    scanned = page.get("scanned_logs")
+    return {"scanned_logs": scanned} if isinstance(scanned, int) else {}
+
+
 def _normalize_logs(data: Any) -> list[Any]:
     """Normalize a logsearch ``data`` field to a list."""
     if isinstance(data, list):
@@ -379,11 +392,17 @@ async def _run_logsearch_page_unlocked(
                     delivered = True
                     logs = _normalize_logs(fetch_result.get("data"))
                     total = _coerce_total(fetch_result.get("total-count"))
+                    # Reported, never reasoned on (#148): how many logs the
+                    # appliance read to find the matches.
+                    scanned = _coerce_total(fetch_result.get("scanned-logs"))
+                    page = {"timed_out": False, "tid": tid, "logs": logs, "total": total}
+                    if scanned is not None:
+                        page["scanned_logs"] = scanned
                     if _page_is_final(logs, total, offset):
-                        return {"timed_out": False, "tid": tid, "logs": logs, "total": total}
+                        return page
                     # Premature 100%: empty page while total claims rows here -> recover.
                     if reissues_left <= 0:
-                        return {"timed_out": False, "tid": tid, "logs": logs, "total": total}
+                        return page
                     reissue = True
                     break
 
@@ -613,6 +632,8 @@ async def query_logs(
         With count_only:
             - status, adom, logtype, filter, time_range, timezone, warnings
             - total, total_is_known, count_source
+            - scanned_logs: how many logs the appliance read to find them,
+              when it says (reported only, not used to judge `total`)
 
         With no aggregation, the rows shape:
             - status: "success" or "error"
@@ -624,6 +645,8 @@ async def query_logs(
             - page_total: The raw FortiAnalyzer total-count observed for this page's
               search (the live per-page figure; equals total on page 0)
             - initial_total: The first-page baseline (equals total on page 0)
+            - scanned_logs: How many logs the appliance read for this page's
+              search, when it says (reported only)
             - total_count_stability: "single_observation" on page 0 (or "unknown" when
               no count was returned)
             - total_drift_detected: False on page 0; see fetch_more_logs for drift
@@ -1027,6 +1050,7 @@ async def query_logs(
                 "total": total,
                 "total_is_known": total is not None,
                 "count_source": "logsearch_total_count",
+                **_scanned_logs(page),
                 "time_range": time_range_dict,
                 "timezone": tz_name,
                 "filter": filter,
@@ -1153,6 +1177,7 @@ async def query_logs(
             "total_is_known": total_is_known,
             "page_total": total,
             "initial_total": total,
+            **_scanned_logs(page),
             "total_count_stability": page0_stability,
             "total_drift_detected": False,
             "total_delta": page0_delta,
@@ -1288,6 +1313,8 @@ async def fetch_more_logs(
             - page_total: The raw FortiAnalyzer total-count observed for THIS page's
               re-run search (the live figure; may differ from total on a busy window)
             - initial_total: The first-page baseline `total` was derived from
+            - scanned_logs: How many logs the appliance read for THIS page's
+              search, when it says (reported only)
             - total_count_stability: "stable" (page == baseline) | "drifted" (page !=
               baseline) | "unknown" (no comparable count this page)
             - total_drift_detected: True when this page's count disagrees with the baseline
@@ -1481,6 +1508,7 @@ async def fetch_more_logs(
             "total_is_known": total_is_known,
             "page_total": page_total,
             "initial_total": initial_total,
+            **_scanned_logs(page),
             "total_count_stability": total_count_stability,
             "total_drift_detected": total_drift_detected,
             "total_delta": total_delta,
