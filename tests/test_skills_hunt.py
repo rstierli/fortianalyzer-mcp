@@ -487,6 +487,25 @@ class TestHuntDispatch:
         assert result["status"] == "error"
         assert result["error"] == "invalid_skill_params"
 
+    @pytest.mark.parametrize(
+        "params",
+        [
+            {"ttp": """T1071 "a" 'b'"""},
+            {"indicator": {"value": """dead"beef'""", "type": "Hash"}},
+            {"indicator": {"value": "198.51.100.7\\", "type": "IP"}},
+        ],
+        ids=["ttp", "hash", "ip"],
+    )
+    async def test_unwritable_caller_pivot_is_an_invalid_parameter(self, params):
+        """A caller's indicator or TTP that no literal can hold is their input
+        error, and no search is sent with it."""
+        with t(QUERY_LOGS, return_value=logs_ok([])) as query:
+            result = await faz_skill(skill="hunt", params=params)
+        assert result["status"] == "error"
+        assert result["error"] == "invalid_skill_params"
+        assert "quote characters" in result["message"] or "backslash" in result["message"]
+        query.assert_not_called()
+
 
 class TestSweepPivotOperator:
     """#173: FortiAnalyzer 7.6.8 and 8.0.2 answer ``=~`` with ``Invalid
