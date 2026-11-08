@@ -108,7 +108,7 @@ class TestHuntCatalog:
 
     def test_filter_and_ttp_together_are_one_subject(self):
         # filter+ttp count as a single (hypothesis) shape, not two subjects.
-        HuntParams(filter="attack=~x", ttp="T1071")
+        HuntParams(filter='attack like "%x%"', ttp="T1071")
 
 
 class TestHuntSweep:
@@ -151,9 +151,9 @@ class TestHuntSweep:
                 )
             )
         assert isinstance(result.sweep, HuntSweep)
-        assert result.sweep.pivot_filter == "checksum=~deadbeef"
+        assert result.sweep.pivot_filter == 'checksum like "%deadbeef%"'
         assert isinstance(result.sweep.threat_intel, FeatureGap)
-        assert ql.call_args.kwargs["filter"] == "checksum=~deadbeef"
+        assert ql.call_args.kwargs["filter"] == 'checksum like "%deadbeef%"'
 
     async def test_filter_hypothesis_sweep(self):
         with t(QUERY_LOGS, return_value=logs_ok([{"x": 1}])) as ql:
@@ -458,3 +458,32 @@ class TestHuntDispatch:
         result = await faz_skill(skill="hunt", params={})
         assert result["status"] == "error"
         assert result["error"] == "invalid_skill_params"
+
+
+class TestSweepPivotOperator:
+    """#173: FortiAnalyzer 7.6.8 and 8.0.2 answer ``=~`` with ``Invalid
+    filter``, so the substring pivots are written with ``like``."""
+
+    def test_ttp_pivot_is_a_like_clause(self):
+        pivot = handlers._sweep_pivot(HuntParams(ttp="T1071"))
+        assert pivot == 'attack like "%T1071%"'
+
+    def test_hash_pivot_is_a_like_clause(self):
+        pivot = handlers._sweep_pivot(
+            HuntParams(indicator=IndicatorSubject(value="deadbeef", type="Hash"))
+        )
+        assert pivot == 'checksum like "%deadbeef%"'
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            HuntParams(ttp="T1071"),
+            HuntParams(indicator=IndicatorSubject(value="deadbeef", type="Hash")),
+        ],
+    )
+    def test_no_pivot_emits_the_rejected_operator(self, params):
+        assert "=~" not in handlers._sweep_pivot(params)
+
+    def test_a_quote_in_the_ttp_stays_inside_the_pattern(self):
+        pivot = handlers._sweep_pivot(HuntParams(ttp='T1071" or srcip=="10.0.0.1'))
+        assert pivot == 'attack like "%T1071\\" or srcip==\\"10.0.0.1%"'

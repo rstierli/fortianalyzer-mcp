@@ -2599,6 +2599,18 @@ def _score_enduser_anomaly(
     return (any(flags), basis)
 
 
+def _substring_clause(field: str, value: str, name: str) -> str:
+    """A ``like`` substring clause, spelled as the structured ``contains`` op.
+
+    FortiAnalyzer 7.6.8 and 8.0.2 reject ``=~`` as ``Invalid filter`` (#173).
+    The wildcards go through the sanitiser with the value, so the pattern is
+    quoted as one literal, the same as ``query/filters.py`` compiles it.
+    """
+    from fortianalyzer_mcp.utils.validation import sanitize_filter_value
+
+    return f"{field} like {sanitize_filter_value(f'%{value}%', name)}"
+
+
 def _sweep_pivot(params: HuntParams) -> str | None:
     """The filter clause the sweep searches run on — auditable, never a guess.
 
@@ -2619,7 +2631,6 @@ def _sweep_pivot(params: HuntParams) -> str | None:
         return params.filter
 
     if params.indicator is not None:
-        value = sanitize_filter_value(params.indicator.value, "indicator")
         field = {
             "IP": "srcip",
             "Domain": "hostname",
@@ -2629,11 +2640,11 @@ def _sweep_pivot(params: HuntParams) -> str | None:
         # Hash is matched as a substring (the checksum field name varies by
         # logtype); IP/Domain/URL as equality.
         if params.indicator.type == "Hash":
-            return f"{field}=~{value}"
-        return f"{field}=={value}"
+            return _substring_clause(field, params.indicator.value, "indicator")
+        return f"{field}=={sanitize_filter_value(params.indicator.value, 'indicator')}"
 
     if params.ttp is not None:
-        return f"attack=~{sanitize_filter_value(params.ttp, 'ttp')}"
+        return _substring_clause("attack", params.ttp, "ttp")
 
     return None
 
