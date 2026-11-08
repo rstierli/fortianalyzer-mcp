@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`hunt` sweeps on a hash or a TTP reach the appliance (#173).** The `hunt` skill wrote those two pivots as `checksum=~<hash>` and `attack=~<ttp>`, and FortiAnalyzer 7.6.8 and 8.0.2 reject `=~` as `Invalid filter`, so the sweep failed before it searched. They are now `like` substring clauses with `%` wildcards, spelled the way the structured `contains` op compiles them: `checksum like "%<hash>%"`, `attack like "%<ttp>%"`. Not yet run against an appliance on these two fields.
 - **The `server` field of wireless DNS events is masked (#171, works #80).** A FortiGate wireless DNS event carries the resolver the client asked in `server`, as an address, and repeats that address inside its `reason` text. `reason` is TEXT, so the address there was masked, but `server` had no entry in the type table and the same row returned the raw address two keys away from its own token. It is now typed `IP_OR_HOST`: an address mints the same token the `reason` text carries, and a name in that slot masks reversibly instead of burning to a placeholder. Measured on FortiAnalyzer 7.6.8 and 8.0.2; in the lab responses the key occurs only in log rows.
 
 ## [2.14.3] - 2026-11-05
