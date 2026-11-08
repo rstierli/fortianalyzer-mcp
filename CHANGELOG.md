@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.16.0] - 2026-11-08
+
+Minor release. **If you call `get_alert_handlers` and read the rules, pass `include_rules=True`:** the tool now leaves each handler's rules out by default and reports `rule_count` instead, because with every rule a stock FortiAnalyzer 8.0.2 catalogue was too large for clients built on the mcp Python SDK. The `alert_rules` skill is unchanged. Also in this release: `query_logs` and `fetch_more_logs` report `scanned_logs` beside `total` (#148), and SECURITY.md points to GitHub's private vulnerability reporting.
+
 ### Changed
 
 - **`get_alert_handlers` leaves the rules out by default.** `include_rules` now defaults to `false`, so each handler's `rule` list is replaced by `rule_count`. With every rule, a stock FortiAnalyzer 8.0.2 catalogue (111 basic handlers) is one server-sent event of 1,090,163 bytes, over the 1 MiB event limit the mcp Python SDK reads with, so a client built on it failed on the plain call with the 2.15 default (#172 added the option and kept the old default). The plain call now returns names, ids and rule counts. **Pass `include_rules=True`** for the full rules, best together with `name_filter`. The `rules` skill asks for them itself and is unchanged.
