@@ -16,7 +16,7 @@ from pydantic import ValidationError
 
 from fortianalyzer_mcp.server import mcp
 from fortianalyzer_mcp.skills.catalog import SKILLS, catalogue
-from fortianalyzer_mcp.skills.handlers import SkillExecutionError
+from fortianalyzer_mcp.skills.handlers import SkillExecutionError, SkillParamError
 from fortianalyzer_mcp.skills.models import SCHEMA_VERSION
 from fortianalyzer_mcp.tool_annotations import READ_ONLY
 from fortianalyzer_mcp.utils.responses import error_response, redact
@@ -102,6 +102,17 @@ async def faz_skill(skill: str, params: dict[str, Any] | None = None) -> dict[st
     except SkillExecutionError as exc:
         return error_response(
             error="skill_failed",
+            message=redact(str(exc)),
+            operation="faz_skill",
+            skill=skill,
+        )
+    except SkillParamError as exc:
+        # A caller-supplied value that no filter literal can hold (#164) is
+        # the caller's input error, like a parameter pydantic refused. A
+        # record value that cannot be written never raises: the handler
+        # reports it as a gap, so anything else that raises is a fault.
+        return error_response(
+            error="invalid_skill_params",
             message=redact(str(exc)),
             operation="faz_skill",
             skill=skill,

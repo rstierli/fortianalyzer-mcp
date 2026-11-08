@@ -113,20 +113,22 @@ def _build_ips_filter(
             sev_parts = [f'severity="{s}"' for s in sev_values]
             filters.append(f"({' or '.join(sev_parts)})")
 
-    # Attack name filter (free text). sanitize_filter_value rejects/escapes
-    # quote/operator/boolean characters before interpolation. Keep the baseline
+    # Attack name filter (free text). sanitize_filter_value refuses what no
+    # filter literal can hold and quotes the rest with the quote character the
+    # value does not contain, before interpolation. Keep the baseline
     # `attack="..."` (single `=`, always quoted) form for backward compatibility.
     if attack_exact:
         safe = sanitize_filter_value(attack_exact, "attack_exact")
-        if not safe.startswith('"'):
+        if not safe.startswith(('"', "'")):
             safe = f'"{safe}"'
         filters.append(f"attack={safe}")
     elif attack_contains:
         # Wildcard search: attack=*Remote.Code.Execution*
         # The wildcard syntax requires an unquoted value, so reject any value
-        # that is not a simple token rather than quoting it.
+        # that is not a simple token rather than quoting it: the sanitiser
+        # quotes with either quote character, and neither fits here.
         safe = sanitize_filter_value(attack_contains, "attack_contains")
-        if safe.startswith('"'):
+        if safe.startswith(('"', "'")):
             raise ValidationError(
                 f"Invalid attack_contains '{attack_contains}'. "
                 "Only letters, digits, '.', '-', '_' and ':' are allowed."

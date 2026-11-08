@@ -9,6 +9,7 @@ import pytest
 import fortianalyzer_mcp.tools.log_tools as log_tools
 import fortianalyzer_mcp.tools.pcap_tools as pcap_tools
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
+from fortianalyzer_mcp.utils.errors import ValidationError
 
 _CUSTOM_RANGE = "2024-01-01 00:00:00|2024-01-02 00:00:00"
 
@@ -155,6 +156,25 @@ class TestIPSFilterBuilder:
         filters = ['severity="critical"', 'action="blocked"', 'pcapurl!=""']
         result = " and ".join(filters)
         assert result == 'severity="critical" and action="blocked" and pcapurl!=""'
+
+
+class TestAttackExactLiteral:
+    def test_a_quote_in_the_name_keeps_one_pair_of_quotes(self) -> None:
+        """The sanitiser puts such a value in single quotes; the builder must
+        not wrap that in double quotes a second time."""
+        result = pcap_tools._build_ips_filter(attack_exact='Drupal "x"')
+        assert result == "attack='Drupal \"x\"'"
+
+    def test_a_plain_name_is_double_quoted_as_before(self) -> None:
+        result = pcap_tools._build_ips_filter(attack_exact="Drupal.RCE")
+        assert result == 'attack="Drupal.RCE"'
+
+    @pytest.mark.parametrize("name", ['Drupal "x"', "Drupal 'x'", "Remote Code"])
+    def test_attack_contains_refuses_anything_but_a_bare_token(self, name: str) -> None:
+        """The wildcard form is unquoted, so a value the sanitiser would quote,
+        in either quote character, cannot be spliced into it."""
+        with pytest.raises(ValidationError, match="attack_contains"):
+            pcap_tools._build_ips_filter(attack_contains=name)
 
 
 class TestPCAPClient:

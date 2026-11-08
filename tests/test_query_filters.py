@@ -52,12 +52,11 @@ class TestStringDialectOperators:
         result, _ = compile_to_string([_c("attack", "not_contains", "Botnet")], "attack")
         assert result == '!(attack like "%Botnet%")'
 
-    def test_a_substring_value_is_escaped_inside_the_pattern(self) -> None:
-        """The wildcards go through the sanitiser with the value, so a quote in
-        the value cannot terminate the pattern's own literal."""
+    def test_a_substring_value_is_one_literal_with_its_wildcards(self) -> None:
+        """The pattern is one quoted literal in the quote character the value
+        does not contain, so a quote in the value cannot end it."""
         result, _ = compile_to_string([_c("attack", "contains", 'a" or 1==1 or "')], "attack")
-        assert result == 'attack like "%a\\" or 1==1 or \\"%"'
-        assert result.count('"') - result.count('\\"') == 2
+        assert result == "attack like '%a\" or 1==1 or \"%'"
 
 
 class TestStringDialectCombination:
@@ -106,9 +105,8 @@ class TestValueHandling:
         assert result == 'attack like "%Remote Code%"'
 
     def test_injection_attempt_is_neutralised_by_quoting(self) -> None:
-        result, _ = compile_to_string([_c("srcip", "eq", '1.1.1.1" or 1==1 or "')], "traffic")
-        assert result.startswith('srcip=="')
-        assert result.count('\\"') >= 1
+        result, _ = compile_to_string([_c("srcip", "eq", '192.0.2.10" or 1==1 or "')], "traffic")
+        assert result == "srcip=='192.0.2.10\" or 1==1 or \"'"
 
     def test_integer_values_survive_as_numbers(self) -> None:
         result, _ = compile_to_string([_c("dstport", "eq", 443)], "traffic")
@@ -458,3 +456,54 @@ class TestArrayDialect:
     def test_unknown_device_field_raises_because_the_set_is_complete(self) -> None:
         with pytest.raises(ValidationError):
             compile_to_array([_c("not_a_device_field", "eq", "x")], "device")
+
+
+class TestLiteralSpelling:
+    """The compiled spellings follow how FortiAnalyzer reads a literal (issue #164)."""
+
+    STORED_REASON = 'Server 192.0.2.10 replied \\"non-existing domain\\"'
+
+    def test_eq_writes_a_backslash_once(self) -> None:
+        result, _ = compile_to_string([_c("msg", "eq", "path\\to")], "traffic")
+        assert result == 'msg=="path\\to"'
+
+    def test_eq_on_the_stored_reason_value_is_the_spelling_that_matched(self) -> None:
+        """Measured on both builds: this returned the row, the doubled form 0 rows."""
+        result, _ = compile_to_string([_c("reason", "eq", self.STORED_REASON)], "event")
+        assert result == f"reason=='{self.STORED_REASON}'"
+
+    def test_contains_doubles_a_backslash(self) -> None:
+        """Under ``like`` a doubled backslash is one literal backslash (measured)."""
+        result, _ = compile_to_string([_c("msg", "contains", "path\\to")], "traffic")
+        assert result == 'msg like "%path\\\\to%"'
+
+    def test_contains_on_the_stored_reason_value(self) -> None:
+        result, _ = compile_to_string([_c("reason", "contains", self.STORED_REASON)], "event")
+        assert result == (
+            "reason like '%Server 192.0.2.10 replied \\\\\"non-existing domain\\\\\"%'"
+        )
+
+    def test_contains_escapes_wildcard_characters_in_the_value(self) -> None:
+        result, _ = compile_to_string([_c("user", "contains", "j_doe")], "traffic")
+        assert result == 'user like "%j\\_doe%"'
+
+    def test_eq_refuses_a_trailing_backslash(self) -> None:
+        """A quote after a backslash does not close the literal, however many
+        backslashes precede it (measured), so no spelling of this value stays
+        inside its quotes once another clause follows."""
+        with pytest.raises(ValidationError, match="ends in a backslash"):
+            compile_to_string([_c("action", "eq", "accept\\")], "traffic")
+
+    def test_contains_keeps_surrounding_spaces(self) -> None:
+        """A substring is matched as given, spaces included."""
+        result, _ = compile_to_string([_c("msg", "contains", " value ")], "traffic")
+        assert result == 'msg like "% value %"'
+
+    def test_eq_refuses_a_run_of_trailing_backslashes(self) -> None:
+        with pytest.raises(ValidationError, match="ends in a backslash"):
+            compile_to_string([_c("action", "eq", "accept\\\\")], "traffic")
+
+    def test_contains_accepts_a_trailing_backslash(self) -> None:
+        """The wildcard follows it, so the closing quote is not the next character."""
+        result, _ = compile_to_string([_c("action", "contains", "accept\\")], "traffic")
+        assert result == 'action like "%accept\\\\%"'

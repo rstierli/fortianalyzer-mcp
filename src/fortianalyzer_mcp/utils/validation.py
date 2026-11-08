@@ -688,13 +688,21 @@ def validate_cve(cve: str) -> str:
     return cve.upper()
 
 
-def sanitize_filter_value(value: str, field: str = "filter value") -> str:
-    """Sanitize a free-text value for use in a FAZ log filter expression.
+# How FortiAnalyzer reads a quoted filter literal, measured on 7.6.8 and 8.0.2
+# (issue #164): there is no escape processing. ``==`` compares every character
+# as written, backslashes included, so one stored backslash matches the
+# one-backslash spelling and a doubled one matches nothing. ``like`` reads a
+# doubled backslash as one literal backslash and ``\%`` / ``\_`` as the
+# characters, while a bare ``%`` or ``_`` is a wildcard. In both, a quote that
+# follows a backslash never closes the literal, however many backslashes come
+# before it, and the literal then runs on into whatever follows. So a literal
+# takes the quote character the value does not contain (a bare quote of the
+# other kind inside it was measured inert on both builds), and a value that
+# ends in a backslash cannot be written as a comparison operand at all.
 
-    Safe alphanumeric values (including dots, hyphens, underscores, and
-    colons for IPv6) are returned as-is. Anything else is escaped and
-    wrapped in double quotes so that quote/operator/boolean characters in
-    attacker-controlled input cannot rewrite the surrounding filter.
+
+def _checked_filter_value(value: str, field: str, *, strip: bool = True) -> str:
+    """Refuse an empty value and control characters; strip ``value`` for a comparison.
 
     Control characters are refused outright rather than quoted, matching
     ``validate_pcapurl`` below. Quoting them is not an injection risk -- a
@@ -702,32 +710,97 @@ def sanitize_filter_value(value: str, field: str = "filter value") -> str:
     whole expression with ``Invalid filter`` when one arrives (checked live on
     7.6.6) -- but it fails at the appliance after a round trip instead of at the
     protocol boundary, which is the pattern this layer exists to remove.
-
-    Args:
-        value: Raw filter value.
-        field: Field name used in the error message.
-
-    Returns:
-        Sanitized value safe for interpolation into a filter expression.
-
-    Raises:
-        ValidationError: If the value is empty or holds a control character.
     """
     if not value:
         raise ValidationError(f"{field} cannot be empty")
-    value = value.strip()
-    if not value:
-        raise ValidationError(f"{field} cannot be empty after stripping")
+    if strip:
+        value = value.strip()
+        if not value:
+            raise ValidationError(f"{field} cannot be empty after stripping")
     if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
         raise ValidationError(
             f"{field} contains a control character. FortiAnalyzer rejects the whole "
             "filter expression when one reaches it, so it is refused here instead."
         )
+    return value
+
+
+def _quote_for(value: str, field: str) -> str:
+    """The quote character that can hold ``value`` as one literal."""
+    if '"' not in value:
+        return '"'
+    if "'" not in value:
+        return "'"
+    raise ValidationError(
+        f"{field} holds both quote characters, which this writer does not support: "
+        "FortiAnalyzer reads a filter literal as written, and the literal takes the "
+        "quote character the value does not contain."
+    )
+
+
+def sanitize_filter_value(value: str, field: str = "filter value", *, strip: bool = True) -> str:
+    """Write a free-text value as the operand of ``==`` or another comparison.
+
+    Safe alphanumeric values (including dots, hyphens, underscores, and
+    colons for IPv6) are returned as-is. Anything else is wrapped in the
+    quote character it does not contain, with no escaping, so that
+    quote/operator/boolean characters in attacker-controlled input cannot
+    rewrite the surrounding filter and the value compares as itself.
+
+    Not for ``like``: a bare ``%`` or ``_`` would be a wildcard there and a
+    backslash needs doubling; :func:`like_filter_pattern` writes that form.
+
+    Args:
+        value: Raw filter value.
+        field: Field name used in the error message.
+        strip: Strip surrounding whitespace first. A caller's value is
+            stripped; a value resolved from a masking token is not, because
+            its spaces are part of the stored value it stands for.
+
+    Returns:
+        The value, bare or quoted, safe for interpolation into a filter.
+
+    Raises:
+        ValidationError: If the value is empty, holds a control character,
+            holds both quote characters, or ends in a backslash.
+    """
+    value = _checked_filter_value(value, field, strip=strip)
     if _SAFE_UNQUOTED_FILTER_RE.match(value):
         return value
-    # Escape backslashes first, then double quotes, then wrap in quotes.
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
+    if value.endswith("\\"):
+        raise ValidationError(
+            f"{field} ends in a backslash. FortiAnalyzer takes a quote that follows a "
+            "backslash as part of the value, so the literal would not close; drop the "
+            "backslash, or use a substring match, where the wildcard follows it."
+        )
+    quote = _quote_for(value, field)
+    return f"{quote}{value}{quote}"
+
+
+def like_filter_pattern(value: str, field: str = "filter value") -> str:
+    """Write a free-text value as a quoted ``%...%`` pattern for ``like``.
+
+    A backslash in the value is doubled and ``%`` and ``_`` are escaped, which
+    is how ``like`` reads them as the characters themselves (measured on 7.6.8
+    and 8.0.2); the wildcards around the value stay bare. A value that ends in
+    a backslash is fine here, because the closing wildcard follows it. The
+    value is not stripped: its spaces are part of the substring.
+
+    Args:
+        value: Raw substring to look for.
+        field: Field name used in the error message.
+
+    Returns:
+        The quoted pattern, wildcards included.
+
+    Raises:
+        ValidationError: If the value is empty, holds a control character or
+            holds both quote characters.
+    """
+    value = _checked_filter_value(value, field, strip=False)
+    escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    quote = _quote_for(escaped, field)
+    return f"{quote}%{escaped}%{quote}"
 
 
 def validate_pcapurl(pcapurl: str) -> str:

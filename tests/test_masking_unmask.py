@@ -8,6 +8,7 @@ from fortianalyzer_mcp.masking.fields import IP, TEXT
 from fortianalyzer_mcp.masking.fpe_engine import FPEEngine, begin_v2_verification_budget
 from fortianalyzer_mcp.masking.unmask import ArgUnmasker
 from fortianalyzer_mcp.masking.wrapper import OutputMasker, install_masking
+from fortianalyzer_mcp.utils.errors import ValidationError
 
 KEY = "2DE79D232DF5585D68CE47882AE256D6"
 
@@ -722,7 +723,7 @@ class TestFilterInjectionGuard:
 
         result = unmasker.unmask_filter(expression)
 
-        assert result == f'url{op}"https://ex.example.com/x\\" or srcip==\\"203.0.113.9"'
+        assert result == f"url{op}'https://ex.example.com/x\" or srcip==\"203.0.113.9'"
 
     @pytest.mark.parametrize("op", ("==", "="))
     def test_unquoted_url_with_comma_is_safely_quoted(
@@ -745,14 +746,17 @@ class TestFilterInjectionGuard:
 
         assert unmasker.unmask_filter(f"url=={token}") == f'url=="{plaintext}"'
 
+    @pytest.mark.parametrize("template", ["url=={token}", 'url=="{token}"'], ids=["bare", "quoted"])
     @pytest.mark.parametrize("control", ["\n", "\x01"])
-    def test_control_characters_leave_clause_unresolved(
-        self, unmasker: ArgUnmasker, engine: FPEEngine, control: str
+    def test_control_characters_refuse_the_filter(
+        self, unmasker: ArgUnmasker, engine: FPEEngine, control: str, template: str
     ):
+        """A token left in place would match nothing, which under ``!=``
+        returns every row; the filter is refused instead (#164)."""
         token = engine.mask_url_tail(f"value{control}tail")
-        expression = f"url=={token}"
 
-        assert unmasker.unmask_filter(expression) == expression
+        with pytest.raises(ValidationError, match="control character"):
+            unmasker.unmask_filter(template.format(token=token))
 
     def test_benign_masked_url_still_resolves(self, masker: OutputMasker, unmasker: ArgUnmasker):
         raw = "https://safe.example.com/path?q=1"
@@ -917,3 +921,315 @@ class TestBudgetExhaustionDoesNotDowngradeTheWriteRefusal:
         assert "srcip" not in called, "the write body ran on a marked argument"
         assert isinstance(result, dict)
         assert result.get("status") == "error" or "refus" in str(result).lower()
+
+
+class TestResolvedLiteralEscaping:
+    """Resolved plaintext is written the way FortiAnalyzer reads a literal (issue #164).
+
+    ``==`` compares backslashes literally, ``like`` reads a doubled one as one
+    and ``\\%`` / ``\\_`` as the characters, and a quote after a backslash
+    never closes the literal. The url tail cipher carries every character used
+    here, so the expected values are plaintext round trips.
+    """
+
+    def test_equals_writes_a_resolved_backslash_once(
+        self, unmasker: ArgUnmasker, engine: FPEEngine
+    ):
+        token = engine.mask_url_tail("value\\tail")
+
+        assert unmasker.unmask_filter(f'url=="{token}"') == 'url=="value\\tail"'
+
+    @pytest.mark.parametrize(
+        ("template", "expected"),
+        [
+            ('url like "%{token}%"', 'url like "%a\\_b\\%c%"'),
+            ("url like %{token}%", 'url like "%a\\_b\\%c%"'),
+            ('url like "{token}"', 'url like "a\\_b\\%c"'),
+        ],
+        ids=["quoted", "bare", "no-wildcards"],
+    )
+    def test_like_escapes_the_plaintexts_own_wildcard_characters_for_a_whole_token(
+        self, unmasker: ArgUnmasker, engine: FPEEngine, template: str, expected: str
+    ):
+        """When the whole value is one token, every ``%`` and ``_`` in the
+        plaintext is the plaintext's own; ``like`` reads ``\\%`` and ``\\_`` as
+        the characters (measured), a bare one as a wildcard."""
+        token = engine.mask_url_tail("a_b%c")
+
+        assert unmasker.unmask_filter(template.format(token=token)) == expected
+
+    def test_equals_writes_the_plaintexts_wildcard_characters_as_they_are(
+        self, unmasker: ArgUnmasker, engine: FPEEngine
+    ):
+        token = engine.mask_url_tail("a_b%c")
+
+        assert unmasker.unmask_filter(f'url=="{token}"') == 'url=="a_b%c"'
+
+    def test_like_keeps_the_callers_wildcards_inside_the_pattern(
+        self, unmasker: ArgUnmasker, engine: FPEEngine
+    ):
+        """The caller's own ``_`` and ``%`` inside the pattern are theirs to keep."""
+        token = engine.mint("ip", "192.0.2.10")
+
+        assert (
+            unmasker.unmask_filter(f'msg like "%pre_/{token}/post%"')
+            == 'msg like "%pre_/192.0.2.10/post%"'
+        )
+
+    @pytest.mark.parametrize(
+        ("template", "plaintext", "expected"),
+        [
+            ('url=="{token}"', 'a"b', "url=='a\"b'"),
+            ('url like "%{token}%"', 'a"b', "url like '%a\"b%'"),
+            ("url=='{token}'", "a'b", 'url=="a\'b"'),
+            ("url=={token}", 'a"b', "url=='a\"b'"),
+        ],
+        ids=["equals-to-single", "like-to-single", "equals-to-double", "bare-to-single"],
+    )
+    def test_a_resolved_quote_switches_the_literal_to_the_other_quote_character(
+        self,
+        unmasker: ArgUnmasker,
+        engine: FPEEngine,
+        template: str,
+        plaintext: str,
+        expected: str,
+    ):
+        """There is no escape for a quote, so the literal takes the quote
+        character the value does not contain, and the value compares as itself."""
+        token = engine.mask_url_tail(plaintext)
+
+        assert unmasker.unmask_filter(template.format(token=token)) == expected
+
+    @pytest.mark.parametrize(
+        "template",
+        ['url=="{token}"', 'url!="{token}"', "url=={token}"],
+        ids=["quoted", "quoted-not-equals", "bare"],
+    )
+    def test_a_plaintext_holding_both_quote_characters_refuses_the_filter(
+        self, unmasker: ArgUnmasker, engine: FPEEngine, template: str
+    ):
+        token = engine.mask_url_tail('it\'s "x"')
+
+        with pytest.raises(ValidationError, match="quote"):
+            unmasker.unmask_filter(template.format(token=token))
+
+    def test_a_refusal_reaches_the_tool_call(self, unmasker: ArgUnmasker, engine: FPEEngine):
+        """``unmask_args`` is what the tool wrapper runs; a refused filter must
+        fail the call rather than send the token."""
+        token = engine.mask_url_tail("value\\")
+
+        with pytest.raises(ValidationError, match="backslash"):
+            unmasker.unmask_args({"filter": f'url=="{token}"', "limit": 5})
+
+    @pytest.mark.parametrize("op", ["like", "LIKE"])
+    def test_like_doubles_a_resolved_backslash_in_either_case(
+        self, unmasker: ArgUnmasker, engine: FPEEngine, op: str
+    ):
+        token = engine.mask_url_tail("value\\tail")
+
+        assert unmasker.unmask_filter(f'url {op} "%{token}%"') == f'url {op} "%value\\\\tail%"'
+
+    @pytest.mark.parametrize(
+        "template",
+        [
+            'url=="{token}"',
+            "url=='{token}'",
+            'url!="{token}"',
+            'url like "{token}"',
+            "url like '{token}'",
+            "url=={token}",
+            "url!={token}",
+        ],
+        ids=[
+            "double-equals",
+            "single-equals",
+            "double-not-equals",
+            "double-like",
+            "single-like",
+            "bare",
+            "bare-not-equals",
+        ],
+    )
+    @pytest.mark.parametrize("plaintext", ["value\\", "value\\\\"], ids=["one", "two"])
+    def test_a_plaintext_ending_in_a_backslash_refuses_the_filter(
+        self, unmasker: ArgUnmasker, engine: FPEEngine, template: str, plaintext: str
+    ):
+        """Written back, the closing quote would follow a backslash, however
+        many precede it, and the literal would run on into the next clause.
+        Leaving the token would match nothing, which under ``!=`` returns
+        every row, so the whole filter is refused instead."""
+        token = engine.mask_url_tail(plaintext)
+
+        with pytest.raises(ValidationError, match="backslash"):
+            unmasker.unmask_filter(template.format(token=token))
+
+    def test_like_with_a_trailing_wildcard_takes_a_trailing_backslash(
+        self, unmasker: ArgUnmasker, engine: FPEEngine
+    ):
+        token = engine.mask_url_tail("value\\")
+
+        assert unmasker.unmask_filter(f'url like "%{token}%"') == 'url like "%value\\\\%"'
+
+    def test_bare_token_with_a_quote_resolves_in_single_quotes(
+        self, unmasker: ArgUnmasker, engine: FPEEngine
+    ):
+        token = engine.mask_url_tail('a"b')
+
+        assert unmasker.unmask_filter(f"url=={token}") == "url=='a\"b'"
+
+    @pytest.mark.parametrize("op", ["==", "!="])
+    @pytest.mark.parametrize("plaintext", ["/a ", " /a", "/a b "], ids=["trail", "lead", "both"])
+    def test_bare_token_keeps_the_plaintexts_own_spaces(
+        self, unmasker: ArgUnmasker, engine: FPEEngine, op: str, plaintext: str
+    ):
+        """A bare token is quoted on the way out, as a caller's quoted one is,
+        and its plaintext is not stripped: ``url!="/a"`` for a stored
+        ``"/a "`` would return the very rows the caller excluded."""
+        token = engine.mask_url_tail(plaintext)
+
+        assert unmasker.unmask_filter(f"url{op}{token} and action==deny") == (
+            f'url{op}"{plaintext}" and action==deny'
+        )
+
+    @pytest.mark.parametrize(
+        ("template", "expected"),
+        [
+            ("url like %{token}%", 'url like "%value\\\\tail%"'),
+            ("url like {token}%", 'url like "value\\\\tail%"'),
+            ("url like %{token}", 'url like "%value\\\\tail"'),
+            ("url like {token}", 'url like "value\\\\tail"'),
+        ],
+        ids=["both", "trailing", "leading", "none"],
+    )
+    def test_bare_like_keeps_the_callers_wildcard_placement(
+        self, unmasker: ArgUnmasker, engine: FPEEngine, template: str, expected: str
+    ):
+        token = engine.mask_url_tail("value\\tail")
+
+        assert unmasker.unmask_filter(template.format(token=token)) == expected
+
+    def test_a_recased_whole_token_still_escapes_its_wildcards(
+        self, unmasker: ArgUnmasker, engine: FPEEngine
+    ):
+        """The marker matches case-insensitively when the token resolves, so it
+        must when deciding the value was one token: ``db_01`` as a bare
+        ``_`` would match ``dbX01`` too, and under ``!(...)`` exclude it."""
+        token = engine.mint("hostname", "db_01")
+        marker, rest = token.split("-", 1)
+        recased = f"{marker.upper()}-{rest}"
+
+        assert unmasker.unmask_filter(f'hostname like "%{recased}%"') == (
+            'hostname like "%db\\_01%"'
+        )
+
+    def test_bare_like_pattern_is_written_for_like(self, unmasker: ArgUnmasker, engine: FPEEngine):
+        """An unquoted ``like`` pattern is quoted on the way out, and its
+        plaintext is written for ``like``, not for ``==``: the doubled
+        backslash is what matches one stored backslash."""
+        token = engine.mask_url_tail("value\\")
+
+        assert unmasker.unmask_filter(f"url like %{token}%") == 'url like "%value\\\\%"'
+
+
+class TestLiteralsReadByTheMeasuredRule:
+    """A quoted literal ends where the appliance ends it (issue #164).
+
+    Measured on 7.6.8 and 8.0.2: the same quote closes a literal unless a
+    backslash precedes it, however many backslashes there are; the other
+    quote character is inert inside it. The clause regex reads a literal that
+    way, so a token inside such a literal resolves as part of the value, and
+    a clause after such a literal is still found. Clause-shaped text inside a
+    literal that no clause precedes is the caller's value and is left alone.
+    """
+
+    def test_a_token_inside_a_literal_holding_the_other_quote_resolves(
+        self, unmasker: ArgUnmasker, engine: FPEEngine
+    ):
+        token = engine.mint("ip", "192.0.2.10")
+
+        assert (
+            unmasker.unmask_filter(f'msg=="it\'s from {token}" and action==accept')
+            == 'msg=="it\'s from 192.0.2.10" and action==accept'
+        )
+
+    def test_a_token_in_such_a_literal_resolves_under_not_equals(
+        self, unmasker: ArgUnmasker, engine: FPEEngine
+    ):
+        """Left in place, the token would match nothing and ``!=`` would
+        return every row."""
+        token = engine.mint("ip", "192.0.2.10")
+
+        assert (
+            unmasker.unmask_filter(f'msg!="it\'s from {token}"') == 'msg!="it\'s from 192.0.2.10"'
+        )
+
+    @pytest.mark.parametrize("run", [1, 2, 4], ids=["one", "two", "four"])
+    @pytest.mark.parametrize("quote", ['"', "'"], ids=["double", "single"])
+    def test_a_quote_after_a_backslash_does_not_end_the_literal(
+        self, unmasker: ArgUnmasker, engine: FPEEngine, quote: str, run: int
+    ):
+        """The literal runs on past the backslash-quote, so the token after it
+        is still inside the value and resolves there."""
+        token = engine.mint("ip", "192.0.2.10")
+        backslashes = chr(92) * run
+        expression = f"msg=={quote}a{backslashes}{quote} from {token}{quote}"
+
+        result = unmasker.unmask_filter(expression)
+
+        assert result.startswith("msg==")
+        assert result.endswith("192.0.2.10" + result[5])
+        assert f"a{backslashes}{quote} from 192.0.2.10" in result
+
+    def test_the_stored_reason_value_in_double_quotes_compiles_to_the_measured_spelling(
+        self, unmasker: ArgUnmasker, engine: FPEEngine
+    ):
+        """The #164 opening case: a caller literal with a backslash before each
+        quote and a masked address inside. The resolved literal switches to
+        single quotes, which is the spelling measured to return the row."""
+        token = engine.mint("ip", "192.0.2.10")
+        expression = (
+            f'reason=="Server {token} replied \\"non-existing domain\\"" and subtype==wireless'
+        )
+
+        assert unmasker.unmask_filter(expression) == (
+            "reason=='Server 192.0.2.10 replied \\\"non-existing domain\\\"' and subtype==wireless"
+        )
+
+    @pytest.mark.parametrize(
+        "literal",
+        ['"can\'t set user="', '"a\\\\" user="'],
+        ids=["other-quote-inside", "backslash-quote-inside"],
+    )
+    def test_a_clause_after_a_literal_the_old_regex_could_not_read_resolves(
+        self, unmasker: ArgUnmasker, engine: FPEEngine, literal: str
+    ):
+        """Before, the regex took clause-shaped text inside the literal as a
+        clause and the literal's closing quote as that clause's opening one,
+        so the real ``url!=`` clause was swallowed and its token sent as
+        written, which under ``!=`` returns every row."""
+        token = engine.mask_url_tail("some value")
+        expression = f'msg=={literal} or url!={token} and action=="deny"'
+
+        assert (
+            unmasker.unmask_filter(expression)
+            == f'msg=={literal} or url!="some value" and action=="deny"'
+        )
+
+    def test_clause_shaped_text_inside_a_literal_no_clause_precedes_is_left_alone(
+        self, unmasker: ArgUnmasker, engine: FPEEngine
+    ):
+        """Such a literal is still a literal; resolving the clause-shaped text
+        inside it would write quotes into it."""
+        token = engine.mask_url_tail("some value")
+        expression = f'"it\'s url=={token}" and action==accept'
+
+        assert unmasker.unmask_filter(expression) == expression
+
+    def test_a_clause_after_such_a_literal_still_resolves(
+        self, unmasker: ArgUnmasker, engine: FPEEngine
+    ):
+        token = engine.mask_url_tail("some value")
+
+        assert (
+            unmasker.unmask_filter(f'"it\'s" and url=={token}') == '"it\'s" and url=="some value"'
+        )

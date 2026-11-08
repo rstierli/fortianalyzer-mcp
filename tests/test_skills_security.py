@@ -98,7 +98,7 @@ class TestWarningsRedaction:
 class TestTriageFilterSanitization:
     async def test_malicious_alert_id_cannot_break_the_clause(self):
         # An alert_id crafted to break out of the alertid=="..." clause must
-        # be escaped/quoted, not spliced raw.
+        # be quoted as one literal, not spliced raw.
         malicious = '1" or 1=="1'
         with (
             t(GET_ALERTS, return_value=ok(data=[])) as get_alerts,
@@ -113,8 +113,9 @@ class TestTriageFilterSanitization:
         first_filter = get_alerts.call_args_list[0].kwargs["filter"]
         # The raw breakout form must NOT appear...
         assert 'alertid=="1" or 1=="1"' not in first_filter
-        # ...and the value must be escaped+quoted as one literal.
-        assert first_filter == 'alertid=="1\\" or 1==\\"1"'
+        # ...and the value must sit in the quote character it does not
+        # contain: FortiAnalyzer has no escape for a quote (issue #164).
+        assert first_filter == "alertid=='1\" or 1==\"1'"
 
     async def test_benign_alert_id_unquoted_fast_path(self):
         with (
@@ -130,3 +131,54 @@ class TestTriageFilterSanitization:
         # A safe alphanumeric id is passed through unquoted (self-quoting
         # sanitizer only wraps when metacharacters are present).
         assert g.call_args_list[0].kwargs["filter"] == "alertid==alert-001"
+
+
+# --------------------------------------------------------------------- #
+# A value no filter literal can hold (#164)                              #
+# --------------------------------------------------------------------- #
+
+
+class TestUnwritableFilterValues:
+    def test_record_pivot_writes_a_plain_name(self):
+        assert handlers._record_pivot("user", "alice", "euname") == ("user==alice", None)
+
+    def test_record_pivot_reports_why_a_name_cannot_be_written(self):
+        pivot, reason = handlers._record_pivot("user", "value\\", "euname")
+        assert pivot is None
+        assert reason is not None
+        assert "backslash" in reason
+        # The sanitiser's advice is for a caller; this value came from a record.
+        assert "drop the backslash" not in reason
+
+    async def test_a_refusal_from_a_record_site_is_a_fault_not_a_caller_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Only ``_param_value`` may turn a refusal into ``invalid_skill_params``.
+        A record site that let the sanitiser's error out would blame the
+        caller for the appliance's data; the dispatcher reports it as a fault."""
+        from fortianalyzer_mcp.utils.errors import ValidationError as FilterValidationError
+
+        def leaks(field: str, value: object, label: str) -> tuple[str | None, str | None]:
+            raise FilterValidationError(f"{label} ends in a backslash")
+
+        monkeypatch.setattr(handlers, "_record_pivot", leaks)
+        user = {"euid": 12, "euname": "value\\", "eugroup": "services"}
+        with (
+            t("fortianalyzer_mcp.tools.ueba_tools.get_endusers", return_value=ok(data=[user])),
+            t("fortianalyzer_mcp.tools.ueba_tools.get_endpoints", return_value=ok(data=[])),
+        ):
+            result = await faz_skill("identity_profile", {"euid": 12})
+        assert result["status"] == "error"
+        assert result["error"] == "skill_error"
+
+    async def test_direct_parameter_refusal_is_an_invalid_parameter(self):
+        """A caller-supplied value the sanitiser refuses is their input error,
+        reported as such and not as an unexpected skill failure."""
+        with (
+            t(GET_ALERTS, return_value=ok(data=[])),
+            t(GET_ALERT_DETAILS, return_value=ok(data=[])),
+        ):
+            result = await faz_skill("triage", {"alert_id": "accept\\"})
+        assert result["status"] == "error"
+        assert result["error"] == "invalid_skill_params"
+        assert "backslash" in result["message"]

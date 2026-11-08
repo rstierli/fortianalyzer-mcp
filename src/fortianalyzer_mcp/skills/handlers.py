@@ -127,6 +127,10 @@ class SkillExecutionError(Exception):
     """A skill's subject data could not be retrieved."""
 
 
+class SkillParamError(Exception):
+    """A caller-supplied parameter value cannot be written into a filter."""
+
+
 async def _call(tool_fn: Any, **kwargs: Any) -> tuple[dict[str, Any] | None, str | None]:
     """Await a tool function, normalizing failure to ``(None, reason)``.
 
@@ -168,6 +172,50 @@ def _ids_of(obj: dict[str, Any], keys: tuple[str, ...]) -> set[str]:
 def _link_key(obj: dict[str, Any], keys: tuple[str, ...]) -> str | None:
     """Name of the first linkage key present on the object."""
     return next((k for k in keys if k in obj), None)
+
+
+def _record_pivot(field: str, value: object, label: str) -> tuple[str | None, str | None]:
+    """``field==<value>`` for a value taken from a record, or why it cannot be written.
+
+    A record value is the appliance's data, not the caller's input, so a value
+    no filter literal can hold (issue #164) is a gap in that half of the skill
+    and not an error the caller can fix.
+    """
+    from fortianalyzer_mcp.utils.validation import ValidationError, sanitize_filter_value
+
+    try:
+        return f"{field}=={sanitize_filter_value(str(value), label)}", None
+    except ValidationError as exc:
+        # The first sentence says what is wrong; the rest is advice to a
+        # caller, and this value came from the appliance.
+        return None, str(exc).split(". ", 1)[0]
+
+
+def _param_value(value: str, label: str, *, like: bool = False) -> str:
+    """A caller-supplied value written for a filter.
+
+    With ``like`` the value is written as the quoted ``%...%`` substring
+    operand of a ``like`` clause (:func:`like_filter_pattern`); otherwise as
+    the operand of ``==`` or another comparison (:func:`sanitize_filter_value`).
+
+    Raises:
+        SkillParamError: If no filter literal can hold it (issue #164). The
+            dispatcher reports that as an invalid parameter, which it is;
+            a record value that cannot be written goes through
+            :func:`_record_pivot` instead and becomes a gap.
+    """
+    from fortianalyzer_mcp.utils.validation import (
+        ValidationError,
+        like_filter_pattern,
+        sanitize_filter_value,
+    )
+
+    try:
+        if like:
+            return like_filter_pattern(value, label)
+        return sanitize_filter_value(value, label)
+    except ValidationError as exc:
+        raise SkillParamError(str(exc)) from exc
 
 
 def _records(payload: Any) -> list[dict[str, Any]]:
@@ -503,7 +551,6 @@ async def run_triage(params: TriageParams) -> TriageResult:
         get_alerts,
     )
     from fortianalyzer_mcp.tools.incident_tools import get_incident, get_incidents
-    from fortianalyzer_mcp.utils.validation import sanitize_filter_value
 
     warnings: list[str] = []
     triggering_logs: list[dict[str, Any]] = []
@@ -521,10 +568,11 @@ async def run_triage(params: TriageParams) -> TriageResult:
         # epids, euids} there.
         subject: dict[str, Any] = {}
         # alert_id is attacker-influenceable free text; sanitize it before it
-        # enters the filter expression (self-quotes and escapes any quote /
-        # operator / backslash so it cannot rewrite the clause). Replaces the
-        # earlier no-double-quote blocklist. See issue #68 L5.
-        safe_alert_id = sanitize_filter_value(params.alert_id, "alert_id")
+        # enters the filter expression (quoted with the quote character it
+        # does not contain, and refused when no filter literal can hold it, so
+        # it cannot rewrite the clause). Replaces the earlier no-double-quote
+        # blocklist. See issue #68 L5.
+        safe_alert_id = _param_value(params.alert_id, "alert_id")
         lookup_res, err = await _call(
             get_alerts,
             adom=params.adom,
@@ -1451,7 +1499,6 @@ async def run_identity_profile(params: IdentityProfileParams) -> IdentityProfile
     """
     from fortianalyzer_mcp.tools.log_tools import query_logs
     from fortianalyzer_mcp.tools.ueba_tools import get_endpoints, get_endusers
-    from fortianalyzer_mcp.utils.validation import sanitize_filter_value
 
     warnings: list[str] = []
 
@@ -1513,23 +1560,26 @@ async def run_identity_profile(params: IdentityProfileParams) -> IdentityProfile
             reason="user record carries no 'euname'; event logs are keyed by username"
         )
     else:
-        safe_user = sanitize_filter_value(str(euname), "euname")
-        logs_res, err = await _call(
-            query_logs,
-            adom=params.adom,
-            logtype="event",
-            time_range=params.time_range,
-            filter=f"user=={safe_user} and {_IDENTITY_ACTIVITY_CLAUSE}",
-            limit=params.activity_limit,
-            # IdentityProfileResult.recent_activity is documented verbatim.
-            fields=["*"],
-        )
-        if logs_res is None:
-            recent_activity = FeatureGap(reason=f"activity search unavailable: {err}")
+        user_clause, gap = _record_pivot("user", euname, "euname")
+        if user_clause is None:
+            recent_activity = FeatureGap(reason=f"activity filter cannot be written: {gap}")
         else:
-            activity_rows = logs_res.get("logs") or []
-            recent_activity = activity_rows
-            warnings.extend(str(w) for w in logs_res.get("warnings") or [])
+            logs_res, err = await _call(
+                query_logs,
+                adom=params.adom,
+                logtype="event",
+                time_range=params.time_range,
+                filter=f"{user_clause} and {_IDENTITY_ACTIVITY_CLAUSE}",
+                limit=params.activity_limit,
+                # IdentityProfileResult.recent_activity is documented verbatim.
+                fields=["*"],
+            )
+            if logs_res is None:
+                recent_activity = FeatureGap(reason=f"activity search unavailable: {err}")
+            else:
+                activity_rows = logs_res.get("logs") or []
+                recent_activity = activity_rows
+                warnings.extend(str(w) for w in logs_res.get("warnings") or [])
 
     return IdentityProfileResult(
         user=user,
@@ -1838,7 +1888,6 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
         get_endpoints,
         get_endusers,
     )
-    from fortianalyzer_mcp.utils.validation import sanitize_filter_value
 
     warnings: list[str] = []
 
@@ -1865,7 +1914,9 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
         vuln_epids = [params.epid]
         epip = record.get("epip")
         if epip:
-            entity_filter = f"srcip=={sanitize_filter_value(str(epip), 'epip')}"
+            entity_filter, gap = _record_pivot("srcip", epip, "epip")
+            if gap:
+                entity_filter_gap = f"endpoint {params.epid}: {gap}"
         else:
             entity_filter_gap = f"endpoint {params.epid} carries no 'epip'"
     else:
@@ -1896,7 +1947,9 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
                 break
         euname = record.get("euname")
         if euname:
-            entity_filter = f"user=={sanitize_filter_value(str(euname), 'euname')}"
+            entity_filter, gap = _record_pivot("user", euname, "euname")
+            if gap:
+                entity_filter_gap = f"end-user {params.euid}: {gap}"
         else:
             entity_filter_gap = f"end-user {params.euid} carries no 'euname'"
 
@@ -2402,7 +2455,6 @@ async def _hunt_behavior(
     end-user subject.
     """
     from fortianalyzer_mcp.tools.ueba_tools import get_endpoints, get_endusers
-    from fortianalyzer_mcp.utils.validation import sanitize_filter_value
 
     kind, _, raw = entity.partition(":")
     kind = kind.strip().lower()
@@ -2440,7 +2492,11 @@ async def _hunt_behavior(
         pivot = None
         epip = record.get("epip")
         if epip:
-            pivot = f"srcip=={sanitize_filter_value(str(epip), 'epip')}"
+            pivot, gap = _record_pivot("srcip", epip, "epip")
+            if gap:
+                warnings.append(
+                    f"behavior[{entity_id}]: {gap}; behavioural detections cannot be tied to it"
+                )
         else:
             warnings.append(
                 f"behavior[{entity_id}]: endpoint carries no 'epip'; behavioural "
@@ -2486,7 +2542,11 @@ async def _hunt_behavior(
     pivot = None
     euname = record.get("euname")
     if euname:
-        pivot = f"user=={sanitize_filter_value(str(euname), 'euname')}"
+        pivot, gap = _record_pivot("user", euname, "euname")
+        if gap:
+            warnings.append(
+                f"behavior[{entity_id}]: {gap}; behavioural detections cannot be tied to it"
+            )
     else:
         warnings.append(
             f"behavior[{entity_id}]: end-user carries no 'euname'; behavioural "
@@ -2603,12 +2663,13 @@ def _substring_clause(field: str, value: str, name: str) -> str:
     """A ``like`` substring clause, spelled as the structured ``contains`` op.
 
     FortiAnalyzer 7.6.8 and 8.0.2 reject ``=~`` as ``Invalid filter`` (#173).
-    The wildcards go through the sanitiser with the value, so the pattern is
-    quoted as one literal, the same as ``query/filters.py`` compiles it.
+    The value is written for ``like`` and quoted as one literal with the
+    wildcards, the same as ``query/filters.py`` compiles it, so a ``%`` or
+    ``_`` in a hash or TTP is the character, not a wildcard (#164). The
+    value is the caller's, so one no literal can hold raises
+    :class:`SkillParamError` through :func:`_param_value`.
     """
-    from fortianalyzer_mcp.utils.validation import sanitize_filter_value
-
-    return f"{field} like {sanitize_filter_value(f'%{value}%', name)}"
+    return f"{field} like {_param_value(value, name, like=True)}"
 
 
 def _sweep_pivot(params: HuntParams) -> str | None:
@@ -2623,7 +2684,6 @@ def _sweep_pivot(params: HuntParams) -> str | None:
     Returns ``None`` when no usable pivot can be derived (the sweep then
     degrades to a gap rather than sweeping on nothing).
     """
-    from fortianalyzer_mcp.utils.validation import sanitize_filter_value
 
     if params.filter is not None:
         # The caller's raw filter is authoritative; a ttp hint is recorded
@@ -2641,7 +2701,7 @@ def _sweep_pivot(params: HuntParams) -> str | None:
         # logtype); IP/Domain/URL as equality.
         if params.indicator.type == "Hash":
             return _substring_clause(field, params.indicator.value, "indicator")
-        return f"{field}=={sanitize_filter_value(params.indicator.value, 'indicator')}"
+        return f"{field}=={_param_value(params.indicator.value, 'indicator')}"
 
     if params.ttp is not None:
         return _substring_clause("attack", params.ttp, "ttp")
@@ -2890,13 +2950,14 @@ async def run_hunt(params: HuntParams) -> HuntResult:
             params.adom, params.entity, time_range, params.anomaly_percentile, warnings
         )
         # Reuse the resolved record's pivot for the entity-scoped sweep.
-        from fortianalyzer_mcp.utils.validation import sanitize_filter_value
-
         record = behavior.record
+        gap = None
         if behavior.entity_type == "endpoint" and record.get("epip"):
-            entity_pivot = f"srcip=={sanitize_filter_value(str(record['epip']), 'epip')}"
+            entity_pivot, gap = _record_pivot("srcip", record["epip"], "epip")
         elif behavior.entity_type == "enduser" and record.get("euname"):
-            entity_pivot = f"user=={sanitize_filter_value(str(record['euname']), 'euname')}"
+            entity_pivot, gap = _record_pivot("user", record["euname"], "euname")
+        if gap:
+            warnings.append(f"hunt: {gap}; entity-scoped sweep skipped")
     else:
         behavior = FeatureGap(
             reason="no entity subject; behaviour half runs only for an epid:/euid: subject"
@@ -3192,7 +3253,6 @@ async def _resolve_impact_entities(
     a gap, never a guess). The UEBA reads are plain GETs.
     """
     from fortianalyzer_mcp.tools.ueba_tools import get_endpoints, get_endusers
-    from fortianalyzer_mcp.utils.validation import sanitize_filter_value
 
     resolved: list[dict[str, Any]] = []
 
@@ -3211,7 +3271,9 @@ async def _resolve_impact_entities(
         pivot = None
         epip = record.get("epip") if record else None
         if epip:
-            pivot = f"srcip=={sanitize_filter_value(str(epip), 'epip')}"
+            pivot, gap = _record_pivot("srcip", epip, "epip")
+            if gap:
+                warnings.append(f"impact: endpoint {epid}: {gap}")
         resolved.append({"type": "endpoint", "ref": str(epid), "pivot": pivot, "epids": [epid]})
 
     for euid in euids:
@@ -3229,7 +3291,9 @@ async def _resolve_impact_entities(
         if record is not None:
             euname = record.get("euname")
             if euname:
-                pivot = f"user=={sanitize_filter_value(str(euname), 'euname')}"
+                pivot, gap = _record_pivot("user", euname, "euname")
+                if gap:
+                    warnings.append(f"impact: end-user {euid}: {gap}")
             for key in _ENDUSER_EPID_KEYS:
                 value = record.get(key)
                 for candidate in value if isinstance(value, list) else [value]:
@@ -3244,7 +3308,7 @@ async def _resolve_impact_entities(
         resolved.append({"type": "enduser", "ref": str(euid), "pivot": pivot, "epids": user_epids})
 
     if ip is not None:
-        pivot = f"srcip=={sanitize_filter_value(ip, 'ip')}"
+        pivot = f"srcip=={_param_value(ip, 'ip')}"
         resolved.append({"type": "ip", "ref": ip, "pivot": pivot, "epids": []})
 
     return resolved
