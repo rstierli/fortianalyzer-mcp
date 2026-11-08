@@ -13,7 +13,9 @@ If you discover a security vulnerability in this project, please report it respo
 
 **Do NOT open a public GitHub issue for security vulnerabilities.**
 
-Instead, please email: **roland@mystier.li**
+Instead, report it privately on GitHub: open the repository's **Security** tab and choose **Report a vulnerability**, or go straight to [the reporting form](https://github.com/rstierli/fortianalyzer-mcp/security/advisories/new). Only the maintainers see the report, and the fix can be worked on in a private fork.
+
+If you cannot use GitHub, email **roland@mystier.li** instead.
 
 Include:
 - Description of the vulnerability

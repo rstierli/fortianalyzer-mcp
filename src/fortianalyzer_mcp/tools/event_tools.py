@@ -517,7 +517,7 @@ async def get_alert_handlers(
     adom: str | None = None,
     handler_type: str = "both",
     name_filter: str | None = None,
-    include_rules: bool = True,
+    include_rules: bool = False,
 ) -> dict[str, Any]:
     """Get event alert-handler (detection-rule) definitions.
 
@@ -528,9 +528,11 @@ async def get_alert_handlers(
 
     The whole catalogue is large: a stock FortiAnalyzer 8.0.2 ships 111
     basic handlers, about 390 KB of JSON, and the rule lists are roughly
-    nine tenths of it. Unless you need all of it, call with
-    include_rules=False to see what exists, then with name_filter for the
-    handlers you want in full.
+    nine tenths of it. With every rule it is one server-sent event of about
+    1.09 MB, over the 1 MiB event limit the mcp Python SDK reads with, so
+    the default leaves the rules out: call once to see what exists, then
+    with name_filter and include_rules=True for the handlers you want in
+    full.
 
     Args:
         adom: ADOM name (default: from config DEFAULT_ADOM)
@@ -539,7 +541,7 @@ async def get_alert_handlers(
         name_filter: Keep only handlers whose name contains this text,
             ignoring case (default: all handlers)
         include_rules: When False, each handler's "rule" list is replaced
-            by "rule_count" (default: True)
+            by "rule_count" (default: False). Pass True for the rules.
 
     Returns:
         dict with handler definitions under "data" (keyed by "basic" and/or
@@ -547,8 +549,9 @@ async def get_alert_handlers(
         narrowed because its payload had an unexpected shape.
 
     Example:
-        >>> result = await get_alert_handlers(handler_type="basic", include_rules=False)
+        >>> result = await get_alert_handlers(handler_type="basic")
         >>> print(result["data"]["basic"])
+        >>> full = await get_alert_handlers(name_filter="botnet", include_rules=True)
     """
     try:
         adom = validate_adom(adom or get_default_adom())

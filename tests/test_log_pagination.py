@@ -73,8 +73,11 @@ class FakeFaz:
         omit_total: bool = False,
         stall: bool = False,
         total_overrides: list[int | None] | None = None,
+        scanned_logs: int | None = None,
     ) -> None:
         self.dataset = dataset
+        # ``scanned-logs`` on each final fetch when set, as 7.6.7 sends it.
+        self.scanned_logs = scanned_logs
         self.tz = tz
         self.connected = connected
         self.complete_on_attempt = complete_on_attempt
@@ -188,6 +191,8 @@ class FakeFaz:
             # None -> omit total-count entirely (unknown path)
         elif not self.omit_total:
             result["total-count"] = len(self.dataset)
+        if self.scanned_logs is not None:
+            result["scanned-logs"] = self.scanned_logs
         return result
 
     async def logsearch_cancel(self, adom: str, tid: int) -> dict[str, object]:
@@ -266,6 +271,42 @@ class TestQueryLogsPagination:
             "end": "2024-01-02 00:00:00",
         }
         assert "FAZ local time" in result["time_basis"]
+
+
+class TestScannedLogs:
+    """``scanned-logs`` is passed through beside ``total`` and judges nothing (#148)."""
+
+    async def test_count_only_reports_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _install(monkeypatch, FakeFaz(_rows(25), scanned_logs=4000))
+
+        result = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, count_only=True)
+
+        assert result["total"] == 25
+        assert result["scanned_logs"] == 4000
+        assert result["total_is_known"] is True
+
+    async def test_page_zero_and_later_pages_report_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install(monkeypatch, FakeFaz(_rows(25), scanned_logs=4000))
+
+        first = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=10)
+        more = await log_tools.fetch_more_logs(tid=first["tid"], offset=10, limit=10)
+
+        assert first["scanned_logs"] == 4000
+        assert more["scanned_logs"] == 4000
+        assert first["has_more_basis"] == "stable_total"
+
+    async def test_absent_when_the_appliance_omits_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install(monkeypatch, FakeFaz(_rows(25)))
+
+        counted = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, count_only=True)
+        first = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=10)
+
+        assert "scanned_logs" not in counted
+        assert "scanned_logs" not in first
 
 
 class TestFetchMoreLogs:

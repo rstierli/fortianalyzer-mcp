@@ -275,6 +275,14 @@ class TestAlertRules:
         assert result.handler_count == 1
         assert result.handlers[0].handler_class == "basic"
 
+    async def test_asks_the_reader_for_the_rules(self):
+        """The reader leaves the rules out by default; without them the
+        skill's rule_count would silently read 0."""
+        payload = ok(data={"basic": [HANDLER_BASIC]})
+        with t(GET_ALERT_HANDLERS, return_value=payload) as reader:
+            await handlers.run_alert_rules(AlertRulesParams())
+        assert reader.call_args.kwargs["include_rules"] is True
+
     async def test_unrecognized_section_shape_warns(self):
         payload = ok(data={"basic": {"unexpected": "shape"}, "correlation": [HANDLER_CORR]})
         with t(GET_ALERT_HANDLERS, return_value=payload):

@@ -304,12 +304,28 @@ class TestAlertHandlersNarrowing:
 
         monkeypatch.setattr(event_tools, "get_faz_client", lambda: _Fake())
 
-    async def test_default_call_returns_the_payload_unchanged(
+    async def test_default_call_leaves_the_rules_out(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """With every rule a stock 8.0.2 catalogue is one event of about
+        1.09 MB, over the mcp SDK's 1 MiB limit, so the plain call must not
+        be the one that carries them."""
+        self._patch(monkeypatch, {"basic": _handler_section()})
+
+        result = await event_tools.get_alert_handlers(adom="root", handler_type="basic")
+
+        assert result["data"]["basic"]["data"] == [
+            {"name": "Botnet-Communication", "handler-id": 1, "enable": True, "rule_count": 2},
+            {"name": "Risky-App", "handler-id": 2, "enable": False, "rule_count": 1},
+        ]
+        assert "warnings" not in result
+
+    async def test_include_rules_returns_the_payload_unchanged(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         self._patch(monkeypatch, {"basic": _handler_section()})
 
-        result = await event_tools.get_alert_handlers(adom="root", handler_type="basic")
+        result = await event_tools.get_alert_handlers(
+            adom="root", handler_type="basic", include_rules=True
+        )
 
         assert result == {
             "status": "success",
@@ -324,7 +340,7 @@ class TestAlertHandlersNarrowing:
         self._patch(monkeypatch, {"basic": _handler_section()})
 
         result = await event_tools.get_alert_handlers(
-            adom="root", handler_type="basic", name_filter="botnet"
+            adom="root", handler_type="basic", name_filter="botnet", include_rules=True
         )
 
         section = result["data"]["basic"]
@@ -370,7 +386,7 @@ class TestAlertHandlersNarrowing:
         self._patch(monkeypatch, {"basic": _handler_section()})
 
         result = await event_tools.get_alert_handlers(
-            adom="root", handler_type="basic", name_filter=""
+            adom="root", handler_type="basic", name_filter="", include_rules=True
         )
 
         assert result["data"] == {"basic": _handler_section()}
