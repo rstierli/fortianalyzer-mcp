@@ -69,7 +69,7 @@ from fortianalyzer_mcp.masking.fpe_engine import (
     VerificationBudgetExhausted,
 )
 from fortianalyzer_mcp.query.fields import canonical_log_field
-from fortianalyzer_mcp.utils.validation import sanitize_filter_value
+from fortianalyzer_mcp.utils.validation import ValidationError, sanitize_filter_value
 
 logger = logging.getLogger(__name__)
 
@@ -105,9 +105,46 @@ _FILTER_CLAUSE_RE = re.compile(
     r"(?<![^\s()!&])"
     r"(?P<field>[A-Za-z_][A-Za-z0-9_]*)"
     r"\s*(?P<op>==|!=|<=|>=|=~|!~|<|>|=(?![=~])|~|!contain\b|\bcontain\b|\b(?ai:like)\b)\s*"
-    r"(?P<quote>(?P<q>[\"'])?)(?P<value>(?(q)[^\"']+|[^\"'\s()]+))(?P=quote)"
+    # A quoted value ends the way the appliance ends it (measured on 7.6.8
+    # and 8.0.2, issue #164): at the next quote of the same kind that does not
+    # follow a backslash. The other quote character is inert inside it.
+    r"(?P<quote>(?P<q>[\"'])?)"
+    r"(?P<value>(?(q)(?:(?!(?P=q))[^\x00]|(?<=\\)(?P=q))+?|[^\"'\s()]+))"
+    r"(?(q)(?<!\\)(?P=q))"
 )
 _FILTER_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+#: A value that is exactly one masking token, by shape: marker, key id, payload
+#: and, for a v2 token, the tag. Used only to tell a plaintext's own ``%`` and
+#: ``_`` from the caller's text around an embedded token; it resolves nothing.
+_WHOLE_TOKEN_RE = re.compile(
+    r"^(?:ip4|ip6|mac|sn|url|host|user)-[0-9a-f]{4}-[A-Za-z0-9._~-]+(?:-[0-9a-f]{8})?$"
+)
+
+
+def _literal_spans(expression: str) -> list[tuple[int, int]]:
+    """The quoted literals of ``expression`` as ``(open, end)`` index pairs.
+
+    Read the way FortiAnalyzer reads a filter (measured on 7.6.8 and 8.0.2,
+    issue #164): a quote opens a literal, the same quote closes it unless the
+    character before it is a backslash, the other quote character is inert,
+    and an unclosed literal runs to the end. ``end`` is the index after the
+    closing quote. The clause regex reads a literal the same way, but a
+    literal that no clause precedes is still a literal, and clause-shaped
+    text inside it is the caller's value, not a clause.
+    """
+    spans: list[tuple[int, int]] = []
+    quote: str | None = None
+    start = 0
+    for i, char in enumerate(expression):
+        if quote is None:
+            if char in "\"'":
+                quote, start = char, i
+        elif char == quote and expression[i - 1] != "\\":
+            spans.append((start, i + 1))
+            quote = None
+    if quote is not None:
+        spans.append((start, len(expression)))
+    return spans
 
 
 class ArgUnmasker:
@@ -326,6 +363,13 @@ class ArgUnmasker:
         ``srcip=="93.209.148.131" and user=="user-3f2a-k9x2q4"`` becomes the
         expression over real values. Field names drive IP/MAC resolution;
         marked tokens resolve regardless of the field they sit in.
+
+        Raises:
+            ValidationError: If a resolved value cannot be written as one
+                filter literal (it ends in a backslash, holds both quote
+                characters, or holds a control character). A token left in
+                place would match nothing, which under a negated operator
+                returns every row, so the filter is refused instead.
         """
 
         def clause_sub(match: re.Match[str]) -> str:
@@ -347,23 +391,81 @@ class ArgUnmasker:
                 resolved = self.resolve_scalar(core, vtype)
             if resolved == core:
                 return match.group(0)
-            resolved = f"{lead}{resolved}{trail}"
             if _FILTER_CONTROL_RE.search(resolved):
-                logger.warning(
-                    "resolved filter value has control characters; token left unresolved"
+                # Left in place, the token would match nothing, which under a
+                # negated operator returns every row; refuse the filter instead.
+                raise ValidationError(
+                    "a resolved filter value holds a control character; the filter was not sent"
                 )
-                return match.group(0)
             quote = match.group("quote")
             head = match.group(0)[: match.start("quote") - match.start()]
+            # Write the plaintext the way the operator reads a literal (issue
+            # #164; ``==`` and ``!=`` measured on 7.6.8 and 8.0.2, the other
+            # comparisons assumed to read it the same way). ``like`` takes a
+            # doubled backslash as one literal backslash; ``==`` reads every
+            # character as written.
+            is_like = match.group("op").strip().lower() == "like"
+            escaped = resolved.replace("\\", "\\\\") if is_like else resolved
+            if is_like and _WHOLE_TOKEN_RE.fullmatch(core):
+                # The whole value was one token, so every ``%`` and ``_`` in the
+                # plaintext is the plaintext's own: write them as the characters
+                # (``\%`` and ``\_``, measured). Around an embedded token the
+                # caller's own wildcards sit in the same text and cannot be told
+                # apart, so there they stay as written.
+                escaped = escaped.replace("%", "\\%").replace("_", "\\_")
+            if is_like and not quote:
+                # An unquoted pattern is quoted on the way out, as a bare
+                # comparison value is below, and keeps the ``like`` writing.
+                quote = '"'
             if quote:
-                # Preserve caller quoting and escape delimiters introduced by
-                # the resolved value so it cannot terminate the clause early.
-                escaped = resolved.replace("\\", "\\\\").replace(quote, "\\" + quote)
-                return f"{head}{quote}{escaped}{quote}"
-            # Use the same safe-bare or double-quoted convention as callers.
+                literal = f"{lead}{escaped}{trail}"
+                if quote in literal:
+                    # There is no escape for a quote: the literal takes the
+                    # quote character the value does not contain, and the
+                    # value then compares as itself. With both present, this
+                    # writer does not try.
+                    other = "'" if quote == '"' else '"'
+                    if other in literal:
+                        # Leaving the token would match nothing, which under
+                        # a negated operator returns every row. Refuse the
+                        # whole filter instead; the message carries no value.
+                        raise ValidationError(
+                            "a filter literal would hold both quote characters once its "
+                            "token is resolved, which this writer does not support; the "
+                            "filter was not sent"
+                        )
+                    quote = other
+                if literal.endswith("\\"):
+                    # The closing quote would follow a backslash and the literal
+                    # would run on into the next clause, whatever that is.
+                    raise ValidationError(
+                        "a filter literal would end in a backslash once its token is "
+                        "resolved, so its closing quote would not close it; the filter "
+                        "was not sent"
+                    )
+                return f"{head}{quote}{literal}{quote}"
+            # Use the same safe-bare or quoted convention as callers. A value
+            # the sanitiser refuses raises out of here for the same reason.
             return f"{head}{sanitize_filter_value(resolved)}"
 
-        return _FILTER_CLAUSE_RE.sub(clause_sub, expression)
+        spans = _literal_spans(expression)
+        out: list[str] = []
+        pos = 0
+        while (match := _FILTER_CLAUSE_RE.search(expression, pos)) is not None:
+            literal = next((s for s in spans if s[0] < match.start() < s[1]), None)
+            if literal is not None:
+                # Clause-shaped text inside a quoted literal is the caller's
+                # value. Copy the literal through its real end and look for
+                # the next clause after it, so a clause that follows the
+                # literal is still resolved.
+                out.append(expression[pos : literal[1]])
+                pos = literal[1]
+                continue
+            out.append(expression[pos : match.start()])
+            out.append(clause_sub(match))
+            pos = match.end()
+        out.append(expression[pos:])
+        return "".join(out)
 
     # -- structured filter conditions --------------------------------------- #
 

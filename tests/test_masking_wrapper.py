@@ -760,6 +760,29 @@ class TestMutatingToolGate:
         assert "name" in result["message"]
         assert token not in str(result)  # the token itself is not echoed
 
+    async def test_unwritable_filter_value_never_reaches_the_tool_body(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A resolved filter value that no literal can hold (#164) fails the
+        call before the body runs, instead of sending the token in its place."""
+        from fortianalyzer_mcp.tool_annotations import READ_ONLY
+        from fortianalyzer_mcp.utils.errors import ValidationError
+
+        mcp = self._install(monkeypatch)
+        engine = FPEEngine(KEY)
+        token = engine.mask_url_tail("value\\")
+        calls: list[str] = []
+
+        @mcp.tool(annotations=READ_ONLY)
+        async def fake_query_logs(filter: str) -> dict:
+            calls.append(filter)
+            return {"status": "success", "logs": []}
+
+        with pytest.raises(ValidationError, match="backslash"):
+            await fake_query_logs(filter=f'url=="{token}"')
+
+        assert calls == []
+
     async def test_forged_token_to_mutating_tool_is_refused(self, monkeypatch: pytest.MonkeyPatch):
         # A marker that matches but does not decrypt is the forged/stale
         # case, which is exactly the threat: it must refuse, not pass.

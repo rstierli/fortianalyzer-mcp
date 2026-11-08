@@ -583,9 +583,9 @@ class TestTriageSkill:
         assert scan_kwargs["time_range"] == "24-hour"
 
     async def test_alert_id_with_quote_is_sanitized_not_skipped(self):
-        # A quote in the id is escaped and quoted (issue #68 L5), so the
-        # filter-first lookup still runs — with a clause that cannot break
-        # out — rather than being skipped by a blocklist.
+        # A quote in the id puts the literal in the other quote character
+        # (issue #68 L5, #164), so the filter-first lookup still runs with a
+        # clause that cannot break out, rather than being skipped by a blocklist.
         with (
             t(GET_ALERTS, return_value=ok(data=[])) as alerts_mock,
             t(GET_ALERT_DETAILS, return_value=self.DETAILS),
@@ -594,9 +594,9 @@ class TestTriageSkill:
             t(GET_ALERT_INCIDENT_STATS, return_value=ok(data={})),
         ):
             await handlers.run_triage(TriageParams(alert_id='alert"-x'))
-        # The filter-first lookup runs (call 0) with an escaped, quoted
-        # clause; an empty result then falls back to the window scan (call 1).
-        assert alerts_mock.await_args_list[0].kwargs["filter"] == 'alertid=="alert\\"-x"'
+        # The filter-first lookup runs (call 0) with the id as one quoted
+        # literal; an empty result then falls back to the window scan (call 1).
+        assert alerts_mock.await_args_list[0].kwargs["filter"] == "alertid=='alert\"-x'"
 
     async def test_alert_related_incidents_by_attachment_membership(self):
         # Live alerts carry no incident-linkage fields; the authoritative

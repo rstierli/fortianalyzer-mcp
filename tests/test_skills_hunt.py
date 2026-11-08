@@ -330,6 +330,34 @@ class TestHuntBehaviorPercentile:
         # importance high + a detection -> anomalous.
         assert b.anomalous is True
 
+    async def test_endpoint_address_no_literal_can_hold_degrades_both_halves(self):
+        """The behaviour half and the entity-scoped sweep each report the gap."""
+        estate = [dict(ep) for ep in ESTATE]
+        estate[4] = {**estate[4], "epip": "value\\"}
+        assert estate[4]["epid"] == 5
+        with (
+            t(GET_ENDPOINTS, return_value=ok(data=estate)),
+            t(GET_ALERTS, return_value=ok(data=[])),
+            t(QUERY_LOGS, return_value=logs_ok([])),
+        ):
+            result = await handlers.run_hunt(HuntParams(entity="epid:5"))
+        assert isinstance(result.behavior, EntityBehavior)
+        assert any(w.startswith("behavior[") and "backslash" in w for w in result.warnings)
+        assert any(w.startswith("hunt:") and "sweep skipped" in w for w in result.warnings)
+
+    async def test_enduser_name_no_literal_can_hold_degrades_the_pivot(self):
+        """A name that ends in a backslash cannot be written into a filter
+        (#164); the hunt still runs, with the gap in the warnings."""
+        user = {"euid": 42, "euname": "value\\", "importance": "high"}
+        with (
+            t(GET_ENDUSERS, return_value=ok(data=[user])),
+            t(GET_ALERTS, return_value=ok(data=[])),
+            t(QUERY_LOGS, return_value=logs_ok([])),
+        ):
+            result = await handlers.run_hunt(HuntParams(entity="euid:42"))
+        assert isinstance(result.behavior, EntityBehavior)
+        assert any("backslash" in w for w in result.warnings)
+
     async def test_entity_subject_runs_entity_scoped_sweep(self):
         with (
             t(GET_ENDPOINTS, return_value=ok(data=ESTATE)),
@@ -486,4 +514,42 @@ class TestSweepPivotOperator:
 
     def test_a_quote_in_the_ttp_stays_inside_the_pattern(self):
         pivot = handlers._sweep_pivot(HuntParams(ttp='T1071" or srcip=="10.0.0.1'))
-        assert pivot == 'attack like "%T1071\\" or srcip==\\"10.0.0.1%"'
+        # #164: there is no escape for a quote, so the pattern switches to
+        # the quote character the value does not contain.
+        assert pivot == """attack like '%T1071" or srcip=="10.0.0.1%'"""
+
+    def test_like_wildcards_in_the_ttp_are_literal(self):
+        pivot = handlers._sweep_pivot(HuntParams(ttp="T1071_%"))
+        assert pivot == 'attack like "%T1071\\_\\%%"'
+
+    def test_a_backslash_in_the_hash_is_doubled_for_like(self):
+        pivot = handlers._sweep_pivot(
+            HuntParams(indicator=IndicatorSubject(value="dead\\", type="Hash"))
+        )
+        assert pivot == 'checksum like "%dead\\\\%"'
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            HuntParams(ttp="""T1071 "a" 'b'"""),
+            HuntParams(indicator=IndicatorSubject(value="""dead"beef'""", type="Hash")),
+        ],
+    )
+    def test_a_pattern_no_literal_can_hold_is_a_param_error(self, params):
+        with pytest.raises(handlers.SkillParamError, match="both quote characters"):
+            handlers._sweep_pivot(params)
+
+
+class TestImpactEntityResolution:
+    async def test_record_values_no_literal_can_hold_become_warnings(self):
+        """Both impact pivots degrade; the entity still lists, with no pivot."""
+        endpoint = {"epid": 1025, "epname": "WS-ALPHA", "epip": "value\\"}
+        user = {"euid": 7, "euname": "value\\"}
+        warnings: list[str] = []
+        with (
+            t(GET_ENDPOINTS, return_value=ok(data=[endpoint])),
+            t(GET_ENDUSERS, return_value=ok(data=[user])),
+        ):
+            resolved = await handlers._resolve_impact_entities(None, [1025], [7], None, warnings)
+        assert [e["pivot"] for e in resolved] == [None, None]
+        assert sum("backslash" in w and w.startswith("impact:") for w in warnings) == 2
