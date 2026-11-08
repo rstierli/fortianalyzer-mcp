@@ -738,7 +738,7 @@ def _quote_for(value: str, field: str) -> str:
     )
 
 
-def sanitize_filter_value(value: str, field: str = "filter value") -> str:
+def sanitize_filter_value(value: str, field: str = "filter value", *, strip: bool = True) -> str:
     """Write a free-text value as the operand of ``==`` or another comparison.
 
     Safe alphanumeric values (including dots, hyphens, underscores, and
@@ -753,6 +753,9 @@ def sanitize_filter_value(value: str, field: str = "filter value") -> str:
     Args:
         value: Raw filter value.
         field: Field name used in the error message.
+        strip: Strip surrounding whitespace first. A caller's value is
+            stripped; a value resolved from a masking token is not, because
+            its spaces are part of the stored value it stands for.
 
     Returns:
         The value, bare or quoted, safe for interpolation into a filter.
@@ -761,7 +764,7 @@ def sanitize_filter_value(value: str, field: str = "filter value") -> str:
         ValidationError: If the value is empty, holds a control character,
             holds both quote characters, or ends in a backslash.
     """
-    value = _checked_filter_value(value, field)
+    value = _checked_filter_value(value, field, strip=strip)
     if _SAFE_UNQUOTED_FILTER_RE.match(value):
         return value
     if value.endswith("\\"):

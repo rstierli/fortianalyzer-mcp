@@ -54,6 +54,14 @@ class TestComparisonLiteral:
         with pytest.raises(ValidationError, match="ends in a backslash"):
             sanitize_filter_value("accept\\\\", "action")
 
+    def test_a_callers_value_is_stripped(self) -> None:
+        assert sanitize_filter_value(" admin ") == "admin"
+
+    def test_strip_false_keeps_surrounding_spaces_inside_the_literal(self) -> None:
+        """Used for a value resolved from a masking token, which is stored as is."""
+        assert sanitize_filter_value(" admin ", strip=False) == '" admin "'
+        assert sanitize_filter_value(" ", strip=False) == '" "'
+
     def test_a_trailing_backslash_is_refused_whatever_else_the_value_holds(self) -> None:
         """The quote choice does not rescue a value that ends in a backslash."""
         with pytest.raises(ValidationError, match="ends in a backslash"):

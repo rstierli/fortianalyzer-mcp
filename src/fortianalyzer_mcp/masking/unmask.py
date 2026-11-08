@@ -116,8 +116,11 @@ _FILTER_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 #: A value that is exactly one masking token, by shape: marker, key id, payload
 #: and, for a v2 token, the tag. Used only to tell a plaintext's own ``%`` and
 #: ``_`` from the caller's text around an embedded token; it resolves nothing.
+#: Case-insensitive like ``_V2_SHAPE_RE``: a token whose marker came back
+#: re-cased still resolves, and its plaintext's wildcards must still be escaped.
 _WHOLE_TOKEN_RE = re.compile(
-    r"^(?:ip4|ip6|mac|sn|url|host|user)-[0-9a-f]{4}-[A-Za-z0-9._~-]+(?:-[0-9a-f]{8})?$"
+    r"^(?:ip4|ip6|mac|sn|url|host|user)-[0-9a-f]{4}-[A-Za-z0-9._~-]+(?:-[0-9a-f]{8})?$",
+    re.IGNORECASE,
 )
 
 
@@ -446,7 +449,10 @@ class ArgUnmasker:
                 return f"{head}{quote}{literal}{quote}"
             # Use the same safe-bare or quoted convention as callers. A value
             # the sanitiser refuses raises out of here for the same reason.
-            return f"{head}{sanitize_filter_value(resolved)}"
+            # Not stripped: the plaintext's own spaces are part of the value,
+            # and a stripped one compares against a different value, which
+            # under ``!=`` returns the rows the caller meant to exclude.
+            return f"{head}{sanitize_filter_value(resolved, strip=False)}"
 
         spans = _literal_spans(expression)
         out: list[str] = []

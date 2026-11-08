@@ -1077,6 +1077,20 @@ class TestResolvedLiteralEscaping:
 
         assert unmasker.unmask_filter(f"url=={token}") == "url=='a\"b'"
 
+    @pytest.mark.parametrize("op", ["==", "!="])
+    @pytest.mark.parametrize("plaintext", ["/a ", " /a", "/a b "], ids=["trail", "lead", "both"])
+    def test_bare_token_keeps_the_plaintexts_own_spaces(
+        self, unmasker: ArgUnmasker, engine: FPEEngine, op: str, plaintext: str
+    ):
+        """A bare token is quoted on the way out, as a caller's quoted one is,
+        and its plaintext is not stripped: ``url!="/a"`` for a stored
+        ``"/a "`` would return the very rows the caller excluded."""
+        token = engine.mask_url_tail(plaintext)
+
+        assert unmasker.unmask_filter(f"url{op}{token} and action==deny") == (
+            f'url{op}"{plaintext}" and action==deny'
+        )
+
     @pytest.mark.parametrize(
         ("template", "expected"),
         [
@@ -1093,6 +1107,20 @@ class TestResolvedLiteralEscaping:
         token = engine.mask_url_tail("value\\tail")
 
         assert unmasker.unmask_filter(template.format(token=token)) == expected
+
+    def test_a_recased_whole_token_still_escapes_its_wildcards(
+        self, unmasker: ArgUnmasker, engine: FPEEngine
+    ):
+        """The marker matches case-insensitively when the token resolves, so it
+        must when deciding the value was one token: ``db_01`` as a bare
+        ``_`` would match ``dbX01`` too, and under ``!(...)`` exclude it."""
+        token = engine.mint("hostname", "db_01")
+        marker, rest = token.split("-", 1)
+        recased = f"{marker.upper()}-{rest}"
+
+        assert unmasker.unmask_filter(f'hostname like "%{recased}%"') == (
+            'hostname like "%db\\_01%"'
+        )
 
     def test_bare_like_pattern_is_written_for_like(self, unmasker: ArgUnmasker, engine: FPEEngine):
         """An unquoted ``like`` pattern is quoted on the way out, and its
