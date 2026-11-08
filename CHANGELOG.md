@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.15.1] - 2026-11-08
+
+Patch release. **Upgrade if you run with masking on (`MASKING_ENABLED=true`):** a username token that a model re-cased in its reply could resolve to a different user instead of failing, because the server still accepted the old, untagged v1 token format. v1 tokens are now refused by default. Nothing the server emits is affected: it has minted only v2 tokens since 2.14.0.
+
 ### Security
 
 - **v1 masking tokens are refused by default.** `FAZ_MASKING_ACCEPT_V1_TOKENS` now defaults to `false`. The window was opened in 2.14.0 "for one release" and stayed open through four. A v1 token carries no tag, so one a model re-cased was not refused but read: the username payload is case-sensitive, so a title-cased `user-` token resolved to a different, valid-looking user, and a filter or lookup built from it targeted that user. The server has minted only v2 tokens since 2.14.0, and a re-cased v2 token fails its tag check, so nothing the server emits needs the window. Domain and email tokens are outside the window by design and unaffected. Set `FAZ_MASKING_ACCEPT_V1_TOKENS=true` only for a conversation that still holds tokens from 2.13 or earlier; the server logs each one it accepts.
