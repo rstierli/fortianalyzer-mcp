@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **v1 masking tokens are refused by default.** `FAZ_MASKING_ACCEPT_V1_TOKENS` now defaults to `false`. The window was opened in 2.14.0 "for one release" and stayed open through four. A v1 token carries no tag, so one a model re-cased was not refused but read: the username payload is case-sensitive, so a title-cased `user-` token resolved to a different, valid-looking user, and a filter or lookup built from it targeted that user. The server has minted only v2 tokens since 2.14.0, and a re-cased v2 token fails its tag check, so nothing the server emits needs the window. Domain and email tokens are outside the window by design and unaffected. Set `FAZ_MASKING_ACCEPT_V1_TOKENS=true` only for a conversation that still holds tokens from 2.13 or earlier; the server logs each one it accepts.
+
 ## [2.15.0] - 2026-11-08
 
 Minor release. **Upgrade if you use structured `filters`, the skills, or masking with filters:** a filter value ending in a backslash made FortiAnalyzer read the rest of the filter as part of that value, and a value holding a quote or a backslash matched nothing, so under `!=` it matched every row (GHSA-m7jj-2jxw-c366, reported by Christian Dassy). Filter values are now written the way FortiAnalyzer reads a quoted literal, measured on 7.6.7, 7.6.8 and 8.0.2; some spellings change, listed under Changed. Also in this release: `search_log_file`, a new tool for a FortiManager with the FortiAnalyzer feature, where `query_logs` returns nothing (contributed by Laurent Venet); `get_alert_handlers` can narrow what it returns; the `hunt` skill's hash and TTP sweeps reach the appliance; and the wireless DNS `server` field is masked.

@@ -29,7 +29,7 @@ def _settings_with(**overrides: object) -> object:
         # point reads fails with an AttributeError rather than silently
         # exercising a different configuration, which is why this is listed
         # here instead of being defaulted away with getattr in production.
-        "FAZ_MASKING_ACCEPT_V1_TOKENS": True,
+        "FAZ_MASKING_ACCEPT_V1_TOKENS": False,
     }
     fields.update(overrides)
     return SimpleNamespace(**fields)
@@ -770,7 +770,7 @@ class TestMutatingToolGate:
 
         mcp = self._install(monkeypatch)
         engine = FPEEngine(KEY)
-        token = engine.mask_url_tail("value\\")
+        token = engine.mint("url_tail", "value\\")
         calls: list[str] = []
 
         @mcp.tool(annotations=READ_ONLY)

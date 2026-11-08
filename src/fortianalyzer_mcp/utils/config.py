@@ -150,13 +150,14 @@ class Settings(BaseSettings):
         "it from the process environment (e.g. a container's environment block).",
     )
     FAZ_MASKING_ACCEPT_V1_TOKENS: bool = Field(
-        default=True,
+        default=False,
         description=(
-            "Keep honouring v1 masking tokens on the way in. Open for one "
-            "release: tokens already sitting in a live conversation must keep "
-            "resolving, or a restart silently breaks every session that was "
-            "mid-flight. Close it once nothing returns v1 tokens; the server "
-            "logs when it accepts one so a deployment can tell."
+            "Keep honouring v1 masking tokens on the way in. Closed by "
+            "default since 2.15.1: the server has minted only v2 since 2.14.0, "
+            "and a v1 token has no tag, so one a model re-cased decrypts to a "
+            "different value instead of failing (a username's payload is "
+            "case-sensitive). Set true only for a conversation that still "
+            "holds 2.13 tokens; the server logs when it accepts one."
         ),
     )
 

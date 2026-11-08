@@ -247,3 +247,50 @@ class TestClosingTheWindowDoesNotRefuseOurOwnOutput:
         ):
             with pytest.raises(MaskingError, match="deprecation window is closed"):
                 closed.unmask_token(v1_token)
+
+
+class TestWindowClosedByDefault:
+    """The deployment default closes the window (2.15.1).
+
+    A v1 token carries no tag, so a re-cased one is not refused but read: the
+    username payload is case-sensitive, and a model that title-cases the token
+    in prose hands back a different, valid-looking user. The server has minted
+    only v2 since 2.14.0, so nothing it emits needs the window open.
+    """
+
+    def test_the_setting_defaults_to_closed(self) -> None:
+        from fortianalyzer_mcp.utils.config import Settings
+
+        assert Settings.model_fields["FAZ_MASKING_ACCEPT_V1_TOKENS"].default is False
+
+    def test_a_recased_v1_username_reads_as_another_user_with_the_window_open(self) -> None:
+        """The hazard closing the window removes, pinned so it stays visible."""
+        open_engine = FPEEngine(KEY, accept_v1_tokens=True)
+        token = open_engine.mask_username("Admin")
+        recased = token[:10] + token[10:].swapcase()
+
+        assert recased != token
+        assert open_engine.unmask_token(recased) != "Admin"
+
+    def test_a_recased_v1_username_is_refused_with_the_window_closed(self) -> None:
+        token = FPEEngine(KEY).mask_username("Admin")
+        recased = token[:10] + token[10:].swapcase()
+
+        with pytest.raises(MaskingError, match="deprecation window is closed"):
+            FPEEngine(KEY, accept_v1_tokens=False).unmask_token(recased)
+
+    @pytest.mark.parametrize("vtype", sorted(VALUES))
+    def test_everything_the_server_mints_resolves_with_the_window_closed(self, vtype: str) -> None:
+        closed = FPEEngine(KEY, accept_v1_tokens=False)
+
+        assert closed.unmask_token(closed.mint(vtype, VALUES[vtype])) == VALUES[vtype], vtype
+
+    def test_a_recased_v2_username_is_refused_not_misread(self) -> None:
+        closed = FPEEngine(KEY, accept_v1_tokens=False)
+        token = closed.mint("username", "Admin")
+        head, tag = token[:10], token[-9:]
+        recased = head + token[10:-9].swapcase() + tag
+
+        assert recased != token
+        with pytest.raises(MaskingError):
+            closed.unmask_token(recased)
