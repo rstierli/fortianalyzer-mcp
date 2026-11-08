@@ -393,7 +393,7 @@ networks:
 
 ## Available Tools
 
-**73 tools across 12 categories** (74 with the optional skills dispatcher —
+**74 tools across 12 categories** (75 with the optional skills dispatcher —
 see "Skills Layer" below). The 2.12.0 release consolidated thirteen tools into
 three; see CHANGELOG.md for the migration table.
 
@@ -426,7 +426,7 @@ three; see CHANGELOG.md for the migration table.
 | `get_device_info` | Get detailed device information |
 | `search_devices` | Search devices with filters |
 
-### Log Tools (8 tools)
+### Log Tools (9 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -437,6 +437,7 @@ three; see CHANGELOG.md for the migration table.
 | `get_log_stats` | Get log statistics |
 | `get_log_fields` | Get available log fields for a log type |
 | `get_logfiles_state` | Get log file state information |
+| `search_log_file` | Search one device's raw log file, for when `query_logs` finds nothing while the device is logging (FortiManager with the FortiAnalyzer feature) |
 | `get_pcap_file` | Download PCAP file for an IPS event |
 
 > **Aggregating instead of paging rows.** `query_logs` takes three mutually

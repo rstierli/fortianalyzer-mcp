@@ -112,12 +112,12 @@ therefore agree or nothing matches. `os_version_filter` takes
 
 ## Projection: `fields`
 
-Twelve read tools take `fields`. Not every read tool does -- check the
+13 read tools take `fields`. Not every read tool does -- check the
 docstring. They are:
 
-  query_logs, fetch_more_logs, get_alerts, get_alert_logs, get_incidents,
-  get_endpoints, get_endusers, get_report_history, get_fortiview_data,
-  search_devices, list_adoms, list_devices
+  query_logs, fetch_more_logs, search_log_file, get_alerts, get_alert_logs,
+  get_incidents, get_endpoints, get_endusers, get_report_history,
+  get_fortiview_data, search_devices, list_adoms, list_devices
 
   fields omitted   -> the curated set for that vocabulary, where one exists
   fields=["*"]     -> the full object
@@ -198,6 +198,9 @@ query budget.
 ## Choosing among overlapping tools
 
 - Raw log rows, any logtype, any filter -> query_logs.
+- query_logs finds nothing while get_log_stats shows the device logging with
+  `log-db-size` 0 (a FortiManager with the FortiAnalyzer feature) ->
+  search_log_file, which reads one device's log file instead.
 - "How much / top N", where the dimension is one FortiAnalyzer aggregates
   natively for that logtype -> query_logs(group_by="srcip"), or
   get_fortiview_data(view_name=...) when you want the view's own columns. Both

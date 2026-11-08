@@ -283,7 +283,7 @@ def test_full_mode_registers_the_whole_surface(full_tools: dict[str, Any]) -> No
     added or removed is expected to update this number together with the
     lists above.
     """
-    assert len(full_tools) == 74, f"full mode registered {len(full_tools)} tools"
+    assert len(full_tools) == 75, f"full mode registered {len(full_tools)} tools"
     assert "faz_skill" in full_tools, "skills dispatcher did not register"
 
 

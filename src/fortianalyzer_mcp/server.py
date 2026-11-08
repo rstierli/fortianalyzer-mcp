@@ -188,6 +188,7 @@ TOOL_CATALOGUE: Mapping[str, tuple[str, ...]] = {
         "get_log_stats",
         "get_log_fields",
         "get_logfiles_state",
+        "search_log_file",
         "get_pcap_file",
     ),
     "dvm": (

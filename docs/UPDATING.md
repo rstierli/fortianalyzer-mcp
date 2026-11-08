@@ -229,4 +229,4 @@ Consider implementing:
    Total FNDN Endpoints: <N>
    Implemented: <M>
    ```
-   The server currently exposes 73 tools (74 with the skills dispatcher); see the README for the authoritative per-category list.
+   The server currently exposes 74 tools (75 with the skills dispatcher); see the README for the authoritative per-category list.

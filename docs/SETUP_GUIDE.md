@@ -252,7 +252,7 @@ Claude should respond using the MCP tools.
 
 ## Available Tools
 
-The MCP server provides **73 tools** across 12 categories (74 with the optional skills dispatcher enabled — see the README's "Skills Layer" and "Data Masking" sections for the two beta, off-by-default features). The lists below are a representative selection per category; the README's "Available Tools" section is the full reference.
+The MCP server provides **74 tools** across 12 categories (75 with the optional skills dispatcher enabled — see the README's "Skills Layer" and "Data Masking" sections for the two beta, off-by-default features). The lists below are a representative selection per category; the README's "Available Tools" section is the full reference.
 
 ### System Tools (11)
 - `get_system_status` - Get FortiAnalyzer system status
@@ -261,7 +261,7 @@ The MCP server provides **73 tools** across 12 categories (74 with the optional 
 - `list_devices` / `get_device` - Device listing
 - `list_tasks` / `get_task` / `wait_for_task` - Task management
 
-### Log Tools (8)
+### Log Tools (9)
 - `query_logs` - Full log search with TID workflow; also aggregates, via
   `group_by` (exact), `sample_by` (bounded) or `count_only`. Pass `logtype`
   plus structured `filters` for what the removed `search_traffic_logs` /
@@ -271,6 +271,9 @@ The MCP server provides **73 tools** across 12 categories (74 with the optional 
 - `fetch_more_logs` - Pagination for log results
 - `cancel_log_search` - Release a pagination handle
 - `get_log_search_progress` / `get_logfiles_state` - Search and log-file state
+- `search_log_file` - Search one device's raw log file, for when `query_logs`
+  finds nothing while the device is logging (FortiManager with the
+  FortiAnalyzer feature)
 - `get_pcap_file` - Download the PCAP for an IPS event
 
 ### FortiView Tools (3)
