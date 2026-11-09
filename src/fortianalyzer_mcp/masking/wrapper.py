@@ -106,7 +106,7 @@ from fortianalyzer_mcp.masking.fpe_engine import (
     MaskingError,
     begin_v2_verification_budget,
 )
-from fortianalyzer_mcp.masking.unmask import ArgUnmasker
+from fortianalyzer_mcp.masking.unmask import ArgUnmasker, recording_resolved_values
 
 logger = logging.getLogger(__name__)
 
@@ -1451,9 +1451,17 @@ class OutputMasker:
 
     # -- the two passes -------------------------------------------------- #
 
-    def mask_result(self, obj: Any) -> Any:
-        """Mask a tool result: structured pass, then free-text pass."""
+    def mask_result(self, obj: Any, resolved: dict[str, str] | None = None) -> Any:
+        """Mask a tool result: structured pass, then free-text pass.
+
+        ``resolved`` is what the argument side resolved for this call, real
+        value -> the text the caller sent. It seeds the map pass 2 works
+        from, so an echo of such a value goes back out as the caller's own
+        token even when no row of the result carries it.
+        """
         mapping: dict[str, str] = _TrackedMapping()
+        for real, sent in (resolved or {}).items():
+            mapping[real] = sent
         keep = frozenset() if self._mask_device_identity else self._device_identity_values(obj)
         staged = self._mask_structured(obj, mapping, keep)
         return self._mask_free_text(staged, mapping, keep)
@@ -2225,9 +2233,11 @@ class OutputMasker:
 
     # -- tool-result entry point ----------------------------------------- #
 
-    def mask_tool_result(self, result: Any, tool_name: str) -> Any:
+    def mask_tool_result(
+        self, result: Any, tool_name: str, resolved: dict[str, str] | None = None
+    ) -> Any:
         try:
-            return self.mask_result(result)
+            return self.mask_result(result, resolved)
         except Exception:
             logger.exception("output masking failed for %s; raw result withheld", tool_name)
             return {
@@ -2389,8 +2399,10 @@ def install_masking(mcp: Any) -> tuple[OutputMasker, ArgUnmasker]:
                             if offending is not None:
                                 return refuse_restore(fn.__name__, offending)
                             return masker.mask_tool_result(await fn(*fa, **fk), fn.__name__)
+                        with recording_resolved_values() as resolved:
+                            real_args = unmasker.unmask_args(fk)
                         return masker.mask_tool_result(
-                            await fn(*fa, **unmasker.unmask_args(fk)), fn.__name__
+                            await fn(*fa, **real_args), fn.__name__, resolved
                         )
                     finally:
                         _AT_BOUNDARY.reset(token)
@@ -2409,7 +2421,9 @@ def install_masking(mcp: Any) -> tuple[OutputMasker, ArgUnmasker]:
                         if offending is not None:
                             return refuse_restore(fn.__name__, offending)
                         return masker.mask_tool_result(fn(*fa, **fk), fn.__name__)
-                    return masker.mask_tool_result(fn(*fa, **unmasker.unmask_args(fk)), fn.__name__)
+                    with recording_resolved_values() as resolved:
+                        real_args = unmasker.unmask_args(fk)
+                    return masker.mask_tool_result(fn(*fa, **real_args), fn.__name__, resolved)
                 finally:
                     _AT_BOUNDARY.reset(token)
 
