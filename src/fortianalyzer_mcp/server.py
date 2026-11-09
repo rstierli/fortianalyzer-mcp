@@ -627,17 +627,19 @@ def run_http() -> None:
                 await self.app(scope, receive, send)
                 return
 
-            # Check Authorization header
+            # Check Authorization header. Compare it as the bytes received:
+            # decoding it first raised UnicodeDecodeError on a value that is not
+            # valid UTF-8, a 500 for what is just a wrong token.
             headers = dict(scope.get("headers", []))
-            auth_value = headers.get(b"authorization", b"").decode()
-            expected = f"Bearer {settings.MCP_AUTH_TOKEN}"
+            auth_value = headers.get(b"authorization", b"")
+            expected = f"Bearer {settings.MCP_AUTH_TOKEN}".encode()
 
             # Hash both sides before comparing: compare_digest short-circuits on
             # length mismatch, which would leak the token length as a timing
             # side-channel. Equal-length digests keep it constant-time.
             if not hmac.compare_digest(
-                hashlib.sha256(auth_value.encode()).digest(),
-                hashlib.sha256(expected.encode()).digest(),
+                hashlib.sha256(auth_value).digest(),
+                hashlib.sha256(expected).digest(),
             ):
                 response = Response(
                     content=json.dumps(
