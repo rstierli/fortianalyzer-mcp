@@ -2,10 +2,12 @@
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
+from fortianalyzer_mcp.utils import config
 from fortianalyzer_mcp.utils.validation import (
     ADOM_PATTERN,
     DEVICE_NAME_PATTERN,
@@ -520,6 +522,18 @@ class TestValidSeverities:
 class TestGetAllowedOutputDirs:
     """Tests for get_allowed_output_dirs function."""
 
+    @pytest.fixture(autouse=True)
+    def _settings_without_output_dirs(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Keep the checkout's own .env, and whatever the settings cache holds, out of these tests.
+
+        get_allowed_output_dirs asks Settings when the variable is not in the
+        environment. A developer's .env with FAZ_ALLOWED_OUTPUT_DIRS in it
+        would otherwise answer for the "nothing configured" cases below.
+        """
+        monkeypatch.setattr(
+            config, "get_settings", lambda: SimpleNamespace(FAZ_ALLOWED_OUTPUT_DIRS=None)
+        )
+
     def test_no_env_raises_validation_error(self):
         """Test that missing env var raises ValidationError (secure by default)."""
         with patch.dict(os.environ, {}, clear=True):
@@ -573,6 +587,66 @@ class TestValidateOutputPath:
         with patch.dict(os.environ, {"FAZ_ALLOWED_OUTPUT_DIRS": "/tmp"}, clear=False):
             with pytest.raises(ValidationError, match="not within allowed"):
                 validate_output_path("/etc/passwd")
+
+
+@pytest.fixture
+def dotenv_output_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Allow one output directory through a .env file only, not the process environment.
+
+    get_settings is replaced rather than cache-cleared, so the cached settings
+    the rest of the suite shares are left as they are.
+    """
+    allowed = (tmp_path / "from-dotenv").resolve()
+    allowed.mkdir()
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"FORTIANALYZER_HOST=faz.example.com\nFAZ_ALLOWED_OUTPUT_DIRS={allowed}\n")
+    monkeypatch.delenv("FAZ_ALLOWED_OUTPUT_DIRS", raising=False)
+    settings = config.Settings(_env_file=str(env_file))
+    monkeypatch.setattr(config, "get_settings", lambda: settings)
+    return allowed
+
+
+class TestOutputDirsFromDotenv:
+    """Tests for FAZ_ALLOWED_OUTPUT_DIRS set in .env rather than the environment."""
+
+    def test_dirs_from_dotenv(self, dotenv_output_dir):
+        """Test that a directory configured only in .env is allowed."""
+        # Settings loaded the value, and loading it exported nothing.
+        assert config.get_settings().FAZ_ALLOWED_OUTPUT_DIRS == str(dotenv_output_dir)
+        assert "FAZ_ALLOWED_OUTPUT_DIRS" not in os.environ
+        assert get_allowed_output_dirs() == [dotenv_output_dir]
+
+    def test_output_path_in_dotenv_dir(self, dotenv_output_dir):
+        """Test path in a directory configured only in .env is valid."""
+        assert validate_output_path(str(dotenv_output_dir)) == dotenv_output_dir
+
+    def test_environment_wins_over_dotenv(self, dotenv_output_dir, monkeypatch, tmp_path):
+        """Test the process environment takes precedence over .env, as in Settings."""
+        from_env = tmp_path / "from-env"
+        from_env.mkdir()
+        monkeypatch.setenv("FAZ_ALLOWED_OUTPUT_DIRS", str(from_env))
+        assert get_allowed_output_dirs() == [from_env.resolve()]
+
+    def test_empty_environment_value_wins_over_dotenv(self, dotenv_output_dir, monkeypatch):
+        """Test an empty variable in the environment still disables file output.
+
+        Present and empty is a value: .env must not fill it in behind the
+        operator's back.
+        """
+        monkeypatch.setenv("FAZ_ALLOWED_OUTPUT_DIRS", "")
+        with pytest.raises(ValidationError, match="No output directories configured"):
+            get_allowed_output_dirs()
+
+    def test_settings_that_cannot_load_leave_output_disabled(self, monkeypatch):
+        """Test a Settings failure reads as "nothing configured", not as a crash."""
+
+        def broken_settings():
+            raise RuntimeError("settings cannot be loaded")
+
+        monkeypatch.delenv("FAZ_ALLOWED_OUTPUT_DIRS", raising=False)
+        monkeypatch.setattr(config, "get_settings", broken_settings)
+        with pytest.raises(ValidationError, match="No output directories configured"):
+            get_allowed_output_dirs()
 
 
 class TestValidateFilename:
