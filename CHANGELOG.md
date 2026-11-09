@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.16.1] - 2026-11-09
+
+Patch release. **Upgrade if a monitor or dashboard reads `fortianalyzer_connected` from `/health`:** once the server had connected, the flag stayed `true` while FortiAnalyzer was down. It now turns `false` on the first request that cannot reach the appliance and `true` again on the first that does. Nothing else changes: `/health` still answers HTTP 200 with `status: healthy`, so a Docker health check does not restart the container during an outage.
+
 ### Fixed
 
 - **`/health` reports a FortiAnalyzer that dropped after connecting as not connected.** `fortianalyzer_connected` read the client's login state, which stays set through an outage: only a session error or a disconnect clears it, and an API-token client never gets a session error. A server that connected once therefore reported `true` for as long as the appliance was down. The flag now also requires the last request to have reached FortiAnalyzer: a transport error or timeout sets it to `false`, and the next reply clears it again, error codes included. It is passive, so an idle server notices a drop on its next tool call. `/health` makes no FortiAnalyzer calls of its own, because it is unauthenticated. It still returns HTTP 200 with `status: healthy`; only the flag changes.
