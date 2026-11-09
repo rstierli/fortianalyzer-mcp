@@ -598,6 +598,62 @@ class TestTriageSkill:
         # literal; an empty result then falls back to the window scan (call 1).
         assert alerts_mock.await_args_list[0].kwargs["filter"] == "alertid=='alert\"-x'"
 
+    async def test_padded_alert_id_matches_its_own_row(self):
+        # The filter is written from the stripped id, so the row match has to
+        # compare against that same id; otherwise the alert never matches its
+        # own row and the subject degrades to the severity-less details record.
+        details = ok(data={"data": [{"alertid": "alert-002", "epids": [7]}]})
+        with (
+            t(GET_ALERTS, return_value=ok(data=[ALERT_UNLINKED])) as alerts_mock,
+            t(GET_ALERT_DETAILS, return_value=details),
+            t(GET_ALERT_LOGS, return_value=ok(data=[])),
+            t(GET_INCIDENTS, return_value=ok(data=[])),
+            t(GET_ALERT_INCIDENT_STATS, return_value=ok(data={})),
+        ):
+            result = await handlers.run_triage(TriageParams(alert_id=" alert-002 "))
+        assert alerts_mock.await_args_list[0].kwargs["filter"] == "alertid==alert-002"
+        assert result.subject == ALERT_UNLINKED
+        assert result.assessment.priority == "medium"
+        alerts_mock.assert_awaited_once()  # matched on the filter hit, no window scan
+
+    async def test_padded_alert_id_matches_in_the_window_scan(self):
+        details = ok(data={"data": [{"alertid": "alert-002", "epids": [7]}]})
+        with (
+            t(GET_ALERTS, side_effect=[ok(data=[]), ok(data=[ALERT_UNLINKED])]),
+            t(GET_ALERT_DETAILS, return_value=details),
+            t(GET_ALERT_LOGS, return_value=ok(data=[])),
+            t(GET_INCIDENTS, return_value=ok(data=[])),
+            t(GET_ALERT_INCIDENT_STATS, return_value=ok(data={})),
+        ):
+            result = await handlers.run_triage(TriageParams(alert_id=" alert-002 "))
+        assert result.subject == ALERT_UNLINKED
+
+    async def test_padded_alert_id_is_stripped_for_details_and_logs(self):
+        with (
+            t(GET_ALERTS, return_value=ok(data=[ALERT_UNLINKED])),
+            t(GET_ALERT_DETAILS, return_value=self.DETAILS) as details_mock,
+            t(GET_ALERT_LOGS, return_value=ok(data=[])) as logs_mock,
+            t(GET_INCIDENTS, return_value=ok(data=[])),
+            t(GET_ALERT_INCIDENT_STATS, return_value=ok(data={})),
+        ):
+            await handlers.run_triage(TriageParams(alert_id=" alert-002 "))
+        details_mock.assert_awaited_once_with(alert_ids=["alert-002"], adom=None)
+        logs_mock.assert_awaited_once_with(alert_ids=["alert-002"], adom=None, fields=["*"])
+
+    async def test_padded_alert_id_matches_attachment_membership(self):
+        candidates = [{"incid": "inc-001", "name": "one"}]
+        mapping = {"inc-001": [alertevent_attachment("alert-002", {"severity": "medium"})]}
+        with (
+            t(GET_ALERTS, return_value=ok(data=[ALERT_UNLINKED])),
+            t(GET_ALERT_DETAILS, return_value=self.DETAILS),
+            t(GET_ALERT_LOGS, return_value=ok(data=[])),
+            t(GET_INCIDENTS, return_value=ok(data=candidates)),
+            t(GET_ALERT_INCIDENT_STATS, return_value=ok(data={})),
+            attachment_client_by_incid(mapping),
+        ):
+            result = await handlers.run_triage(TriageParams(alert_id=" alert-002 "))
+        assert result.related == candidates
+
     async def test_alert_related_incidents_by_attachment_membership(self):
         # Live alerts carry no incident-linkage fields; the authoritative
         # relation is which context incidents attach this alertid.
