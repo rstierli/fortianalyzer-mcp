@@ -68,6 +68,48 @@ class TestComparisonLiteral:
             sanitize_filter_value('say "x"\\', "msg")
 
 
+class TestValuesNotReadAsValuesUnquoted:
+    """Some values made only of unquoted-safe characters are still not values unquoted.
+
+    Measured on 7.6.8 and 8.0.2 with ``app==<value>``: ``and``, ``or`` and
+    ``not`` in any case, a value made of hyphens, and a value that starts or
+    ends with one colon are answered with ``Invalid filter``. The same values
+    in quotes are accepted.
+    """
+
+    @pytest.mark.parametrize("value", ["or", "OR", "and", "And", "not", "Not"])
+    def test_an_operator_word_is_quoted(self, value: str) -> None:
+        assert sanitize_filter_value(value) == f'"{value}"'
+
+    @pytest.mark.parametrize("value", ["-", "--", ":", "a:", ":a"])
+    def test_hyphens_and_a_single_edge_colon_are_quoted(self, value: str) -> None:
+        assert sanitize_filter_value(value) == f'"{value}"'
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "ornate",
+            "like",
+            "in",
+            "null",
+            "-foo",
+            "foo-",
+            "a-b",
+            "-1",
+            "a:b",
+            "::1",
+            "fe80::",
+            "::a",
+            "a::",
+        ],
+    )
+    def test_a_value_the_parser_takes_unquoted_stays_unquoted(self, value: str) -> None:
+        """Each of these was accepted unquoted on 8.0.2: a word that only
+        starts like an operator, a negative number, and the IPv6 forms that
+        start or end with two colons."""
+        assert sanitize_filter_value(value) == value
+
+
 class TestLikePattern:
     """``like_filter_pattern`` writes the ``%...%`` literal for ``contains``."""
 
