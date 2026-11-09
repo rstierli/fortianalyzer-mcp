@@ -1483,7 +1483,7 @@ class TestSubstitutionBoundaryExcludesTheFF3PadChar:
     the WHOLE alphabet including that padding position, so the ciphertext a
     short HOSTNAME/USERNAME value produces can legitimately contain a
     literal ``~``. ``@`` is excluded from the same class for the parallel
-    reason on the email side. The substitution boundary class
+    reason on the email side. The leading substitution boundary class
     (``[A-Za-z0-9._-]`` in ``_build_substitution_plan``) does not include
     either, so a token containing one is not "one word" to anything that
     walks text by that boundary.

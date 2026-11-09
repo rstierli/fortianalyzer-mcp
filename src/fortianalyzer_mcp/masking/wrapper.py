@@ -1298,10 +1298,18 @@ class OutputMasker:
         # regex matches a spelling that ``casefold`` then fails to look up,
         # and a known value degrades to an irreversible placeholder. Re-casing
         # an identifier means ASCII case, so ASCII folding is what we want.
+        #
+        # The trailing boundary keeps a known value from being replaced as
+        # the prefix of a longer name, and a ".", "-" or "_" only continues
+        # a name when a letter or digit follows it directly. Refusing on the
+        # separator alone left the value in clear before a sentence-final
+        # period or a DNS root dot. Anything else after the separator
+        # (nothing, a space, another separator) is ambiguous at best, and
+        # in doubt the value masks.
         pattern = re.compile(
             r"(?<![A-Za-z0-9._-])(?ai:"
             + "|".join(re.escape(raw) for raw in raws)
-            + r")(?![A-Za-z0-9._-])"
+            + r")(?![A-Za-z0-9]|[._-][A-Za-z0-9])"
         )
         version = _version_of(mapping)
         assert version is not None  # only called when _plan_for has one
@@ -1332,10 +1340,11 @@ class OutputMasker:
             if key in folded and folded[key] != mapping[raw]:
                 ambiguous.add(key)
             folded.setdefault(key, mapping[raw])
+        # Same boundaries as _build_substitution_plan; the reasons are there.
         pattern = re.compile(
             r"(?<![A-Za-z0-9._-])(?ai:"
             + "|".join(re.escape(raw) for raw in raws)
-            + r")(?![A-Za-z0-9._-])"
+            + r")(?![A-Za-z0-9]|[._-][A-Za-z0-9])"
         )
         return _SubstitutionPlan(
             version=-1,
