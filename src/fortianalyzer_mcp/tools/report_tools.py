@@ -10,6 +10,7 @@ import io
 import logging
 import os
 import zipfile
+import zlib
 from datetime import datetime
 from typing import Any
 
@@ -921,7 +922,7 @@ async def save_report(
         # Extract ZIP contents with size limit for security
         MAX_EXTRACT_SIZE = 100 * 1024 * 1024  # 100MB per file
         MAX_TOTAL_SIZE = 500 * 1024 * 1024  # 500MB total
-        saved_files = []
+        saved_files: list[str] = []
         total_extracted = 0
 
         try:
@@ -951,8 +952,21 @@ async def save_report(
 
                     # Read file content. The central-directory file_size above is
                     # untrusted metadata; cap the actual decompressed bytes too.
-                    with zf.open(filename) as src:
-                        content = src.read(MAX_EXTRACT_SIZE + 1)
+                    try:
+                        with zf.open(filename) as src:
+                            content = src.read(MAX_EXTRACT_SIZE + 1)
+                    except (zipfile.BadZipFile, zlib.error) as e:
+                        # The archive opened, so this is a damaged ZIP and not
+                        # raw report data: it must not reach the raw-save
+                        # fallback below. Remove what this call already
+                        # extracted, so this error does not leave part of the
+                        # report next to it.
+                        for saved in saved_files:
+                            os.remove(saved)
+                        return {
+                            "status": "error",
+                            "message": f"Corrupt report archive: could not extract {filename} ({e}). No files were saved.",
+                        }
                     if len(content) > MAX_EXTRACT_SIZE:
                         return {
                             "status": "error",

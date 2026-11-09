@@ -4,6 +4,14 @@ Tests the client methods for report generation and management operations.
 Follows the same pattern as test_system_tools.py to avoid server initialization.
 """
 
+import base64
+import io
+import struct
+import zipfile
+import zlib
+from pathlib import Path
+from typing import Any
+
 import pytest
 
 import fortianalyzer_mcp.tools.report_tools as report_tools
@@ -368,3 +376,124 @@ class TestReportHistoryProjection:
 
         assert result["data"][0].keys() == self.ROW.keys()
         assert result["warnings"] == []
+
+
+class TestSaveReportDamagedArchive:
+    """A ZIP that opens but has a damaged member is an error, not a saved report.
+
+    ``save_report`` writes the payload as-is when it is not a ZIP at all. That
+    fallback must not catch an archive whose directory reads fine and whose
+    damage only shows when a member is extracted. The archives here are built
+    with ``zipfile`` and then get one byte changed inside a member's data.
+    """
+
+    SUMMARY = ("summary.txt", b"Report summary\n" * 8)
+    BODY = ("report-body.pdf", b"%PDF-1.4 report body\n" * 64)
+
+    @staticmethod
+    def _archive(members: list[tuple[str, bytes]], compression: int = zipfile.ZIP_STORED) -> bytes:
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression) as zf:
+            for name, content in members:
+                zf.writestr(name, content)
+        return buffer.getvalue()
+
+    @staticmethod
+    def _damage(archive: bytes, member: str, raises: type[Exception]) -> bytes:
+        """Overwrite the first data byte of ``member`` and pin how reading it fails."""
+        with zipfile.ZipFile(io.BytesIO(archive)) as zf:
+            header = zf.getinfo(member).header_offset
+        # Local file header: 30 fixed bytes, then the name and the extra field.
+        name_len, extra_len = struct.unpack_from("<HH", archive, header + 26)
+        damaged = bytearray(archive)
+        damaged[header + 30 + name_len + extra_len] = 0xFF
+        # The archive still opens; only extracting the member fails.
+        with zipfile.ZipFile(io.BytesIO(damaged)) as zf, pytest.raises(raises):
+            zf.read(member)
+        return bytes(damaged)
+
+    async def _save(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, payload: bytes
+    ) -> dict[str, Any]:
+        class FakeClient:
+            async def report_get_data(self, **kwargs: object) -> dict[str, object]:
+                return {"name": "Security Report", "data": base64.b64encode(payload).decode()}
+
+        monkeypatch.setenv("FAZ_ALLOWED_OUTPUT_DIRS", str(tmp_path))
+        monkeypatch.setattr(report_tools, "_get_client", lambda: FakeClient())
+        return await report_tools.save_report(
+            tid="report-uuid-001", output_dir=str(tmp_path), adom="root"
+        )
+
+    async def test_bad_crc_member_is_not_saved_as_the_report(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The damaged archive used to be written whole as ``<name>.pdf``, as a success."""
+        damaged = self._damage(self._archive([self.BODY]), "report-body.pdf", zipfile.BadZipFile)
+
+        result = await self._save(monkeypatch, tmp_path, damaged)
+
+        assert result["status"] == "error"
+        assert "report-body.pdf" in result["message"]
+        assert "files" not in result
+        assert list(tmp_path.iterdir()) == []
+
+    async def test_members_extracted_before_the_damage_are_removed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The members this call wrote are removed, and nothing else is.
+
+        The output directory already holds a file with a member's name and one
+        that has nothing to do with the report. Both stay as they were.
+        """
+        (tmp_path / "summary.txt").write_bytes(b"an earlier report")
+        (tmp_path / "unrelated.cfg").write_bytes(b"not a report")
+        chart = ("chart-1.png", b"\x89PNG chart\n" * 8)
+        archive = self._archive([self.SUMMARY, chart, self.BODY])
+        damaged = self._damage(archive, "report-body.pdf", zipfile.BadZipFile)
+
+        result = await self._save(monkeypatch, tmp_path, damaged)
+
+        assert result["status"] == "error"
+        assert "files" not in result
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["summary.txt", "unrelated.cfg"]
+        assert (tmp_path / "summary.txt").read_bytes() == b"an earlier report"
+        assert (tmp_path / "unrelated.cfg").read_bytes() == b"not a report"
+
+    async def test_corrupt_deflate_stream_names_the_member(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A member that fails in zlib, not on its CRC, gets the same answer."""
+        archive = self._archive([self.SUMMARY, self.BODY], zipfile.ZIP_DEFLATED)
+        damaged = self._damage(archive, "report-body.pdf", zlib.error)
+
+        result = await self._save(monkeypatch, tmp_path, damaged)
+
+        assert result["status"] == "error"
+        assert "report-body.pdf" in result["message"]
+        assert list(tmp_path.iterdir()) == []
+
+    async def test_payload_that_is_not_a_zip_is_still_saved_as_is(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Control: the raw-save fallback stays for data that is not an archive."""
+        payload = b"%PDF-1.4 plain report\n"
+
+        result = await self._save(monkeypatch, tmp_path, payload)
+
+        assert result["status"] == "success"
+        assert [p.name for p in tmp_path.iterdir()] == ["Security Report.pdf"]
+        assert (tmp_path / "Security Report.pdf").read_bytes() == payload
+
+    async def test_intact_archive_is_extracted(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Control: the same archive, undamaged, extracts every member."""
+        archive = self._archive([self.SUMMARY, self.BODY])
+
+        result = await self._save(monkeypatch, tmp_path, archive)
+
+        assert result["status"] == "success"
+        assert result["file_count"] == 2
+        assert (tmp_path / "summary.txt").read_bytes() == self.SUMMARY[1]
+        assert (tmp_path / "report-body.pdf").read_bytes() == self.BODY[1]
