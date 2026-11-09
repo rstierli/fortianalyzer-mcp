@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **A value resolved from a masking token is masked again wherever the result echoes it (#80).** With masking on, the wrapper resolves the tokens in a call's arguments and the tool then echoes what it was called with: the `filter` it sent, an error that names the value. The output side only substituted values the result itself carried under a typed key, so a `count_only`, an empty page, or a row page whose `fields` left the field out returned the plaintext of the token the caller had just sent. Measured on a deployed 2.16.1 against 8.0.2: `count_only` with `qname==<token>`, raw or as a structured condition, answered with the real name in `filter`. Addresses were not affected (the free-text scan finds IPv4, MAC and email by shape); domains, hostnames, usernames, URLs and IPv6 addresses were. The argument side now records what it resolved for the call, and the output side masks those values back to the caller's own token in every text field it scans. The record belongs to one call. A value shorter than four characters is still not looked for inside prose, as before, but the filter a tool was given is recorded whole, so its echo is covered.
+
+### Fixed
+
+- **A `like` pattern in an echoed filter is no longer mangled.** The free-text pass decodes `%XX` to find a percent-encoded identifier (#80), and when the decoded text held something to mask, the decoded text was what left. In a filter the percent signs are wildcards: `msg like "%admin%"` came back as U+FFFD followed by `min%`, because `%ad` is not UTF-8, and `%2026%` as a space followed by `26%`. `filter`, `filter_applied`, `pivot` and `pivot_filter` are no longer decoded, and elsewhere a run of escapes that is not UTF-8 stays as written (`95%ad hoc` in a message kept its characters). An encoded MAC or email in a message is found as before.
+
 ## [2.16.1] - 2026-11-09
 
 Patch release. **Upgrade if a monitor or dashboard reads `fortianalyzer_connected` from `/health`:** once the server had connected, the flag stayed `true` while FortiAnalyzer was down. It now turns `false` on the first request that cannot reach the appliance and `true` again on the first that does. Nothing else changes: `/health` still answers HTTP 200 with `status: healthy`, so a Docker health check does not restart the container during an outage.
