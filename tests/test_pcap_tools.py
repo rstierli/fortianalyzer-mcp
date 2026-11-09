@@ -501,3 +501,79 @@ class TestPCAPSearchPollPath:
         assert result["message"] == "No IPS events found with PCAP available"
         assert fake.starts == 1
         assert fake.fetches == 1
+
+
+class TestSuppliedEmptyFilterValues:
+    """A filter argument that was supplied reaches its validator even when it
+    is falsy. Only None means "not supplied"."""
+
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"srcip": ""}, "srcip cannot be empty"),
+            ({"dstip": ""}, "dstip cannot be empty"),
+            ({"srcport": 0}, "Invalid srcport '0'"),
+            ({"dstport": 0}, "Invalid dstport '0'"),
+            ({"session_id": 0}, "Invalid session ID '0'"),
+            ({"cve": ""}, "CVE cannot be empty"),
+            # An empty cve is not a request for "any CVE" either.
+            ({"cve": "", "has_cve": True}, "CVE cannot be empty"),
+        ],
+        ids=["srcip", "dstip", "srcport", "dstport", "session_id", "cve", "cve_with_has_cve"],
+    )
+    def test_builder_refuses_a_supplied_falsy_value(
+        self, kwargs: dict[str, object], message: str
+    ) -> None:
+        with pytest.raises(ValidationError, match=message):
+            pcap_tools._build_ips_filter(**kwargs)
+
+    def test_builder_still_skips_arguments_left_as_none(self) -> None:
+        """The control: None is the one value that builds no clause."""
+        result = pcap_tools._build_ips_filter(
+            cve=None, srcip=None, dstip=None, srcport=None, dstport=None, session_id=None
+        )
+        assert result is None
+
+    async def test_search_ips_logs_refuses_port_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """srcport=0 used to be dropped: the search ran over every port and
+        filter_applied did not mention it."""
+        fake = _PollFetchFaz([])
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await pcap_tools.search_ips_logs(adom="root", srcport=0, time_range=_CUSTOM_RANGE)
+
+        assert result["status"] == "error"
+        assert "Invalid srcport '0'" in result["message"]
+        assert fake.starts == 0
+
+    async def test_search_and_download_pcaps_refuses_an_empty_srcip(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """srcip="" used to be dropped: PCAPs were searched for every source."""
+        monkeypatch.setenv("FAZ_ALLOWED_OUTPUT_DIRS", str(tmp_path))
+        fake = _PollFetchFaz([])
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await pcap_tools.search_and_download_pcaps(
+            adom="root", srcip="", time_range=_CUSTOM_RANGE, output_dir=str(tmp_path)
+        )
+
+        assert result["status"] == "error"
+        assert "srcip cannot be empty" in result["message"]
+        assert fake.starts == 0
+
+    async def test_list_available_pcaps_refuses_an_empty_dstip(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The listing passes srcip and dstip on to the same builder: dstip=""
+        used to list the captures of every destination."""
+        fake = _PollFetchFaz([])
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await pcap_tools.list_available_pcaps(
+            adom="root", dstip="", time_range=_CUSTOM_RANGE
+        )
+
+        assert result["status"] == "error"
+        assert "dstip cannot be empty" in result["message"]
+        assert fake.starts == 0

@@ -145,26 +145,30 @@ def _build_ips_filter(
             act_parts = [f'action="{a}"' for a in act_values]
             filters.append(f"({' or '.join(act_parts)})")
 
+    # For cve, the IPs, the ports and the session ID only None means "not
+    # supplied". A supplied "" or 0 has to reach its validator and be refused:
+    # dropping it would run the search without the filter the caller asked for.
+
     # CVE filters
-    if cve:
+    if cve is not None:
         filters.append(f'cve="{validate_cve(cve)}"')
     elif has_cve:
         filters.append('cve!=""')
 
     # IP filters (validated as IP/CIDR)
-    if srcip:
+    if srcip is not None:
         filters.append(f'srcip="{validate_ip_or_cidr(srcip, "srcip")}"')
-    if dstip:
+    if dstip is not None:
         filters.append(f'dstip="{validate_ip_or_cidr(dstip, "dstip")}"')
 
     # Port filters (validated as integers 1-65535)
-    if srcport:
+    if srcport is not None:
         filters.append(f"srcport=={validate_port(srcport, 'srcport')}")
-    if dstport:
+    if dstport is not None:
         filters.append(f"dstport=={validate_port(dstport, 'dstport')}")
 
     # Session ID filter (validated as positive integer)
-    if session_id:
+    if session_id is not None:
         filters.append(f"sessionid=={validate_session_id(session_id)}")
 
     # PCAP availability filter
