@@ -1023,3 +1023,105 @@ class TestTokenAuthLivenessProbe:
         assert status == {"Hostname": "faz-01"}
         assert client.is_connected
         assert stub.get.call_count == 3
+
+
+def _read_timeout_from_pyfmg() -> FMGBaseException:
+    """What pyfmg's verbs raise on a read timeout: the timeout is caught by
+    their catch-all and re-raised as FMGBaseException, kept as __context__."""
+    from requests.exceptions import ReadTimeout
+
+    try:
+        try:
+            raise ReadTimeout("read timed out")
+        except Exception as err:
+            raise FMGBaseException(f"Response parser error: {type(err)} {err}")  # noqa: B904
+    except FMGBaseException as wrapped:
+        return wrapped
+
+
+class TestReachability:
+    """is_connected stays True through an outage: only a session error or
+    disconnect clears it, and an API-token client never sees a session error.
+    /health read it, so it said connected long after FortiAnalyzer dropped.
+    is_reachable follows the last request instead."""
+
+    async def _connected_token_client(self, monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+        stub = _stub_fortimanager(monkeypatch)
+        stub.get.return_value = (0, {"Hostname": "faz-01"})  # connect probe
+        self.client = _token_client()
+        await self.client.connect()
+        assert self.client.is_reachable
+        return stub
+
+    async def test_transport_error_marks_unreachable_and_success_clears_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stub = await self._connected_token_client(monkeypatch)
+        stub.get.side_effect = FMGConnectionError("Connection error: ConnectTimeout")
+        monkeypatch.setattr(self.client, "_TRANSIENT_BACKOFF_BASE", 0)
+
+        with pytest.raises(FMGConnectionError):
+            await self.client.get_system_status()
+
+        assert self.client.is_connected  # the bug: this alone fed /health
+        assert not self.client.is_reachable
+
+        stub.get.side_effect = None
+        await self.client.get_system_status()
+        assert self.client.is_reachable
+
+    async def test_pyfmg_wrapped_read_timeout_marks_unreachable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stub = await self._connected_token_client(monkeypatch)
+        stub.get.side_effect = _read_timeout_from_pyfmg()
+
+        with pytest.raises(FMGBaseException):
+            await self.client.get_system_status()
+
+        assert not self.client.is_reachable
+
+    async def test_faz_error_code_counts_as_reachable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An error code is FortiAnalyzer answering."""
+        from fortianalyzer_mcp.utils.errors import ResourceNotFoundError
+
+        stub = await self._connected_token_client(monkeypatch)
+        self.client._unreachable = True
+        stub.get.return_value = (-4, {"status": {"code": -4, "message": "Object not found"}})
+
+        with pytest.raises(ResourceNotFoundError):
+            await self.client.get_system_status()
+
+        assert self.client.is_reachable
+
+    async def test_local_not_connected_leaves_the_flag_alone(self) -> None:
+        """A local "Not connected" never reached the network, so it says
+        nothing about FortiAnalyzer either way."""
+        client = _bare_client()
+        client._connected = True
+        client._fmg = MagicMock()
+        client._unreachable = True
+
+        async def factory() -> str:
+            raise ConnectionError("Not connected. Call connect() first.")
+
+        async def failed_reconnect() -> None:
+            raise ConnectionError("Failed to connect to FortiAnalyzer: down")
+
+        client._force_reconnect = failed_reconnect  # type: ignore[method-assign]
+
+        with pytest.raises(ConnectionError):
+            await client._execute_resilient(factory, sleep=_no_sleep)
+
+        assert client._unreachable
+
+    async def test_reconnect_clears_the_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        await self._connected_token_client(monkeypatch)
+        self.client._unreachable = True
+        await self.client.disconnect()
+
+        await self.client.connect()
+
+        assert self.client.is_reachable
