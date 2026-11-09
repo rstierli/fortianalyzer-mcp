@@ -3138,7 +3138,14 @@ def _deep_headline(
     else:
         parts.append("root cause: none")
     if isinstance(impact, Impact):
-        touched = sum(v for e in impact.entities for v in e.counts.values())
+        # Log rows only: counts also holds the asset total under "assets",
+        # and an endpoint is not a lateral row.
+        touched = sum(
+            len(rows)
+            for e in impact.entities
+            for rows in e.lateral_activity.values()
+            if isinstance(rows, list)
+        )
         parts.append(
             f"impact: {impact.entity_count} entities, {touched} lateral rows "
             f"({impact.lateral_searches_run} searches)"
