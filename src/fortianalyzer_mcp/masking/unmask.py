@@ -454,6 +454,26 @@ class ArgUnmasker:
 
     # -- filter expressions ------------------------------------------------ #
 
+    def _refuse_unopened_token(self, value: str) -> None:
+        """Refuse a filter whose value is a masking token that did not open.
+
+        ``value`` is a clause value that resolution left unchanged. A token
+        minted under another key, or one that was altered, is left as written
+        everywhere else so that a validator downstream rejects it. A filter
+        has no such validator: FortiAnalyzer compares the field against the
+        token text, nothing matches, and under a negated operator that
+        returns every row. Only a value that is one whole token is refused;
+        token-shaped text inside prose is mostly not a token.
+        """
+        candidate = value.strip()
+        if self._engine.is_v2_shaped(candidate) or candidate.lower().endswith(
+            "." + self._engine.mask_suffix
+        ):
+            raise ValidationError(
+                "a masking token in the filter did not resolve: it was minted under "
+                "another key or it was altered; the filter was not sent"
+            )
+
     def unmask_filter(self, expression: str) -> str:
         """Resolve tokens inside a FAZ filter expression.
 
@@ -465,7 +485,8 @@ class ArgUnmasker:
         Raises:
             ValidationError: If a resolved value cannot be written as one
                 filter literal (it ends in a backslash, holds both quote
-                characters, or holds a control character). A token left in
+                characters, or holds a control character), or if a clause
+                value is a token that does not open. A token left in
                 place would match nothing, which under a negated operator
                 returns every row, so the filter is refused instead.
         """
@@ -488,6 +509,7 @@ class ArgUnmasker:
                 vtype = FIELD_TYPES.get(field.lower())
                 resolved = self.resolve_scalar(core, vtype)
             if resolved == core:
+                self._refuse_unopened_token(core)
                 return match.group(0)
             # A URL or a prefixed value is resolved in parts; the clause value
             # as a whole is what the tool echoes.
@@ -614,7 +636,15 @@ class ArgUnmasker:
 
         field = data.get("field")
         if isinstance(field, str):
-            data["value"] = self._unmask_entry(canonical_log_field(field), data.get("value"))
+            before = data.get("value")
+            data["value"] = self._unmask_entry(canonical_log_field(field), before)
+            # A condition compiles to a filter clause, so a token that did not
+            # open is refused here as it is in ``unmask_filter``.
+            was = before if isinstance(before, list) else [before]
+            now = data["value"] if isinstance(data["value"], list) else [data["value"]]
+            for old, new in zip(was, now, strict=False):
+                if isinstance(old, str) and new == old:
+                    self._refuse_unopened_token(old)
 
         if is_model:
             return type(condition).model_validate(data)
