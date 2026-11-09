@@ -74,8 +74,15 @@ class FakeFaz:
         stall: bool = False,
         total_overrides: list[int | None] | None = None,
         scanned_logs: int | None = None,
+        segments: list[int] | None = None,
     ) -> None:
         self.dataset = dataset
+        # A model of what 7.6.8 and 8.0.2 were measured to do (#148): the
+        # window is read in parts, newest first, and the search stops after
+        # the first part that gives it the rows for the page asked for, so
+        # ``total-count`` and ``scanned-logs`` cover only the parts read. Each
+        # entry is the row count of one part. Unset: one part, read in full.
+        self.segments = segments
         # ``scanned-logs`` on each final fetch when set, as 7.6.7 sends it.
         self.scanned_logs = scanned_logs
         self.tz = tz
@@ -193,6 +200,14 @@ class FakeFaz:
             result["total-count"] = len(self.dataset)
         if self.scanned_logs is not None:
             result["scanned-logs"] = self.scanned_logs
+        if self.segments is not None:
+            read = 0
+            for size in self.segments:
+                read += size
+                if read >= offset + limit:
+                    break
+            result["total-count"] = read
+            result["scanned-logs"] = read
         return result
 
     async def logsearch_cancel(self, adom: str, tid: int) -> dict[str, object]:
@@ -307,6 +322,79 @@ class TestScannedLogs:
 
         assert "scanned_logs" not in counted
         assert "scanned_logs" not in first
+
+
+class TestCountOnlyReadsTheWholeWindow:
+    """``count_only`` is the count of the window, not of the part read first (#148).
+
+    Measured on 7.6.8 and 8.0.2: a search stops once it has the rows for the
+    page it was asked for, and ``total-count`` then covers only the part of
+    the window read by then. Over one closed 7-day attack window on 8.0.2 the
+    count was 26 at ``limit`` 1 and 5, and 65 at 30 and 100; over 24 hours of
+    traffic it was 273,771 at the default limit against 2,451,583 in the window.
+    """
+
+    async def test_counts_past_the_newest_segment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _install(monkeypatch, FakeFaz(_rows(65), segments=[26, 39]))
+
+        result = await log_tools.query_logs(
+            adom="root", logtype="attack", time_range=CUSTOM_RANGE, count_only=True, limit=1
+        )
+
+        assert result["total"] == 65
+        assert result["total_is_known"] is True
+        assert result["scanned_logs"] == 65
+
+    async def test_a_newest_segment_larger_than_the_limit_does_not_end_the_count(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The traffic case: the part read first fills any page, so the count
+        was the same wrong figure at limit 1, 100 and 1000."""
+        _install(monkeypatch, FakeFaz(_rows(2500), segments=[1200, 800, 500]))
+
+        counts = [
+            (
+                await log_tools.query_logs(
+                    adom="root", time_range=CUSTOM_RANGE, count_only=True, limit=limit
+                )
+            )["total"]
+            for limit in (1, 100, 1000)
+        ]
+
+        assert counts == [2500, 2500, 2500]
+
+    async def test_a_count_the_search_did_not_finish_is_not_reported_as_known(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An appliance that answers the count request with a full page stopped
+        on the page, not at the end of the window."""
+
+        class IgnoresOffset(FakeFaz):
+            async def logsearch_fetch(
+                self, adom: str, tid: int, limit: int = 50, offset: int = 0
+            ) -> dict[str, object]:
+                return await super().logsearch_fetch(adom, tid, limit=limit, offset=0)
+
+        _install(monkeypatch, IgnoresOffset(_rows(65), segments=[26, 39]))
+
+        result = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, count_only=True)
+
+        assert result["total_is_known"] is False
+        assert any("lower bound" in w for w in result["warnings"])
+
+    async def test_a_count_that_times_out_says_what_a_count_costs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(log_tools, "POLL_INTERVAL", 0.005)
+        monkeypatch.setattr(log_tools, "_INITIAL_POLL_DELAY", 0.005)
+        _install(monkeypatch, FakeFaz(_rows(8), stall=True))
+
+        result = await log_tools.query_logs(
+            adom="root", time_range=CUSTOM_RANGE, count_only=True, timeout=1
+        )
+
+        assert result["error"] == "search_timeout"
+        assert "reads every log in the window" in result["recommendation"]
 
 
 class TestFetchMoreLogs:

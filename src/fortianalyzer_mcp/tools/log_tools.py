@@ -63,6 +63,16 @@ POLL_INTERVAL = 1.0
 _INITIAL_POLL_DELAY = 0.25
 # Appliance maximum for the logsearch fetch limit (rejects > 1000).
 LOG_FETCH_LIMIT_MAX = 1000
+# The offset ``count_only`` asks its page from. A logsearch stops as soon as it
+# has the rows for the page it was asked for, and ``total-count`` then covers
+# only the part of the window it had read (#148). Measured on 7.6.8 and 8.0.2:
+# over six hours of traffic on 8.0.2 the count was 297,840 at limit 1, 100 and
+# 1000 where the window held 631,868, because the part read first already
+# holds more rows than any page. A page at an offset no window reaches cannot
+# fill, so the search reads the whole window and ``total-count`` is the count:
+# six one-hour counts taken this way add up to the six-hour one exactly. Both
+# builds accept this value and answer with no rows.
+COUNT_ONLY_OFFSET = 2_000_000_000
 # Shared recovery budget for ALL re-issue causes within one page (invalid-tid
 # during count, invalid-tid race during fetch, and the 7.6.7 "premature 100%"
 # empty page). Contract: at most 1 initial start + MAX_SEARCH_REISSUES recovery
@@ -228,9 +238,10 @@ def _scanned_logs(page: dict[str, Any]) -> dict[str, int]:
 
     How many logs the appliance read to find the matches, beside
     ``total``. Reported only: nothing here decides whether ``total`` is
-    exact from it. #148 saw ``total-count`` move with ``limit`` on one
-    appliance and not on 7.6.7, 7.6.8 or 8.0.2, and whether this figure
-    moves with it there is not measured yet.
+    exact from it. It moves with ``total-count`` when a search stops early
+    (#148; on 8.0.2 both read 26 at ``limit`` 1 and 65 at 100 over one
+    7-day attack window), but one reply does not say how many logs the
+    window holds, so it cannot tell a finished search from a stopped one.
     """
     scanned = page.get("scanned_logs")
     return {"scanned_logs": scanned} if isinstance(scanned, int) else {}
@@ -593,7 +604,9 @@ async def query_logs(
             srcip, under the key "srcip"); a name outside the known field set
             passes through with a warning naming get_log_fields, so an empty
             bucket for it means "unrecognised", not "no values".
-        count_only: Return just the total row count for the query.
+        count_only: Return just the total row count for the query. The count
+            reads every log in the window, so a wide window takes longer than
+            a page of rows does; `limit` and `offset` do not apply to it.
         top_n: Buckets per dimension for sample_by (default 10). 0 returns
             every bucket.
         limit: Maximum logs to return (default: 100, max: 1000). With group_by
@@ -1025,12 +1038,20 @@ async def query_logs(
             device_filter=device_filter,
             time_range=time_range_dict,
             filter=filter,
-            offset=offset,
-            limit=limit,
+            # A count asks for a page that cannot fill, so the search cannot
+            # stop on it and reads the whole window (see COUNT_ONLY_OFFSET).
+            offset=COUNT_ONLY_OFFSET if count_only else offset,
+            limit=1 if count_only else limit,
             timeout=timeout,
         )
 
         if page["timed_out"]:
+            timed_out: dict[str, Any] = {}
+            if count_only:
+                timed_out["recommendation"] = (
+                    "A count reads every log in the window. Narrow time_range, add a "
+                    f"filter, or raise timeout (max {MAX_SEARCH_TIMEOUT})."
+                )
             return error_response(
                 error="search_timeout",
                 message=f"Search timed out after {timeout} seconds",
@@ -1039,27 +1060,38 @@ async def query_logs(
                 logtype=logtype,
                 time_range=time_range_dict,
                 timezone=tz_name,
+                **timed_out,
             )
 
         if count_only:
             total = page["total"]
+            count_warnings = _aggregation_warnings(
+                requested_limit=requested_limit,
+                limit=limit,
+                timezone=tz_name,
+                filter_warnings=filter_warnings,
+            )
+            # Rows in a page that should be out of reach mean the appliance did
+            # not take the offset, so it may have stopped on the page instead
+            # of at the end of the window.
+            finished = not page["logs"]
+            if total is not None and not finished:
+                count_warnings.append(
+                    "FortiAnalyzer answered the count with rows, so the search may have "
+                    "stopped before the end of the window: total is a lower bound."
+                )
             return {
                 "status": "success",
                 "adom": adom,
                 "logtype": logtype,
                 "total": total,
-                "total_is_known": total is not None,
+                "total_is_known": total is not None and finished,
                 "count_source": "logsearch_total_count",
                 **_scanned_logs(page),
                 "time_range": time_range_dict,
                 "timezone": tz_name,
                 "filter": filter,
-                "warnings": _aggregation_warnings(
-                    requested_limit=requested_limit,
-                    limit=limit,
-                    timezone=tz_name,
-                    filter_warnings=filter_warnings,
-                ),
+                "warnings": count_warnings,
             }
 
         if sample_by:
