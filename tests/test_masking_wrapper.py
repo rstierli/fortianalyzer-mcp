@@ -169,6 +169,34 @@ class TestTextScan:
     def test_invalid_ipv4_lookalike_untouched(self, masker: OutputMasker):
         assert masker.mask_text("version 999.1.2.3 ok") == "version 999.1.2.3 ok"
 
+    def test_zero_padded_ipv4_masked_like_the_unpadded_spelling(self, masker: OutputMasker):
+        """An address written with zero-padded octets does not leave in clear.
+
+        ``ipaddress`` rejects a leading zero since Python 3.9.5, and the scan
+        read that rejection as "not an address". Both spellings name one
+        address, so they share one token and follow-up turns correlate.
+        """
+        masked = masker.mask_result({"msg": "peer 192.0.2.010 down"})
+
+        assert "192.0.2.010" not in masked["msg"]
+        assert masked == masker.mask_result({"msg": "peer 192.0.2.10 down"})
+
+    def test_zero_padded_ipv4_token_resolves_unpadded(
+        self, masker: OutputMasker, engine: FPEEngine
+    ):
+        # The token is minted for the normalised address, so the padding is
+        # not recoverable: it opens to the unpadded spelling.
+        out = masker.mask_text("peer 192.000.002.010 down")
+
+        token = out.split("peer ")[1].split(" down")[0]
+        assert engine.is_v2_shaped(token)
+        assert engine.v2_open(token) == "192.0.2.10"
+
+    def test_out_of_range_zero_padded_quad_untouched(self, masker: OutputMasker):
+        # Still out of range once the padding is read away, so still not an
+        # address, and the text keeps the spelling it arrived with.
+        assert masker.mask_text("version 999.01.2.3 ok") == "version 999.01.2.3 ok"
+
     def test_embedded_mac_masked(self, masker: OutputMasker, engine: FPEEngine):
         """A MAC in prose masks into a marked token, not another MAC.
 

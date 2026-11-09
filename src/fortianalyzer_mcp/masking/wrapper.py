@@ -1228,12 +1228,17 @@ class OutputMasker:
                 # Our own output. Re-encrypting the payload would leave the
                 # tag signing a value that is no longer there.
                 return candidate
+            # ipaddress rejects a zero-padded octet (192.0.2.010), which is
+            # still an address in a log line and used to leave in clear.
+            # Parse and mint the unpadded spelling, so both spellings share
+            # one token and that token resolves to the unpadded one.
+            unpadded = ".".join(octet.lstrip("0") or "0" for octet in candidate.split("."))
             try:
-                ipaddress.IPv4Address(candidate)
+                ipaddress.IPv4Address(unpadded)
             except ValueError:
                 return candidate  # e.g. 999.1.1.1 or a dotted version string
             try:
-                return self._engine.mint("ip", candidate)
+                return self._engine.mint("ip", unpadded)
             except MaskingError:
                 return self.placeholder(candidate)
 
