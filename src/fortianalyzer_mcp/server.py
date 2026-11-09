@@ -656,8 +656,9 @@ def run_http() -> None:
         """HTTP health check endpoint for Docker health checks."""
         global faz_client
 
-        # Check if client is connected
-        is_connected = faz_client is not None and faz_client.is_connected
+        # Connected and the last request reached FortiAnalyzer. No probe here:
+        # /health is unauthenticated, so it must not make FortiAnalyzer calls.
+        is_connected = faz_client is not None and faz_client.is_reachable
 
         health_status = {
             "status": "healthy",

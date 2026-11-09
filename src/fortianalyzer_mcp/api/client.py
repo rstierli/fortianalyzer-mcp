@@ -20,6 +20,7 @@ from fortianalyzer_mcp.utils.errors import (
     APIError,
     AuthenticationError,
     ConnectionError,
+    FortiAnalyzerError,
     parse_faz_error,
 )
 from fortianalyzer_mcp.utils.validation import sanitize_json_for_logging
@@ -140,6 +141,12 @@ class FortiAnalyzerClient:
         # never connected (a direct API call should still raise "Not connected",
         # unless connect_on_demand makes the first connect before it).
         self._ever_connected = False
+        # True after a request failed to reach FortiAnalyzer; cleared by the
+        # next request it answers. _connected stays True through an outage
+        # (only a session error or disconnect clears it, and an API-token
+        # client never sees a session error), so this is what is_reachable
+        # and /health read.
+        self._unreachable = False
         self._faz_version: tuple[int, int, int] | None = None  # (major, minor, patch)
         self._faz_tz: ZoneInfo | None = None  # cached FAZ system timezone
         self._faz_tz_detected = False  # True once TZ detection ran to a definitive answer
@@ -284,6 +291,7 @@ class FortiAnalyzerClient:
 
                 self._connected = True
                 self._ever_connected = True
+                self._unreachable = False
                 logger.info("Successfully connected to FortiAnalyzer")
 
             except AuthenticationError:
@@ -345,6 +353,15 @@ class FortiAnalyzerClient:
     def is_connected(self) -> bool:
         """Check if client is connected."""
         return self._connected and self._fmg is not None
+
+    @property
+    def is_reachable(self) -> bool:
+        """Connected, and the last request reached FortiAnalyzer.
+
+        Passive: it changes only when a request runs, so an idle server
+        notices a drop on the next tool call, not before.
+        """
+        return self.is_connected and not self._unreachable
 
     @property
     def faz_version(self) -> tuple[int, int, int] | None:
@@ -491,6 +508,26 @@ class FortiAnalyzerClient:
         code = getattr(exc, "code", None)
         return code in self._TRANSIENT_ERROR_CODES
 
+    @staticmethod
+    def _is_unreachable_error(exc: Exception) -> bool:
+        """Classify whether a request failed without FortiAnalyzer answering.
+
+        Transport errors are OSErrors (requests' exceptions and pyfmg's
+        FMGConnectionError subclass it). pyfmg's verbs wrap a read timeout in
+        a plain FMGBaseException, raised inside the except block, so the
+        timeout survives only as ``__context__``.
+        """
+        return isinstance(exc, OSError) or isinstance(exc.__context__, OSError)
+
+    def _note_reachability(self, exc: Exception) -> None:
+        """Record what a failed request says about reaching FortiAnalyzer."""
+        if self._is_unreachable_error(exc):
+            self._unreachable = True
+        elif isinstance(exc, FortiAnalyzerError) and not isinstance(exc, ConnectionError):
+            # FortiAnalyzer answered with an error code. Our ConnectionError
+            # is the local "Not connected", which says nothing either way.
+            self._unreachable = False
+
     def _is_session_error(self, exc: Exception) -> bool:
         """Classify whether an error means the server session is gone.
 
@@ -574,8 +611,9 @@ class FortiAnalyzerClient:
         attempt = 0
         while True:
             try:
-                return await factory()
+                result = await factory()
             except Exception as exc:
+                self._note_reachability(exc)
                 if reconnect_left > 0 and self._is_session_error(exc):
                     reconnect_left -= 1
                     logger.warning("FortiAnalyzer session invalid; reconnecting once and retrying")
@@ -593,6 +631,9 @@ class FortiAnalyzerClient:
                 attempt += 1
                 logger.warning(f"Transient FortiAnalyzer error; retrying in {delay:.1f}s: {exc}")
                 await sleeper(delay)
+            else:
+                self._unreachable = False
+                return result
 
     def _handle_response(self, code: int, response: Any, operation: str = "operation") -> Any:
         """Handle pyfmg response and raise appropriate exceptions."""
