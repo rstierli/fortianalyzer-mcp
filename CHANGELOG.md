@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A filter value that FortiAnalyzer reads as an operator is written in quotes.** Structured `filters` wrote a value made only of letters, digits, `.`, `-`, `_` and `:` without quotes. Measured on 7.6.8 and 8.0.2, a few such values are not read as values there: `and`, `or` and `not` in any case, a value made of hyphens, and a value that starts or ends with one colon were answered with `Invalid filter`, so `{"field": "app", "op": "eq", "value": "or"}` compiled to `app==or` and failed the whole query. They are now written in quotes (`app=="or"`), which both builds accept. No other spelling changes: a word that only starts like an operator (`ornate`), a negative number and the IPv6 forms with two colons at either end (`::1`, `fe80::`) stay unquoted, as measured. The skills and a masking token that resolves to such a value get the same spelling. `search_ips_logs(attack_contains=...)` still takes these words, because between the wildcards a word is not on its own (`attack=*or*` is accepted on both builds).
+
 ## [2.16.1] - 2026-11-09
 
 Patch release. **Upgrade if a monitor or dashboard reads `fortianalyzer_connected` from `/health`:** once the server had connected, the flag stayed `true` while FortiAnalyzer was down. It now turns `false` on the first request that cannot reach the appliance and `true` again on the first that does. Nothing else changes: `/health` still answers HTTP 200 with `status: healthy`, so a Docker health check does not restart the container during an outage.
