@@ -4,6 +4,10 @@ Tests the client methods for PCAP download and IPS log search operations.
 Follows the same pattern as test_system_tools.py to avoid server initialization.
 """
 
+import base64
+import io
+import zipfile
+
 import pytest
 
 import fortianalyzer_mcp.tools.log_tools as log_tools
@@ -577,3 +581,164 @@ class TestSuppliedEmptyFilterValues:
         assert result["status"] == "error"
         assert "dstip cannot be empty" in result["message"]
         assert fake.starts == 0
+
+
+def _pcap_row(n: int, pcapurl: str | None = None) -> dict[str, object]:
+    """An IPS row for session 1000+n whose PCAP sits at u<n> unless told otherwise."""
+    return {
+        "sessionid": 1000 + n,
+        "attack": "Test.Attack",
+        "severity": "critical",
+        "pcapurl": pcapurl or f"u{n}",
+    }
+
+
+def _zip_b64(*names: str) -> str:
+    """A ZIP with one member per name, base64-encoded the way get_pcapfile returns it."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name in names:
+            zf.writestr(name, b"" if name.endswith("/") else b"pcap")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+class _DownloadFaz(_PollFetchFaz):
+    """PCAP-search fake that also serves the downloads.
+
+    Every pcapurl answers with a one-file ZIP unless ``replies`` holds another
+    answer for it. ``fetched`` lists the pcapurls asked for, in order.
+    """
+
+    def __init__(
+        self,
+        dataset: list[dict[str, object]],
+        replies: dict[str, dict[str, object]] | None = None,
+    ) -> None:
+        super().__init__(dataset)
+        self.replies = replies or {}
+        self.fetched: list[str] = []
+
+    async def get_pcapfile(self, *, key_data: str, key_type: str) -> dict[str, object]:
+        self.fetched.append(key_data)
+        return self.replies.get(key_data, {"data": _zip_b64("capture.pcap")})
+
+
+class TestSearchAndDownloadQuota:
+    """max_downloads counts files written, and every PCAP row is accounted for."""
+
+    @pytest.fixture(autouse=True)
+    def _fast_and_confined(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+        monkeypatch.setattr(log_tools, "_INITIAL_POLL_DELAY", 0)
+        monkeypatch.setattr(log_tools, "POLL_INTERVAL", 0)
+
+        async def no_sleep(_seconds: float) -> None:
+            return None
+
+        # The tool pauses after every download.
+        monkeypatch.setattr(pcap_tools.asyncio, "sleep", no_sleep)
+        monkeypatch.setenv("FAZ_ALLOWED_OUTPUT_DIRS", str(tmp_path))
+
+    async def _run(self, tmp_path, max_downloads: int) -> dict:
+        return await pcap_tools.search_and_download_pcaps(
+            adom="root",
+            time_range=_CUSTOM_RANGE,
+            output_dir=str(tmp_path),
+            max_downloads=max_downloads,
+        )
+
+    async def test_a_second_run_downloads_the_rows_after_the_skipped_ones(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """Rows already on disk must not use up max_downloads: the search asks
+        for twice the quota so that a second run can reach the spare half."""
+        fake = _DownloadFaz([_pcap_row(n) for n in range(1, 31)])
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        first = await self._run(tmp_path, max_downloads=10)
+        assert first["downloaded"] == 10
+        assert fake.fetched == [f"u{n}" for n in range(1, 11)]
+
+        second = await self._run(tmp_path, max_downloads=10)
+        assert second["skipped"] == 10
+        assert second["downloaded"] == 10
+        assert fake.fetched[10:] == [f"u{n}" for n in range(11, 21)]
+
+    async def test_failed_and_repeated_rows_do_not_use_up_the_quota(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        rows = [
+            _pcap_row(1),  # the download returns no data
+            _pcap_row(2),
+            _pcap_row(2, pcapurl="u2b"),  # session 2 again
+            _pcap_row(3),
+        ]
+        fake = _DownloadFaz(rows, replies={"u1": {}})
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await self._run(tmp_path, max_downloads=2)
+
+        assert result["downloaded"] == 2
+        assert fake.fetched == ["u1", "u2", "u3"]
+        assert (result["skipped"], result["failed"]) == (1, 1)
+
+    async def test_a_repeated_session_counts_as_skipped(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        fake = _DownloadFaz([_pcap_row(1), _pcap_row(1, pcapurl="u1b")])
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await self._run(tmp_path, max_downloads=5)
+
+        assert result["skipped"] == 1
+        assert (result["downloaded"], result["failed"]) == (1, 0)
+        assert fake.fetched == ["u1"]
+
+    async def test_a_repeated_session_is_not_fetched_when_existing_files_are_kept(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """With skip_existing off, the file the first row wrote does not hide
+        the repeat: only the session check keeps its capture from being
+        fetched again."""
+        rows = [_pcap_row(1), _pcap_row(1, pcapurl="u1b"), _pcap_row(2)]
+        fake = _DownloadFaz(rows)
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await pcap_tools.search_and_download_pcaps(
+            adom="root",
+            time_range=_CUSTOM_RANGE,
+            output_dir=str(tmp_path),
+            max_downloads=5,
+            skip_existing=False,
+        )
+
+        assert fake.fetched == ["u1", "u2"]
+        assert (result["downloaded"], result["skipped"], result["failed"]) == (2, 1, 0)
+
+    async def test_a_row_without_sessionid_counts_as_failed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        rows = [{"attack": "Test.Attack", "severity": "critical", "pcapurl": "u0"}, _pcap_row(1)]
+        fake = _DownloadFaz(rows)
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await self._run(tmp_path, max_downloads=5)
+
+        assert result["failed"] == 1
+        assert result["errors"] == ["Log entry without sessionid: PCAP not downloaded"]
+        assert (result["downloaded"], result["skipped"]) == (1, 0)
+        assert fake.fetched == ["u1"]
+
+    async def test_a_zip_without_a_file_entry_counts_as_failed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        fake = _DownloadFaz(
+            [_pcap_row(1), _pcap_row(2)],
+            replies={"u1": {"data": _zip_b64("captures/")}},
+        )
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await self._run(tmp_path, max_downloads=5)
+
+        assert result["failed"] == 1
+        assert result["errors"] == ["Session 1001: No PCAP file found in ZIP archive"]
+        assert (result["downloaded"], result["skipped"]) == (1, 0)

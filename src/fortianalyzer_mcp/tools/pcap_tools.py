@@ -762,7 +762,8 @@ async def search_and_download_pcaps(
             - search_results: Number of IPS logs found
             - pcap_available: Number with PCAP available
             - downloaded: Number successfully downloaded
-            - skipped: Number skipped (already exists)
+            - skipped: Number skipped (already exists, or repeats a session
+              already handled in this run)
             - failed: Number that failed to download
             - files: List of downloaded file paths
             - errors: List of error messages for failed downloads
@@ -852,14 +853,25 @@ async def search_and_download_pcaps(
 
         # Track unique session IDs to avoid duplicates
         seen_sessions = set()
-        downloaded_files = []
+        downloaded_files: list[str] = []
         skipped_count = 0
         failed_count = 0
         errors = []
 
-        for log in logs_with_pcap[:max_downloads]:
+        for log in logs_with_pcap:
+            # The quota counts files written. A row that is skipped or fails
+            # must not use it up, or the spare rows the search asked for are
+            # never reached and a re-run stops at the same rows again.
+            if len(downloaded_files) >= max_downloads:
+                break
+
             session_id = log.get("sessionid")
-            if not session_id or session_id in seen_sessions:
+            if not session_id:
+                errors.append("Log entry without sessionid: PCAP not downloaded")
+                failed_count += 1
+                continue
+            if session_id in seen_sessions:
+                skipped_count += 1
                 continue
 
             seen_sessions.add(session_id)
@@ -917,6 +929,10 @@ async def search_and_download_pcaps(
                         downloaded_files.append(str(out_file))
                         logger.info(f"Downloaded: {out_file}")
                         break
+                    else:
+                        # No file entry in the archive, so nothing was written.
+                        errors.append(f"Session {session_id}: No PCAP file found in ZIP archive")
+                        failed_count += 1
 
             except Exception as e:
                 errors.append(f"Session {session_id}: {str(e)}")
