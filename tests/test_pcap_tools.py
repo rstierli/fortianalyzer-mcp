@@ -7,6 +7,7 @@ Follows the same pattern as test_system_tools.py to avoid server initialization.
 import base64
 import io
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -742,3 +743,104 @@ class TestSearchAndDownloadQuota:
         assert result["failed"] == 1
         assert result["errors"] == ["Session 1001: No PCAP file found in ZIP archive"]
         assert (result["downloaded"], result["skipped"]) == (1, 0)
+
+
+class TestPcapBySessionRowSelection:
+    """get_pcap_by_session uses the returned row that carries a capture."""
+
+    @pytest.fixture(autouse=True)
+    def _fast_polls(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(log_tools, "_INITIAL_POLL_DELAY", 0)
+        monkeypatch.setattr(log_tools, "POLL_INTERVAL", 0)
+
+    async def test_capture_on_a_later_row_is_downloaded(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """Several rows can come back for one session id and only some carry a
+        pcapurl. A first row without one must not hide the capture on a later
+        row behind a 'no_pcap' result."""
+        monkeypatch.setenv("FAZ_ALLOWED_OUTPUT_DIRS", str(tmp_path))
+        rows: list[dict[str, object]] = [
+            {
+                "sessionid": 906654,
+                "attack": "First.Attack",
+                "severity": "high",
+                "action": "detected",
+                "srcip": "192.0.2.10",
+                "dstip": "198.51.100.20",
+            },
+            {
+                "sessionid": 906654,
+                "attack": "Second.Attack",
+                "severity": "critical",
+                "action": "blocked",
+                "srcip": "192.0.2.10",
+                "dstip": "198.51.100.20",
+                "pcapurl": "pcap-ref-2",
+            },
+        ]
+        fake = _DownloadFaz(rows)
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await pcap_tools.get_pcap_by_session(
+            session_id=906654,
+            adom="root",
+            time_range=_CUSTOM_RANGE,
+            output_dir=str(tmp_path),
+        )
+
+        assert result["status"] == "success"
+        assert fake.fetched == ["pcap-ref-2"]
+        # attack_info describes the row the capture belongs to.
+        assert result["attack_info"]["attack"] == "Second.Attack"
+        assert Path(result["file_path"]).read_bytes() == b"pcap"
+
+    async def test_no_row_with_a_capture_is_still_no_pcap(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """With no capture on any returned row the result stays 'no_pcap',
+        described by the first row. An empty pcapurl is not a capture."""
+        monkeypatch.setenv("FAZ_ALLOWED_OUTPUT_DIRS", str(tmp_path))
+        rows: list[dict[str, object]] = [
+            {"sessionid": 906654, "attack": "First.Attack", "severity": "high"},
+            {"sessionid": 906654, "attack": "Second.Attack", "severity": "low", "pcapurl": ""},
+        ]
+        fake = _DownloadFaz(rows)
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await pcap_tools.get_pcap_by_session(
+            session_id=906654,
+            adom="root",
+            time_range=_CUSTOM_RANGE,
+            output_dir=str(tmp_path),
+        )
+
+        assert result["status"] == "no_pcap"
+        assert result["attack_info"]["attack"] == "First.Attack"
+        assert fake.fetched == []
+
+    async def test_first_row_with_a_capture_wins(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """Rows keep the order the search returned them in: of two rows with
+        a capture the earlier one is downloaded, however far down it sits."""
+        monkeypatch.setenv("FAZ_ALLOWED_OUTPUT_DIRS", str(tmp_path))
+        rows: list[dict[str, object]] = [
+            {"sessionid": 906654, "attack": "First.Attack"},
+            {"sessionid": 906654, "attack": "Second.Attack", "pcapurl": ""},
+            {"sessionid": 906654, "attack": "Third.Attack", "pcapurl": "pcap-ref-3"},
+            {"sessionid": 906654, "attack": "Fourth.Attack", "pcapurl": "pcap-ref-4"},
+        ]
+        fake = _DownloadFaz(rows)
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await pcap_tools.get_pcap_by_session(
+            session_id=906654,
+            adom="root",
+            time_range=_CUSTOM_RANGE,
+            output_dir=str(tmp_path),
+        )
+
+        assert result["status"] == "success"
+        assert fake.fetched == ["pcap-ref-3"]
+        assert result["attack_info"]["attack"] == "Third.Attack"

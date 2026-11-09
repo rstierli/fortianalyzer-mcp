@@ -458,8 +458,11 @@ async def get_pcap_by_session(
                 "message": f"No IPS log found for session ID {session_id} in time range {time_range}",
             }
 
-        # Get first matching log
-        log_entry = logs[0] if isinstance(logs, list) else logs
+        # Several rows can match one session id and only some carry a capture,
+        # so use the first row that has a pcapurl. With none, the first row
+        # describes the no_pcap result below.
+        rows = logs if isinstance(logs, list) else [logs]
+        log_entry = next((row for row in rows if row.get("pcapurl")), rows[0])
         pcapurl = log_entry.get("pcapurl")
 
         if not pcapurl:
