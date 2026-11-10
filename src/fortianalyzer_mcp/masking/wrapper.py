@@ -1239,7 +1239,65 @@ class OutputMasker:
         mapping: dict[str, str] | None = None,
         keep: frozenset[str] = frozenset(),
     ) -> str:
-        """Mask embedded IPv4/MAC/email IOCs, then any known raw value."""
+        """Mask embedded IPv4/MAC/email IOCs, then any known raw value.
+
+        A known value that has an IOC inside it is swapped whole, before the
+        IOC scan. A reverse-lookup name is the case that needs it:
+        ``7.100.51.198.in-addr.arpa`` holds an IPv4 run, and an ip6.arpa name
+        holds several. Scanning first minted those runs into ip4 tokens, the
+        known value then no longer matched, and the rest of the name stayed
+        in clear beside them -- the hex nibbles of an IPv6 address, in a
+        filter echo that should have carried the caller's own token.
+        """
+        mapping_spans = self._enclosing_known_spans(text, mapping, keep)
+        if mapping_spans:
+            parts: list[str] = []
+            last = 0
+            for start, end in mapping_spans:
+                parts.append(self._mask_text_scan(text[last:start], mapping, keep))
+                parts.append(self._substitute_known(text[start:end], mapping, keep))
+                last = end
+            parts.append(self._mask_text_scan(text[last:], mapping, keep))
+            return "".join(parts)
+        return self._mask_text_scan(text, mapping, keep)
+
+    def _enclosing_known_spans(
+        self,
+        text: str,
+        mapping: dict[str, str] | None,
+        keep: frozenset[str],
+    ) -> list[tuple[int, int]]:
+        """Spans of known values that strictly contain an IOC match.
+
+        A known value qualifies only when every IOC match touching it lies
+        inside it. One that an IOC crosses (an email whose domain is the
+        known value) keeps the scan-first order, so the IOC is still masked
+        as a whole and nothing of it is left outside the swap.
+        """
+        if not mapping:
+            return []
+        iocs = [m.span() for regex in (_IPV4_RE, _MAC_RE, _EMAIL_RE) for m in regex.finditer(text)]
+        if not iocs:
+            return []
+        plan = self._plan_for(mapping, keep)
+        if plan is None:
+            return []
+        spans: list[tuple[int, int]] = []
+        for known in plan.pattern.finditer(text):
+            start, end = known.span()
+            inside = [(s, e) for s, e in iocs if start <= s and e <= end and (s, e) != (start, end)]
+            crossing = any(s < end and e > start and not (start <= s and e <= end) for s, e in iocs)
+            if inside and not crossing:
+                spans.append((start, end))
+        return spans
+
+    def _mask_text_scan(
+        self,
+        text: str,
+        mapping: dict[str, str] | None = None,
+        keep: frozenset[str] = frozenset(),
+    ) -> str:
+        """The IOC scan, then the known-value swap, over one stretch of text."""
 
         def ip_sub(m: re.Match[str]) -> str:
             candidate = m.group(0)

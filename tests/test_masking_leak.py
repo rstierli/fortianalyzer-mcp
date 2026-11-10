@@ -3848,3 +3848,61 @@ class TestPercentSignsThatAreNotEscapes:
         assert "aa%3Abb%3Acc%3Add%3Aee%3A11" not in out["msg"]
         assert "aa:bb:cc:dd:ee:11" not in out["msg"]
         assert "\ufffd" not in out["msg"]
+
+
+class TestKnownValueHoldingAnAddress:
+    """A known value with an IOC inside it is swapped whole, before the IOC scan.
+
+    Reverse-lookup names are the live case: a dns row's ``qname`` can be
+    ``<reversed IPv4>.in-addr.arpa`` or a nibble-reversed ip6.arpa name. The
+    scan minted the dotted-quad runs inside them into ip4 tokens first, the
+    known value then no longer matched, and the rest of the name stayed in
+    clear: for ip6.arpa, hex nibbles of the address, in a filter echo.
+    """
+
+    PTR4 = "7.100.51.198.in-addr.arpa"
+    PTR6 = "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa"
+
+    @pytest.mark.parametrize("ptr", [PTR4, PTR6])
+    def test_a_ptr_name_in_a_filter_echo_is_the_rows_token(
+        self, masker: OutputMasker, ptr: str
+    ) -> None:
+        out = masker.mask_result({"filter": f'qname=="{ptr}"', "logs": [{"qname": ptr}]})
+
+        assert out["filter"] == f'qname=="{out["logs"][0]["qname"]}"'
+
+    def test_no_nibble_of_an_ip6_ptr_name_survives(self, masker: OutputMasker) -> None:
+        out = masker.mask_result(
+            {"filter": f'qname=="{self.PTR6}"', "logs": [{"qname": self.PTR6}]}
+        )
+
+        assert "8.b.d" not in out["filter"]
+        assert "ip6.arpa" not in out["filter"]
+
+    def test_the_echo_carries_the_callers_own_token(
+        self, masker: OutputMasker, engine: FPEEngine
+    ) -> None:
+        """The #182 path: the value resolved from the caller's filter seeds the map."""
+        minted = masker.mask_result({"qname": self.PTR6})["qname"]
+        sent = ArgUnmasker(engine).unmask_filter(f'qname=="{minted}"')
+
+        out = masker.mask_result({"filter": sent}, {self.PTR6: minted})
+
+        assert sent == f'qname=="{self.PTR6}"'
+        assert out["filter"] == f'qname=="{minted}"'
+
+    def test_an_address_beside_the_name_is_still_masked(self, masker: OutputMasker) -> None:
+        out = masker.mask_result(
+            {"msg": f"lookup {self.PTR4} from {PEER_IP}", "logs": [{"qname": self.PTR4}]}
+        )
+
+        assert survivors(out["msg"], [self.PTR4, PEER_IP, "198.51.100"]) == {}
+        assert out["logs"][0]["qname"] in out["msg"]
+
+    def test_an_email_around_a_known_domain_is_still_masked_whole(
+        self, masker: OutputMasker
+    ) -> None:
+        """An IOC that crosses the known value keeps the scan-first order."""
+        out = masker.mask_result({"srcname": "example.org", "msg": f"mail from {SOC_EMAIL}"})
+
+        assert survivors(out["msg"], [SOC_EMAIL, "soc@"]) == {}
