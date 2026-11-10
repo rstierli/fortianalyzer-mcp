@@ -373,6 +373,26 @@ class TestPCAPSearchPollPath:
         assert fake.starts == 1
         assert fake.fetches >= 1
         assert fake.fetches == 1
+        assert result["total_is_known"] is True
+        assert result["total_is_lower_bound"] is False
+
+    async def test_search_ips_logs_full_page_total_is_a_floor(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A full page may have stopped the search early (#148): its total is a floor."""
+        rows = [{"sessionid": i, "attack": "Test.Attack", "severity": "high"} for i in range(80)]
+        fake = _PollFetchFaz(rows)
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await pcap_tools.search_ips_logs(
+            adom="root", severity=["high"], time_range=_CUSTOM_RANGE, limit=50
+        )
+
+        assert result["count"] == 50
+        assert result["total"] == 80
+        assert result["total_is_known"] is False
+        assert result["total_is_lower_bound"] is True
+        assert "lower bound" in result["warning"]
 
     async def test_search_ips_logs_empty_result_via_poll_path(
         self, monkeypatch: pytest.MonkeyPatch

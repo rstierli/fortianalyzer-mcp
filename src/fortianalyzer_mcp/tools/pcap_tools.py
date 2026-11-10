@@ -18,7 +18,7 @@ from typing import Any
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
 from fortianalyzer_mcp.server import get_faz_client, mcp
 from fortianalyzer_mcp.tool_annotations import READ_ONLY
-from fortianalyzer_mcp.tools.log_tools import _clamp_timeout, _run_logsearch_page
+from fortianalyzer_mcp.tools.log_tools import _clamp_timeout, _page_filled, _run_logsearch_page
 from fortianalyzer_mcp.utils.responses import redact
 from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import (
@@ -245,6 +245,10 @@ async def search_ips_logs(
         dict with keys:
             - status: "success" or "error"
             - count: Number of logs found
+            - total, total_is_known: FortiAnalyzer's match count for the search
+            - total_is_lower_bound: True when the page filled; `total` is then a
+              floor, because the search may have stopped before the end of the
+              window
             - logs: List of IPS log entries with fields:
                 - sessionid: Session ID (use for PCAP download)
                 - attack: Attack/signature name
@@ -337,6 +341,10 @@ async def search_ips_logs(
         # Count how many have PCAP available
         pcap_available = sum(1 for log in logs if log.get("pcapurl"))
 
+        # A full page may have stopped the search before the end of the
+        # window, so its total-count is a floor (see _page_filled).
+        total_is_lower_bound = total is not None and _page_filled(len(logs), limit)
+
         # When FAZ omits total-count, report the unknown honestly instead of
         # fabricating total=len(logs): a limit-capped page would otherwise be
         # indistinguishable from "exactly N matches" (silent truncation).
@@ -345,7 +353,8 @@ async def search_ips_logs(
             "count": len(logs),
             "pcap_available_count": pcap_available,
             "total": total,
-            "total_is_known": total is not None,
+            "total_is_known": total is not None and not total_is_lower_bound,
+            "total_is_lower_bound": total_is_lower_bound,
             "logs": logs,
             "filter_applied": filter_str or "none",
             "tid": page["tid"],
@@ -356,6 +365,12 @@ async def search_ips_logs(
                 "Total match count is unavailable from FortiAnalyzer for this "
                 "search; results are a single page and may be truncated. "
                 "Narrow the time window or filter to be sure of full coverage."
+            )
+        elif total_is_lower_bound:
+            response["warning"] = (
+                f"This page filled, so FortiAnalyzer may have stopped the search before "
+                f"the end of the window: total ({total}) is a lower bound. Use "
+                "query_logs(logtype='attack', count_only=True) for the window's count."
             )
         return response
 
