@@ -3792,3 +3792,59 @@ class TestTheNewNamesDoNotBurnRoutineShapes:
 
         assert "unrepresentable" in out, f"expected a whole-value burn, got {out!r}"
         assert "corp.example.com" not in out
+
+
+class TestPercentSignsThatAreNotEscapes:
+    """Decoding ``%XX`` is how an encoded identifier is found, not a rewrite of the text.
+
+    When the decoded text held something to mask, the decoded text was what
+    left, and ``unquote`` had been through all of it. A ``like`` pattern is
+    full of percent signs that are wildcards: ``%admin%`` begins with ``%ad``,
+    which is not UTF-8 and came out as U+FFFD, and ``%2026%`` begins with
+    ``%20``, which came out as a space.
+    """
+
+    ROWS = [{"user": "administrator", "srcname": "workstation-14"}]
+
+    def test_a_wildcard_before_hex_letters_survives_in_a_filter_echo(
+        self, masker: OutputMasker
+    ) -> None:
+        out = masker.mask_result(
+            {"filter": 'msg like "%admin%" and user=="administrator"', "logs": self.ROWS}
+        )
+        assert out["filter"].startswith('msg like "%admin%" and user=="')
+        assert "administrator" not in out["filter"]
+
+    def test_a_wildcard_before_digits_survives_in_a_filter_echo(self, masker: OutputMasker) -> None:
+        out = masker.mask_result(
+            {"filter": 'msg like "%2026%" and user=="administrator"', "logs": self.ROWS}
+        )
+        assert out["filter"].startswith('msg like "%2026%" and user=="')
+        assert "administrator" not in out["filter"]
+
+    @pytest.mark.parametrize("key", ["filter_applied", "pivot", "pivot_filter"])
+    def test_the_other_filter_echoes_are_not_decoded_either(
+        self, masker: OutputMasker, key: str
+    ) -> None:
+        out = masker.mask_result(
+            {key: 'msg like "%2026%" and user=="administrator"', "logs": self.ROWS}
+        )
+        assert out[key].startswith('msg like "%2026%" and user=="')
+        assert "administrator" not in out[key]
+
+    def test_a_stray_percent_in_prose_is_not_turned_into_a_replacement_character(
+        self, masker: OutputMasker
+    ) -> None:
+        out = masker.mask_result(
+            {"message": "disk at 95%ad hoc check on workstation-14", "logs": self.ROWS}
+        )
+        assert out["message"].startswith("disk at 95%ad hoc check on ")
+        assert "\ufffd" not in out["message"]
+        assert "workstation-14" not in out["message"]
+
+    def test_an_encoded_identifier_in_a_message_is_still_found(self, masker: OutputMasker) -> None:
+        """The reason for decoding at all (#80) holds."""
+        out = masker.mask_result({"msg": "AP aa%3Abb%3Acc%3Add%3Aee%3A11 at 95%ad hoc"})
+        assert "aa%3Abb%3Acc%3Add%3Aee%3A11" not in out["msg"]
+        assert "aa:bb:cc:dd:ee:11" not in out["msg"]
+        assert "\ufffd" not in out["msg"]

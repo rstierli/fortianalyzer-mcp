@@ -46,8 +46,11 @@ Known ambiguities, documented rather than papered over:
   would be guessing at what the caller meant.
 """
 
+import contextvars
 import logging
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from pydantic import BaseModel
@@ -150,6 +153,40 @@ def _literal_spans(expression: str) -> list[tuple[int, int]]:
     return spans
 
 
+#: What was resolved for the tool call in progress: real value -> the text
+#: the caller sent for it. A tool echoes what it was called with (the filter
+#: it sent, an error that names the value), and the output side only knows
+#: the values the RESULT carries under a typed key. Without this record a
+#: count, an empty page or a projection that leaves the field out hands the
+#: caller the plaintext of the token it has just sent.
+_RESOLVED_FOR_CALL: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
+    "faz_masking_resolved_for_call", default=None
+)
+
+
+@contextmanager
+def recording_resolved_values() -> Iterator[dict[str, str]]:
+    """Collect what ``ArgUnmasker`` resolves inside the block.
+
+    Yields the record, ``{real value: text the caller sent}``, which the
+    wrapper hands to the output masker for the same call. Per call and per
+    task: the unmasker itself is shared by every call.
+    """
+    record: dict[str, str] = {}
+    token = _RESOLVED_FOR_CALL.set(record)
+    try:
+        yield record
+    finally:
+        _RESOLVED_FOR_CALL.reset(token)
+
+
+def _note_resolved(sent: str, resolved: str) -> None:
+    """Remember that ``sent`` was resolved to ``resolved`` for this call."""
+    record = _RESOLVED_FOR_CALL.get()
+    if record is not None and resolved != sent:
+        record.setdefault(resolved, sent.strip())
+
+
 class ArgUnmasker:
     """Resolve masked tokens in tool arguments back to real values."""
 
@@ -186,6 +223,11 @@ class ArgUnmasker:
 
     def resolve_scalar(self, value: str, vtype: str | None = None) -> str:
         """Resolve one argument value. ``vtype`` comes from the field name."""
+        resolved = self._resolve_scalar(value, vtype)
+        _note_resolved(value, resolved)
+        return resolved
+
+    def _resolve_scalar(self, value: str, vtype: str | None = None) -> str:
         if not value or value.strip() in SKIP_VALUES:
             return value
         candidate = value.strip()
@@ -394,6 +436,9 @@ class ArgUnmasker:
                 resolved = self.resolve_scalar(core, vtype)
             if resolved == core:
                 return match.group(0)
+            # A URL or a prefixed value is resolved in parts; the clause value
+            # as a whole is what the tool echoes.
+            _note_resolved(core, resolved)
             if _FILTER_CONTROL_RE.search(resolved):
                 # Left in place, the token would match nothing, which under a
                 # negated operator returns every row; refuse the filter instead.
@@ -535,11 +580,19 @@ class ArgUnmasker:
             return value
         if isinstance(value, str):
             if lowered in ("filter", "filter_applied"):
-                return self.unmask_filter(value)
+                resolved = self.unmask_filter(value)
+                # The expression as a whole, beside its clause values: a tool
+                # that echoes the filter it was given echoes exactly this.
+                _note_resolved(value, resolved)
+                return resolved
             if lowered in COMPOSITE_URL_FULL:
-                return self.resolve_url(value)
+                resolved = self.resolve_url(value)
+                _note_resolved(value, resolved)
+                return resolved
             if lowered in COMPOSITE_PREFIXED:
-                return self.resolve_prefixed(value)
+                resolved = self.resolve_prefixed(value)
+                _note_resolved(value, resolved)
+                return resolved
             vtype = FIELD_TYPES.get(lowered)
             if vtype in (IP, MAC, IP_OR_HOST):
                 # comma-joined multi-values, same convention as the output side

@@ -70,7 +70,6 @@ import re
 from dataclasses import dataclass
 from functools import wraps
 from typing import Any
-from urllib.parse import unquote
 
 from fortianalyzer_mcp.masking.fields import (
     COMPOSITE_BREAKDOWNS,
@@ -87,6 +86,7 @@ from fortianalyzer_mcp.masking.fields import (
     DOMAIN,
     EMAIL,
     FIELD_TYPES,
+    FILTER_EXPRESSION_KEYS,
     HOSTNAME,
     IP,
     IP_HOST_OR_SERIAL,
@@ -106,7 +106,7 @@ from fortianalyzer_mcp.masking.fpe_engine import (
     MaskingError,
     begin_v2_verification_budget,
 )
-from fortianalyzer_mcp.masking.unmask import ArgUnmasker
+from fortianalyzer_mcp.masking.unmask import ArgUnmasker, recording_resolved_values
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +204,25 @@ _DEVVDS_RE = re.compile(r"^(?P<dev>[^\[\]]+)\[(?P<vdom>[^\[\]]*)\]$")
 #: Values shorter than this are not substituted into free text: a two or
 #: three character username would match inside unrelated words.
 _MIN_SUBSTITUTION_LEN = 4
+
+
+_PERCENT_RUN_RE = re.compile(r"(?:%[0-9A-Fa-f]{2})+")
+
+
+def _unquote_utf8(text: str) -> str:
+    """``unquote``, except that a run of escapes that is not UTF-8 stays as written.
+
+    ``unquote`` decodes such a run into U+FFFD, which is lost text: ``95%ad
+    hoc`` is prose, not an escape.
+    """
+
+    def decode(match: re.Match[str]) -> str:
+        try:
+            return bytes.fromhex(match.group(0).replace("%", "")).decode("utf-8")
+        except UnicodeDecodeError:
+            return match.group(0)
+
+    return _PERCENT_RUN_RE.sub(decode, text)
 
 
 class _TrackedMapping(dict[str, str]):
@@ -1446,9 +1465,17 @@ class OutputMasker:
 
     # -- the two passes -------------------------------------------------- #
 
-    def mask_result(self, obj: Any) -> Any:
-        """Mask a tool result: structured pass, then free-text pass."""
+    def mask_result(self, obj: Any, resolved: dict[str, str] | None = None) -> Any:
+        """Mask a tool result: structured pass, then free-text pass.
+
+        ``resolved`` is what the argument side resolved for this call, real
+        value -> the text the caller sent. It seeds the map pass 2 works
+        from, so an echo of such a value goes back out as the caller's own
+        token even when no row of the result carries it.
+        """
         mapping: dict[str, str] = _TrackedMapping()
+        for real, sent in (resolved or {}).items():
+            mapping[real] = sent
         keep = frozenset() if self._mask_device_identity else self._device_identity_values(obj)
         staged = self._mask_structured(obj, mapping, keep)
         return self._mask_free_text(staged, mapping, keep)
@@ -2019,7 +2046,12 @@ class OutputMasker:
                 elif key.lower() in COMPOSITE_BREAKDOWNS and isinstance(value, dict):
                     out[key] = self._mask_breakdown_text(value, mapping, keep)
                 elif self._field_types.get(key.lower()) == TEXT:
-                    out[key] = self._mask_text_tree(value, mapping, keep)
+                    out[key] = self._mask_text_tree(
+                        value,
+                        mapping,
+                        keep,
+                        percent_encoded=key.lower() not in FILTER_EXPRESSION_KEYS,
+                    )
                 else:
                     out[key] = self._mask_free_text(value, mapping, keep)
             return out
@@ -2123,32 +2155,45 @@ class OutputMasker:
                 out.append(self._mask_filter_entries(entry, mapping, keep))
                 continue
             if not isinstance(entry, list | tuple) or len(entry) != 3:
-                out.append(self._mask_text_tree(entry, mapping, keep))
+                out.append(self._mask_text_tree(entry, mapping, keep, percent_encoded=False))
                 continue
             field, op, raw = entry
             vtype = self._field_types.get(field.lower()) if isinstance(field, str) else None
             if vtype is None or vtype == TEXT or not isinstance(raw, str):
-                out.append(self._mask_text_tree(list(entry), mapping, keep))
+                out.append(self._mask_text_tree(list(entry), mapping, keep, percent_encoded=False))
                 continue
             masked = self._mask_scalar(vtype, raw, mapping, keep=keep)
             out.append([field, op, masked] if isinstance(entry, list) else (field, op, masked))
         return out
 
     def _mask_text_tree(
-        self, value: Any, mapping: dict[str, str], keep: frozenset[str] = frozenset()
+        self,
+        value: Any,
+        mapping: dict[str, str],
+        keep: frozenset[str] = frozenset(),
+        *,
+        percent_encoded: bool = True,
     ) -> Any:
         if isinstance(value, str):
-            return self._mask_scalar_text(value, mapping, keep)
+            return self._mask_scalar_text(value, mapping, keep, percent_encoded=percent_encoded)
         if isinstance(value, list):
             # Free-text lines; each string leaf gets the IOC scan. Nested dicts
             # in a list were already masked in pass 1, so recursion leaves them be.
-            return [self._mask_text_tree(item, mapping, keep) for item in value]
+            return [
+                self._mask_text_tree(item, mapping, keep, percent_encoded=percent_encoded)
+                for item in value
+            ]
         # A dict under a TEXT key is a structured object already masked key-by-key
         # in pass 1; scanning it here would double-mask its tokens. Leave it.
         return value
 
     def _mask_scalar_text(
-        self, value: str, mapping: dict[str, str], keep: frozenset[str] = frozenset()
+        self,
+        value: str,
+        mapping: dict[str, str],
+        keep: frozenset[str] = frozenset(),
+        *,
+        percent_encoded: bool = True,
     ) -> str:
         """Mask free text, looking through FortiAnalyzer's percent-encoding.
 
@@ -2180,11 +2225,17 @@ class OutputMasker:
         length or alphabet as what it replaced, so a faithful round trip
         is not available, and emitting a half-encoded string would be
         worse than the honest decoded one.
+
+        Two kinds of ``%XX`` are not escapes and are left alone. A filter
+        expression (``percent_encoded=False``) is never decoded: its ``%`` is
+        a ``like`` wildcard, and ``%2026%`` would leave as a space and
+        ``26%``. Elsewhere a run that is not UTF-8 stays as written, where
+        ``unquote`` would have put U+FFFD in its place.
         """
         if value.strip() in SKIP_VALUES:
             return value
         try:
-            decoded = unquote(value)
+            decoded = _unquote_utf8(value) if percent_encoded else value
             if decoded != value:
                 decoded_masked = self.mask_text(decoded, mapping, keep)
                 if decoded_masked != decoded:
@@ -2196,9 +2247,11 @@ class OutputMasker:
 
     # -- tool-result entry point ----------------------------------------- #
 
-    def mask_tool_result(self, result: Any, tool_name: str) -> Any:
+    def mask_tool_result(
+        self, result: Any, tool_name: str, resolved: dict[str, str] | None = None
+    ) -> Any:
         try:
-            return self.mask_result(result)
+            return self.mask_result(result, resolved)
         except Exception:
             logger.exception("output masking failed for %s; raw result withheld", tool_name)
             return {
@@ -2360,8 +2413,10 @@ def install_masking(mcp: Any) -> tuple[OutputMasker, ArgUnmasker]:
                             if offending is not None:
                                 return refuse_restore(fn.__name__, offending)
                             return masker.mask_tool_result(await fn(*fa, **fk), fn.__name__)
+                        with recording_resolved_values() as resolved:
+                            real_args = unmasker.unmask_args(fk)
                         return masker.mask_tool_result(
-                            await fn(*fa, **unmasker.unmask_args(fk)), fn.__name__
+                            await fn(*fa, **real_args), fn.__name__, resolved
                         )
                     finally:
                         _AT_BOUNDARY.reset(token)
@@ -2380,7 +2435,9 @@ def install_masking(mcp: Any) -> tuple[OutputMasker, ArgUnmasker]:
                         if offending is not None:
                             return refuse_restore(fn.__name__, offending)
                         return masker.mask_tool_result(fn(*fa, **fk), fn.__name__)
-                    return masker.mask_tool_result(fn(*fa, **unmasker.unmask_args(fk)), fn.__name__)
+                    with recording_resolved_values() as resolved:
+                        real_args = unmasker.unmask_args(fk)
+                    return masker.mask_tool_result(fn(*fa, **real_args), fn.__name__, resolved)
                 finally:
                     _AT_BOUNDARY.reset(token)
 
