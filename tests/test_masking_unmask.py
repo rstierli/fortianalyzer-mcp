@@ -1233,3 +1233,186 @@ class TestLiteralsReadByTheMeasuredRule:
         assert (
             unmasker.unmask_filter(f'"it\'s" and url=={token}') == '"it\'s" and url=="some value"'
         )
+
+
+class TestValueResolvedForACallIsMaskedOnTheWayOut:
+    """What the wrapper resolved for a call goes back out as the caller's token.
+
+    A tool echoes what it was called with: the filter it sent, an error that
+    names the value. Pass 2 only knew the values the RESULT carried under a
+    typed key, so a count, an empty page or a projection that left the field
+    out returned the plaintext of the token the caller had just sent.
+    Measured on a deployed 2.16.1: ``count_only`` with ``qname==<token>``
+    answered with ``filter: qname==<the real name>``.
+    """
+
+    @pytest.fixture
+    def tools(self, monkeypatch: pytest.MonkeyPatch) -> dict:
+        from mcp.server.mcpserver import MCPServer
+
+        from fortianalyzer_mcp.tool_annotations import READ_ONLY
+
+        monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
+        mcp = MCPServer("test")
+        install_masking(mcp)
+        seen: dict[str, object] = {}
+
+        @mcp.tool(annotations=READ_ONLY)
+        async def count_rows(filter: str | None = None, filters: list | None = None) -> dict:
+            """A count: echoes the filter it sent and returns no rows."""
+            seen["filter"] = filter
+            seen["filters"] = filters
+            sent = filter
+            if filters:
+                sent = " and ".join(f"{c['field']}=={c['value']}" for c in filters)
+            return {"status": "success", "total": 4, "filter": sent}
+
+        @mcp.tool(annotations=READ_ONLY)
+        async def find_user(user: str) -> dict:
+            """A lookup that fails and names what it looked for."""
+            seen["user"] = user
+            return {"status": "error", "message": f"No end-user named '{user}'"}
+
+        @mcp.tool(annotations=READ_ONLY)
+        async def first_clause(filter: str) -> dict:
+            """A tool that reports one clause of the filter, not the filter."""
+            return {"status": "success", "pivot": filter.split(" and ")[0]}
+
+        @mcp.tool(annotations=READ_ONLY)
+        def count_rows_sync(filter: str) -> dict:
+            """The same count as a plain function: the wrapper has two paths."""
+            return {"status": "success", "total": 4, "filter": filter}
+
+        return {
+            "count_rows": count_rows,
+            "count_rows_sync": count_rows_sync,
+            "first_clause": first_clause,
+            "find_user": find_user,
+            "seen": seen,
+        }
+
+    @pytest.mark.parametrize(
+        ("field", "vtype", "real"),
+        [
+            ("qname", "domain", "portal.example.com"),
+            ("user", "username", "jsmith"),
+            ("srcname", "hostname", "workstation-14"),
+            ("srcip", "ip", "2001:db8::14"),
+        ],
+    )
+    async def test_the_filter_echo_of_a_count_carries_the_token(
+        self, tools: dict, engine: FPEEngine, field: str, vtype: str, real: str
+    ) -> None:
+        token = engine.mint(vtype, real)
+
+        result = await tools["count_rows"](filter=f'{field}=="{token}"')
+
+        assert real in str(tools["seen"]["filter"])  # the tool searched for the real value
+        assert real not in result["filter"]
+        assert token in result["filter"]
+
+    async def test_an_unquoted_clause_value_is_masked_too(
+        self, tools: dict, engine: FPEEngine
+    ) -> None:
+        token = engine.mint("domain", "portal.example.com")
+
+        result = await tools["count_rows"](filter=f"qname=={token} and action==pass")
+
+        assert "portal.example.com" not in result["filter"]
+        assert result["filter"] == f"qname=={token} and action==pass"
+
+    async def test_a_value_too_short_to_look_for_in_prose_is_masked_in_the_echoed_filter(
+        self, tools: dict, engine: FPEEngine
+    ) -> None:
+        """Pass 2 does not look for a three-letter value inside free text,
+        but the filter the tool was given is echoed whole."""
+        token = engine.mint("username", "bob")
+
+        result = await tools["count_rows"](filter=f'user=="{token}" and action==deny')
+
+        assert tools["seen"]["filter"] == 'user=="bob" and action==deny'
+        assert result["filter"] == f'user=="{token}" and action==deny'
+
+    async def test_a_structured_condition_is_masked_in_the_compiled_echo(
+        self, tools: dict, engine: FPEEngine
+    ) -> None:
+        token = engine.mint("domain", "portal.example.com")
+
+        result = await tools["count_rows"](filters=[{"field": "qname", "op": "eq", "value": token}])
+
+        assert "portal.example.com" not in result["filter"]
+        assert token in result["filter"]
+
+    async def test_an_error_that_names_the_value_carries_the_token(
+        self, tools: dict, engine: FPEEngine
+    ) -> None:
+        token = engine.mint("username", "jsmith")
+
+        result = await tools["find_user"](user=token)
+
+        assert tools["seen"]["user"] == "jsmith"
+        assert "jsmith" not in result["message"]
+        assert token in result["message"]
+
+    async def test_one_call_does_not_mask_for_the_next(
+        self, tools: dict, engine: FPEEngine
+    ) -> None:
+        """The resolved values belong to one call: a name the next caller
+        types is that caller's own text and is echoed as typed."""
+        token = engine.mint("domain", "portal.example.com")
+        await tools["count_rows"](filter=f'qname=="{token}"')
+
+        typed = 'msg like "%portal.example.com%"'
+        result = await tools["count_rows"](filter=typed)
+
+        assert result["filter"] == typed
+
+    def test_a_tool_that_is_a_plain_function_is_covered_too(
+        self, tools: dict, engine: FPEEngine
+    ) -> None:
+        token = engine.mint("domain", "portal.example.com")
+
+        result = tools["count_rows_sync"](filter=f'qname=="{token}"')
+
+        assert result["filter"] == f'qname=="{token}"'
+
+    async def test_a_url_clause_is_masked_as_one_value(
+        self, tools: dict, masker: OutputMasker
+    ) -> None:
+        """A URL is resolved host and tail apart; the echo holds it whole."""
+        real = "https://portal.example.com/login/step2"
+        token = masker.mask_result({"logs": [{"url": real}]})["logs"][0]["url"]
+        assert "portal.example.com" not in token
+
+        result = await tools["count_rows"](filter=f'url=="{token}"')
+
+        assert real in str(tools["seen"]["filter"])
+        assert "portal.example.com" not in result["filter"]
+        assert "step2" not in result["filter"]
+
+    async def test_a_url_clause_is_masked_when_only_that_clause_is_echoed(
+        self, tools: dict, masker: OutputMasker
+    ) -> None:
+        real = "https://portal.example.com/login/step2"
+        token = masker.mask_result({"logs": [{"url": real}]})["logs"][0]["url"]
+
+        result = await tools["first_clause"](filter=f'url=="{token}" and action==pass')
+
+        assert result["pivot"] == f'url=="{token}"'
+
+    async def test_the_rest_of_the_filter_is_echoed_as_sent(
+        self, tools: dict, engine: FPEEngine
+    ) -> None:
+        """A longer word that starts with the resolved value, and a wildcard
+        in front of hex letters, are the caller's own text."""
+        token = engine.mint("username", "administrator")
+        sent = f'user=="{token}" and msg like "%administrator-backup%" and app like "%dead%"'
+
+        result = await tools["count_rows"](filter=sent)
+
+        assert result["filter"] == sent
+
+    async def test_a_filter_without_tokens_is_echoed_as_sent(self, tools: dict) -> None:
+        result = await tools["count_rows"](filter='action=="deny" and dstport==443')
+
+        assert result["filter"] == 'action=="deny" and dstport==443'
