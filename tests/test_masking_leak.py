@@ -627,6 +627,63 @@ class TestFreeTextSubstitution:
         # "workstation-14-backup" must not be rewritten as "<token>-backup"
         assert f"{SRC_NAME}-backup" in masked["msg"]
 
+    def test_username_before_a_sentence_final_period_is_substituted(self, masker: OutputMasker):
+        # "." counts as a name character to the trailing boundary, so the
+        # period that ends a sentence used to shield the name in front of it.
+        masked = masker.mask_result({"user": "jsmith", "msg": "Login failed for jsmith."})
+
+        assert "jsmith" not in masked["msg"]
+        assert masked["msg"] == f"Login failed for {masked['user']}."
+
+    @pytest.mark.parametrize(("field", "name"), [("srcname", SRC_NAME), ("qname", BAD_DOMAIN)])
+    @pytest.mark.parametrize("tail", [".", ". Retrying", "...", ".)", "-", "_"])
+    def test_trailing_separator_that_continues_no_name_does_not_block(
+        self, masker: OutputMasker, field: str, name: str, tail: str
+    ):
+        # A sentence-final period, a DNS root dot, an ellipsis, a dangling
+        # hyphen or underscore: none of them makes the value a longer name.
+        masked = masker.mask_result({field: name, "msg": f"no answer from {name}{tail}"})
+
+        assert name not in masked["msg"]
+        assert masked["msg"] == f"no answer from {masked[field]}{tail}"
+
+    @pytest.mark.parametrize("tail", ["--again", "..again", "._x", "-.x"])
+    def test_doubled_trailing_separator_fails_closed(self, masker: OutputMasker, tail: str):
+        # Only ONE separator directly followed by a letter or digit reads as
+        # a longer name. A run of separators is ambiguous (a plain-text dash,
+        # an ellipsis with no space after it), and in doubt the value masks.
+        masked = masker.mask_result({"user": "jsmith", "msg": f"jsmith{tail}"})
+
+        assert masked["msg"] == f"{masked['user']}{tail}"
+
+    def test_trailing_period_does_not_block_on_the_plain_dict_route(self, masker: OutputMasker):
+        # mask_text with a caller-supplied dict builds its pattern in
+        # _build_substitution_plan_uncached, a second copy of the boundary.
+        out = masker.mask_text("no answer from fw-hq-01.", {"fw-hq-01": "host-tok-1"})
+
+        assert out == "no answer from host-tok-1."
+
+    @pytest.mark.parametrize(
+        ("field", "known", "longer"),
+        [
+            ("user", "jsmith", "jsmith.example.com"),
+            ("srcname", "host", "host-01"),
+            ("user", "jsmith", "jsmith_backup"),
+            # No separator at all: a letter or digit directly after the value.
+            ("user", "jsmith", "jsmithson"),
+            ("srcname", "host", "host01"),
+        ],
+    )
+    def test_trailing_separator_that_continues_a_longer_name_still_blocks(
+        self, masker: OutputMasker, field: str, known: str, longer: str
+    ):
+        # The boundary exists so that a known value is not replaced as the
+        # prefix of a longer name. The bare echo in the same text proves the
+        # value is live in the mapping, so only the boundary protects it.
+        masked = masker.mask_result({field: known, "msg": f"{longer} is not {known}"})
+
+        assert masked["msg"] == f"{longer} is not {masked[field]}"
+
 
 class TestFortiViewDeviceVdom:
     """``devvds`` is ``"<devname>[<vdom>]"``: brackets break a plain mask."""

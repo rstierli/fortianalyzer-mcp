@@ -4,6 +4,11 @@ Tests the client methods for PCAP download and IPS log search operations.
 Follows the same pattern as test_system_tools.py to avoid server initialization.
 """
 
+import base64
+import io
+import zipfile
+from pathlib import Path
+
 import pytest
 
 import fortianalyzer_mcp.tools.log_tools as log_tools
@@ -510,3 +515,341 @@ class TestPCAPSearchPollPath:
         assert result["message"] == "No IPS events found with PCAP available"
         assert fake.starts == 1
         assert fake.fetches == 1
+
+
+class TestSuppliedEmptyFilterValues:
+    """A filter argument that was supplied reaches its validator even when it
+    is falsy. Only None means "not supplied"."""
+
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"srcip": ""}, "srcip cannot be empty"),
+            ({"dstip": ""}, "dstip cannot be empty"),
+            ({"srcport": 0}, "Invalid srcport '0'"),
+            ({"dstport": 0}, "Invalid dstport '0'"),
+            ({"session_id": 0}, "Invalid session ID '0'"),
+            ({"cve": ""}, "CVE cannot be empty"),
+            # An empty cve is not a request for "any CVE" either.
+            ({"cve": "", "has_cve": True}, "CVE cannot be empty"),
+        ],
+        ids=["srcip", "dstip", "srcport", "dstport", "session_id", "cve", "cve_with_has_cve"],
+    )
+    def test_builder_refuses_a_supplied_falsy_value(
+        self, kwargs: dict[str, object], message: str
+    ) -> None:
+        with pytest.raises(ValidationError, match=message):
+            pcap_tools._build_ips_filter(**kwargs)
+
+    def test_builder_still_skips_arguments_left_as_none(self) -> None:
+        """The control: None is the one value that builds no clause."""
+        result = pcap_tools._build_ips_filter(
+            cve=None, srcip=None, dstip=None, srcport=None, dstport=None, session_id=None
+        )
+        assert result is None
+
+    async def test_search_ips_logs_refuses_port_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """srcport=0 used to be dropped: the search ran over every port and
+        filter_applied did not mention it."""
+        fake = _PollFetchFaz([])
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await pcap_tools.search_ips_logs(adom="root", srcport=0, time_range=_CUSTOM_RANGE)
+
+        assert result["status"] == "error"
+        assert "Invalid srcport '0'" in result["message"]
+        assert fake.starts == 0
+
+    async def test_search_and_download_pcaps_refuses_an_empty_srcip(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """srcip="" used to be dropped: PCAPs were searched for every source."""
+        monkeypatch.setenv("FAZ_ALLOWED_OUTPUT_DIRS", str(tmp_path))
+        fake = _PollFetchFaz([])
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await pcap_tools.search_and_download_pcaps(
+            adom="root", srcip="", time_range=_CUSTOM_RANGE, output_dir=str(tmp_path)
+        )
+
+        assert result["status"] == "error"
+        assert "srcip cannot be empty" in result["message"]
+        assert fake.starts == 0
+
+    async def test_list_available_pcaps_refuses_an_empty_dstip(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The listing passes srcip and dstip on to the same builder: dstip=""
+        used to list the captures of every destination."""
+        fake = _PollFetchFaz([])
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await pcap_tools.list_available_pcaps(
+            adom="root", dstip="", time_range=_CUSTOM_RANGE
+        )
+
+        assert result["status"] == "error"
+        assert "dstip cannot be empty" in result["message"]
+        assert fake.starts == 0
+
+
+def _pcap_row(n: int, pcapurl: str | None = None) -> dict[str, object]:
+    """An IPS row for session 1000+n whose PCAP sits at u<n> unless told otherwise."""
+    return {
+        "sessionid": 1000 + n,
+        "attack": "Test.Attack",
+        "severity": "critical",
+        "pcapurl": pcapurl or f"u{n}",
+    }
+
+
+def _zip_b64(*names: str) -> str:
+    """A ZIP with one member per name, base64-encoded the way get_pcapfile returns it."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name in names:
+            zf.writestr(name, b"" if name.endswith("/") else b"pcap")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+class _DownloadFaz(_PollFetchFaz):
+    """PCAP-search fake that also serves the downloads.
+
+    Every pcapurl answers with a one-file ZIP unless ``replies`` holds another
+    answer for it. ``fetched`` lists the pcapurls asked for, in order.
+    """
+
+    def __init__(
+        self,
+        dataset: list[dict[str, object]],
+        replies: dict[str, dict[str, object]] | None = None,
+    ) -> None:
+        super().__init__(dataset)
+        self.replies = replies or {}
+        self.fetched: list[str] = []
+
+    async def get_pcapfile(self, *, key_data: str, key_type: str) -> dict[str, object]:
+        self.fetched.append(key_data)
+        return self.replies.get(key_data, {"data": _zip_b64("capture.pcap")})
+
+
+class TestSearchAndDownloadQuota:
+    """max_downloads counts files written, and every PCAP row is accounted for."""
+
+    @pytest.fixture(autouse=True)
+    def _fast_and_confined(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+        monkeypatch.setattr(log_tools, "_INITIAL_POLL_DELAY", 0)
+        monkeypatch.setattr(log_tools, "POLL_INTERVAL", 0)
+
+        async def no_sleep(_seconds: float) -> None:
+            return None
+
+        # The tool pauses after every download.
+        monkeypatch.setattr(pcap_tools.asyncio, "sleep", no_sleep)
+        monkeypatch.setenv("FAZ_ALLOWED_OUTPUT_DIRS", str(tmp_path))
+
+    async def _run(self, tmp_path, max_downloads: int) -> dict:
+        return await pcap_tools.search_and_download_pcaps(
+            adom="root",
+            time_range=_CUSTOM_RANGE,
+            output_dir=str(tmp_path),
+            max_downloads=max_downloads,
+        )
+
+    async def test_a_second_run_downloads_the_rows_after_the_skipped_ones(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """Rows already on disk must not use up max_downloads: the search asks
+        for twice the quota so that a second run can reach the spare half."""
+        fake = _DownloadFaz([_pcap_row(n) for n in range(1, 31)])
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        first = await self._run(tmp_path, max_downloads=10)
+        assert first["downloaded"] == 10
+        assert fake.fetched == [f"u{n}" for n in range(1, 11)]
+
+        second = await self._run(tmp_path, max_downloads=10)
+        assert second["skipped"] == 10
+        assert second["downloaded"] == 10
+        assert fake.fetched[10:] == [f"u{n}" for n in range(11, 21)]
+
+    async def test_failed_and_repeated_rows_do_not_use_up_the_quota(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        rows = [
+            _pcap_row(1),  # the download returns no data
+            _pcap_row(2),
+            _pcap_row(2, pcapurl="u2b"),  # session 2 again
+            _pcap_row(3),
+        ]
+        fake = _DownloadFaz(rows, replies={"u1": {}})
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await self._run(tmp_path, max_downloads=2)
+
+        assert result["downloaded"] == 2
+        assert fake.fetched == ["u1", "u2", "u3"]
+        assert (result["skipped"], result["failed"]) == (1, 1)
+
+    async def test_a_repeated_session_counts_as_skipped(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        fake = _DownloadFaz([_pcap_row(1), _pcap_row(1, pcapurl="u1b")])
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await self._run(tmp_path, max_downloads=5)
+
+        assert result["skipped"] == 1
+        assert (result["downloaded"], result["failed"]) == (1, 0)
+        assert fake.fetched == ["u1"]
+
+    async def test_a_repeated_session_is_not_fetched_when_existing_files_are_kept(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """With skip_existing off, the file the first row wrote does not hide
+        the repeat: only the session check keeps its capture from being
+        fetched again."""
+        rows = [_pcap_row(1), _pcap_row(1, pcapurl="u1b"), _pcap_row(2)]
+        fake = _DownloadFaz(rows)
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await pcap_tools.search_and_download_pcaps(
+            adom="root",
+            time_range=_CUSTOM_RANGE,
+            output_dir=str(tmp_path),
+            max_downloads=5,
+            skip_existing=False,
+        )
+
+        assert fake.fetched == ["u1", "u2"]
+        assert (result["downloaded"], result["skipped"], result["failed"]) == (2, 1, 0)
+
+    async def test_a_row_without_sessionid_counts_as_failed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        rows = [{"attack": "Test.Attack", "severity": "critical", "pcapurl": "u0"}, _pcap_row(1)]
+        fake = _DownloadFaz(rows)
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await self._run(tmp_path, max_downloads=5)
+
+        assert result["failed"] == 1
+        assert result["errors"] == ["Log entry without sessionid: PCAP not downloaded"]
+        assert (result["downloaded"], result["skipped"]) == (1, 0)
+        assert fake.fetched == ["u1"]
+
+    async def test_a_zip_without_a_file_entry_counts_as_failed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        fake = _DownloadFaz(
+            [_pcap_row(1), _pcap_row(2)],
+            replies={"u1": {"data": _zip_b64("captures/")}},
+        )
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await self._run(tmp_path, max_downloads=5)
+
+        assert result["failed"] == 1
+        assert result["errors"] == ["Session 1001: No PCAP file found in ZIP archive"]
+        assert (result["downloaded"], result["skipped"]) == (1, 0)
+
+
+class TestPcapBySessionRowSelection:
+    """get_pcap_by_session uses the returned row that carries a capture."""
+
+    @pytest.fixture(autouse=True)
+    def _fast_polls(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(log_tools, "_INITIAL_POLL_DELAY", 0)
+        monkeypatch.setattr(log_tools, "POLL_INTERVAL", 0)
+
+    async def test_capture_on_a_later_row_is_downloaded(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """Several rows can come back for one session id and only some carry a
+        pcapurl. A first row without one must not hide the capture on a later
+        row behind a 'no_pcap' result."""
+        monkeypatch.setenv("FAZ_ALLOWED_OUTPUT_DIRS", str(tmp_path))
+        rows: list[dict[str, object]] = [
+            {
+                "sessionid": 906654,
+                "attack": "First.Attack",
+                "severity": "high",
+                "action": "detected",
+                "srcip": "192.0.2.10",
+                "dstip": "198.51.100.20",
+            },
+            {
+                "sessionid": 906654,
+                "attack": "Second.Attack",
+                "severity": "critical",
+                "action": "blocked",
+                "srcip": "192.0.2.10",
+                "dstip": "198.51.100.20",
+                "pcapurl": "pcap-ref-2",
+            },
+        ]
+        fake = _DownloadFaz(rows)
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await pcap_tools.get_pcap_by_session(
+            session_id=906654,
+            adom="root",
+            time_range=_CUSTOM_RANGE,
+            output_dir=str(tmp_path),
+        )
+
+        assert result["status"] == "success"
+        assert fake.fetched == ["pcap-ref-2"]
+        # attack_info describes the row the capture belongs to.
+        assert result["attack_info"]["attack"] == "Second.Attack"
+        assert Path(result["file_path"]).read_bytes() == b"pcap"
+
+    async def test_no_row_with_a_capture_is_still_no_pcap(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """With no capture on any returned row the result stays 'no_pcap',
+        described by the first row. An empty pcapurl is not a capture."""
+        monkeypatch.setenv("FAZ_ALLOWED_OUTPUT_DIRS", str(tmp_path))
+        rows: list[dict[str, object]] = [
+            {"sessionid": 906654, "attack": "First.Attack", "severity": "high"},
+            {"sessionid": 906654, "attack": "Second.Attack", "severity": "low", "pcapurl": ""},
+        ]
+        fake = _DownloadFaz(rows)
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await pcap_tools.get_pcap_by_session(
+            session_id=906654,
+            adom="root",
+            time_range=_CUSTOM_RANGE,
+            output_dir=str(tmp_path),
+        )
+
+        assert result["status"] == "no_pcap"
+        assert result["attack_info"]["attack"] == "First.Attack"
+        assert fake.fetched == []
+
+    async def test_first_row_with_a_capture_wins(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """Rows keep the order the search returned them in: of two rows with
+        a capture the earlier one is downloaded, however far down it sits."""
+        monkeypatch.setenv("FAZ_ALLOWED_OUTPUT_DIRS", str(tmp_path))
+        rows: list[dict[str, object]] = [
+            {"sessionid": 906654, "attack": "First.Attack"},
+            {"sessionid": 906654, "attack": "Second.Attack", "pcapurl": ""},
+            {"sessionid": 906654, "attack": "Third.Attack", "pcapurl": "pcap-ref-3"},
+            {"sessionid": 906654, "attack": "Fourth.Attack", "pcapurl": "pcap-ref-4"},
+        ]
+        fake = _DownloadFaz(rows)
+        monkeypatch.setattr(pcap_tools, "get_faz_client", lambda: fake)
+
+        result = await pcap_tools.get_pcap_by_session(
+            session_id=906654,
+            adom="root",
+            time_range=_CUSTOM_RANGE,
+            output_dir=str(tmp_path),
+        )
+
+        assert result["status"] == "success"
+        assert fake.fetched == ["pcap-ref-3"]
+        assert result["attack_info"]["attack"] == "Third.Attack"

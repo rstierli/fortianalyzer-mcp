@@ -558,6 +558,10 @@ async def run_triage(params: TriageParams) -> TriageResult:
 
     if params.alert_id:
         subject_type = "alert"
+        # The id is stripped once and that one value is used throughout. The
+        # filter literal was always written from the stripped id, so a padded
+        # id compared raw never matched the row its own filter returned.
+        subject_id = params.alert_id.strip()
 
         # Subject = the full alert row (it carries severity/status/ack).
         # Filter-first: get_alerts filtering on alertid over a wide window
@@ -572,7 +576,7 @@ async def run_triage(params: TriageParams) -> TriageResult:
         # does not contain, and refused when no filter literal can hold it, so
         # it cannot rewrite the clause). Replaces the earlier no-double-quote
         # blocklist. See issue #68 L5.
-        safe_alert_id = _param_value(params.alert_id, "alert_id")
+        safe_alert_id = _param_value(subject_id, "alert_id")
         lookup_res, err = await _call(
             get_alerts,
             adom=params.adom,
@@ -585,11 +589,7 @@ async def run_triage(params: TriageParams) -> TriageResult:
             warnings.append(f"alert filter lookup unavailable: {err}")
         else:
             subject = next(
-                (
-                    a
-                    for a in lookup_res.get("data") or []
-                    if str(a.get("alertid")) == str(params.alert_id)
-                ),
+                (a for a in lookup_res.get("data") or [] if str(a.get("alertid")) == subject_id),
                 {},
             )
         if not subject:
@@ -607,14 +607,12 @@ async def run_triage(params: TriageParams) -> TriageResult:
                     (
                         a
                         for a in alerts_res.get("data") or []
-                        if str(a.get("alertid")) == str(params.alert_id)
+                        if str(a.get("alertid")) == subject_id
                     ),
                     {},
                 )
 
-        details_res, err = await _call(
-            get_alert_details, alert_ids=[params.alert_id], adom=params.adom
-        )
+        details_res, err = await _call(get_alert_details, alert_ids=[subject_id], adom=params.adom)
         subject_details: dict[str, Any] | None = None
         if details_res is None:
             warnings.append(f"alert entity details unavailable: {err}")
@@ -624,19 +622,19 @@ async def run_triage(params: TriageParams) -> TriageResult:
         if not subject:
             if subject_details is None:
                 raise SkillExecutionError(
-                    f"alert {params.alert_id} not found in the {_SUBJECT_LOOKUP_WINDOW} "
+                    f"alert {subject_id} not found in the {_SUBJECT_LOOKUP_WINDOW} "
                     f"filter lookup or the {params.context_time_range} window, and the "
                     f"details lookup failed ({err})"
                 )
             subject = subject_details
             warnings.append(
-                f"alert {params.alert_id} not in the {_SUBJECT_LOOKUP_WINDOW} filter lookup "
+                f"alert {subject_id} not in the {_SUBJECT_LOOKUP_WINDOW} filter lookup "
                 f"or the {params.context_time_range} window; subject is the entity-details "
                 "record (no severity -> priority 'informational')."
             )
 
         logs_res, err = await _call(
-            get_alert_logs, alert_ids=[params.alert_id], adom=params.adom, fields=["*"]
+            get_alert_logs, alert_ids=[subject_id], adom=params.adom, fields=["*"]
         )
         if logs_res is None:
             warnings.append(f"triggering logs unavailable: {err}")
@@ -697,7 +695,7 @@ async def run_triage(params: TriageParams) -> TriageResult:
                                 candidates, checks, strict=True
                             )
                             if check_err is None
-                            and any(str(a.get("alertid")) == str(params.alert_id) for a in attached)
+                            and any(str(a.get("alertid")) == subject_id for a in attached)
                         ]
                         if failed:
                             warnings.append(
@@ -707,7 +705,7 @@ async def run_triage(params: TriageParams) -> TriageResult:
                             )
                         if not related:
                             warnings.append(
-                                f"alert {params.alert_id} is not attached to any of the "
+                                f"alert {subject_id} is not attached to any of the "
                                 f"{len(candidates)} incidents in the context window"
                             )
     else:
@@ -3138,7 +3136,14 @@ def _deep_headline(
     else:
         parts.append("root cause: none")
     if isinstance(impact, Impact):
-        touched = sum(v for e in impact.entities for v in e.counts.values())
+        # Log rows only: counts also holds the asset total under "assets",
+        # and an endpoint is not a lateral row.
+        touched = sum(
+            len(rows)
+            for e in impact.entities
+            for rows in e.lateral_activity.values()
+            if isinstance(rows, list)
+        )
         parts.append(
             f"impact: {impact.entity_count} entities, {touched} lateral rows "
             f"({impact.lateral_searches_run} searches)"

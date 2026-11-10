@@ -908,9 +908,10 @@ def validate_pcapurl(pcapurl: str) -> str:
 def get_allowed_output_dirs() -> list[Path]:
     """Get list of allowed output directories.
 
-    Returns directories from FAZ_ALLOWED_OUTPUT_DIRS env var.
+    Returns directories from FAZ_ALLOWED_OUTPUT_DIRS, read from the process
+    environment or, when it is not set there, from .env through Settings.
     No default directories are permitted — file output must be
-    explicitly configured via the environment variable.
+    explicitly configured via that variable.
 
     This follows the principle of secure-by-default: tools that
     only query data work without any output directory configuration.
@@ -925,7 +926,20 @@ def get_allowed_output_dirs() -> list[Path]:
     Raises:
         ValidationError: If no output directories are configured
     """
-    env_dirs = os.environ.get("FAZ_ALLOWED_OUTPUT_DIRS", "")
+    env_dirs = os.environ.get("FAZ_ALLOWED_OUTPUT_DIRS")
+    if env_dirs is None:
+        # Settings also reads .env, and pydantic-settings does not export what
+        # it finds there into the process environment, so a value set only in
+        # .env has to be asked of Settings. A variable present in the
+        # environment still wins, as it does in Settings, and is read live
+        # rather than from the cached instance.
+        from fortianalyzer_mcp.utils.config import get_settings
+
+        try:
+            env_dirs = get_settings().FAZ_ALLOWED_OUTPUT_DIRS
+        except Exception:
+            # Settings that cannot be loaded configure nothing: stay disabled.
+            env_dirs = None
 
     if env_dirs:
         # Parse comma-separated list from environment

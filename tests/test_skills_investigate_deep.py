@@ -223,6 +223,25 @@ class TestDeepForwardOnly:
         assert ent.pivot == "srcip==203.0.113.9"
         assert ql.call_args.kwargs["filter"] == "srcip==203.0.113.9"
 
+    async def test_headline_lateral_rows_exclude_the_asset_count(self):
+        # counts also carries the asset total; an endpoint is not a lateral
+        # log row, so the headline's "lateral rows" must not add it in.
+        user = {"euid": 42, "euname": "jdoe", "epid": [1001, 1002]}
+        endpoints = [ENDPOINT, {"epid": 1002, "epname": "EU-EXAMPLE2", "epip": "192.0.2.8"}]
+        rows = [{"srcip": "192.0.2.7", "dstip": "203.0.113.9"}] * 12
+        with (
+            t(GET_ENDUSERS, return_value=ok(data=[user])),
+            t(GET_ENDPOINTS, return_value=ok(data=endpoints)),
+            t(GET_VULNS, return_value=ok(data=[])),
+            t(QUERY_LOGS, return_value=logs_ok(rows)),
+        ):
+            result = await handlers.run_investigate_deep(
+                DeepInvestigateParams(entity="euid:42", impact_logtypes=["traffic"])
+            )
+        assert isinstance(result.impact, Impact)
+        assert result.impact.entities[0].counts == {"traffic": 12, "assets": 2}
+        assert "impact: 1 entities, 12 lateral rows (1 searches)" in result.headline
+
     async def test_unrecognized_entity_raises(self):
         with pytest.raises(handlers.SkillExecutionError, match="entity must be"):
             await handlers.run_investigate_deep(DeepInvestigateParams(entity="not-an-entity"))

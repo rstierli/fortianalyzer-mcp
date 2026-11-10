@@ -5,10 +5,11 @@ import contextlib
 import hashlib
 import hmac
 import logging
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.utilities.func_metadata import func_metadata
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import BaseModel
 from pydantic import ValidationError as PydanticValidationError
@@ -114,10 +115,9 @@ def _coerce_model_list(
     full mode's boundary: coerce before the tool runs, and reject a malformed
     entry with a message about that entry.
 
-    Any tool parameter typed ``list[SomeModel]`` needs an entry in
-    ``_STRUCTURED_PARAMS`` or it breaks in dynamic mode only — full mode keeps
-    working because MCPServer coerces there, which is what made this class of bug
-    easy to ship.
+    A ``list[SomeModel]`` parameter with no entry in ``_structured_params`` is
+    still coerced, by ``_validate_tool_arguments``, but gets pydantic's generic
+    wording in place of the per-entry message built here.
 
     Raises:
         ValidationError: If ``raw`` is not a list, or an entry fails model
@@ -157,6 +157,45 @@ def _structured_params() -> dict[str, tuple[type[BaseModel], str]]:
         "filters": (FilterCondition, "conditions, each {field, op, value}"),
         "events": (IocEventRef, "IOC events, each {endpoint_id/source_ip, timestamp}"),
     }
+
+
+def _validate_tool_arguments(
+    tool_func: Callable[..., Any], params: dict[str, Any]
+) -> dict[str, Any]:
+    """Validate and coerce a caller's arguments against a tool's signature.
+
+    MCPServer does this for a direct call in full mode, before the tool body
+    runs. ``execute_advanced_tool`` calls the function itself, so an ``int``
+    or ``bool`` parameter used to receive whatever JSON type was sent: a
+    string id was written into the request path as given, and ``"false"``
+    was a truthy flag. The argument model is the SDK's own, built from the
+    function the way tool registration builds it, and ``inspect.signature``
+    reads the real signature through the masking wrapper.
+
+    One deliberate difference from full mode: the SDK's model drops an
+    argument it does not know. This path has always refused one (as a bare
+    ``TypeError``), and a silently dropped ``adom`` typo would run a write
+    against the default ADOM, so it is still refused, by name.
+
+    Raises:
+        ValidationError: If an argument is unknown, missing, or of a type the
+            tool's signature does not accept.
+    """
+    metadata = func_metadata(tool_func, structured_output=False)
+    accepted = {field.alias or name for name, field in metadata.arg_model.model_fields.items()}
+    unknown = sorted(set(params) - accepted)
+    if unknown:
+        raise ValidationError(
+            f"Unknown argument(s): {', '.join(unknown)}. "
+            f"Accepted: {', '.join(sorted(accepted)) or 'none'}."
+        )
+    try:
+        return metadata.validate_arguments(params)
+    except PydanticValidationError as exc:
+        details = "; ".join(
+            f"{'.'.join(str(loc) for loc in err['loc'])}: {err['msg']}" for err in exc.errors()
+        )
+        raise ValidationError(f"Invalid arguments: {details}") from exc
 
 
 #: Category -> tool names, for dynamic mode's search surface.
@@ -409,6 +448,15 @@ def register_dynamic_tools(mcp_server: MCPServer) -> None:
                 )
 
         tool_func = tool_map[tool_name]
+        try:
+            params = _validate_tool_arguments(tool_func, params)
+        except ValidationError as e:
+            return error_response(
+                error="validation_error",
+                message=e,
+                operation="execute_advanced_tool",
+                tool_name=tool_name,
+            )
         return await tool_func(**params)
 
     @mcp_server.tool(annotations=READ_ONLY_LOCAL)
@@ -627,17 +675,19 @@ def run_http() -> None:
                 await self.app(scope, receive, send)
                 return
 
-            # Check Authorization header
+            # Check Authorization header. Compare it as the bytes received:
+            # decoding it first raised UnicodeDecodeError on a value that is not
+            # valid UTF-8, a 500 for what is just a wrong token.
             headers = dict(scope.get("headers", []))
-            auth_value = headers.get(b"authorization", b"").decode()
-            expected = f"Bearer {settings.MCP_AUTH_TOKEN}"
+            auth_value = headers.get(b"authorization", b"")
+            expected = f"Bearer {settings.MCP_AUTH_TOKEN}".encode()
 
             # Hash both sides before comparing: compare_digest short-circuits on
             # length mismatch, which would leak the token length as a timing
             # side-channel. Equal-length digests keep it constant-time.
             if not hmac.compare_digest(
-                hashlib.sha256(auth_value.encode()).digest(),
-                hashlib.sha256(expected.encode()).digest(),
+                hashlib.sha256(auth_value).digest(),
+                hashlib.sha256(expected).digest(),
             ):
                 response = Response(
                     content=json.dumps(
