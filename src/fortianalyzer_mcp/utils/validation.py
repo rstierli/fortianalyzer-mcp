@@ -252,6 +252,9 @@ VALID_EVENT_SUBTYPES = {
 # Anything matching this contains no quote/operator/boolean injection characters.
 _SAFE_UNQUOTED_FILTER_RE = re.compile(r"^[a-zA-Z0-9._:\-]+$")
 
+# Words FortiAnalyzer reads as operators where a value is expected.
+_FILTER_OPERATOR_WORDS = frozenset({"and", "or", "not"})
+
 # CVE identifier pattern (e.g. CVE-2025-2945)
 _CVE_RE = re.compile(r"^CVE-\d{4}-\d{4,}$", re.IGNORECASE)
 
@@ -738,13 +741,53 @@ def _quote_for(value: str, field: str) -> str:
     )
 
 
+def _stands_unquoted(value: str) -> bool:
+    """Whether FortiAnalyzer reads ``value`` as a value when it is not quoted.
+
+    The character class alone does not decide it. Measured on 7.6.8 and 8.0.2
+    with ``app==<value>``: ``and``, ``or`` and ``not`` in any case, a value
+    made of hyphens (``-``, ``--``) and a value that starts or ends with one
+    colon (``:``, ``a:``, ``:a``) are answered with ``Invalid filter``, and
+    each is accepted in quotes. Two colons at either end are fine (``::1``,
+    ``fe80::``), and so are a word that only starts like an operator
+    (``ornate``), ``like``, ``in``, ``null`` and a negative number.
+    """
+    if not _SAFE_UNQUOTED_FILTER_RE.match(value):
+        return False
+    if value.lower() in _FILTER_OPERATOR_WORDS or not value.strip("-"):
+        return False
+    if value.startswith(":") and not value.startswith("::"):
+        return False
+    return not (value.endswith(":") and not value.endswith("::"))
+
+
+def plain_filter_token(value: str, field: str = "filter value") -> str:
+    """Check a value that has to stand unquoted between ``*`` wildcards.
+
+    Returns the stripped value when it is made only of letters, digits, ``.``,
+    ``-``, ``_`` and ``:``. An operator word passes: between the wildcards it
+    is not on its own (``attack=*or*`` is accepted on 7.6.8 and 8.0.2).
+
+    Raises:
+        ValidationError: If the value is empty, holds a control character or
+            holds any other character.
+    """
+    value = _checked_filter_value(value, field)
+    if not _SAFE_UNQUOTED_FILTER_RE.match(value):
+        raise ValidationError(
+            f"Invalid {field} '{value}'. Only letters, digits, '.', '-', '_' and ':' are allowed."
+        )
+    return value
+
+
 def sanitize_filter_value(value: str, field: str = "filter value", *, strip: bool = True) -> str:
     """Write a free-text value as the operand of ``==`` or another comparison.
 
     Safe alphanumeric values (including dots, hyphens, underscores, and
-    colons for IPv6) are returned as-is. Anything else is wrapped in the
-    quote character it does not contain, with no escaping, so that
-    quote/operator/boolean characters in attacker-controlled input cannot
+    colons for IPv6) are returned as-is, except the few FortiAnalyzer does not
+    read as values unquoted (see ``_stands_unquoted``). Anything else is
+    wrapped in the quote character it does not contain, with no escaping, so
+    that quote/operator/boolean characters in attacker-controlled input cannot
     rewrite the surrounding filter and the value compares as itself.
 
     Not for ``like``: a bare ``%`` or ``_`` would be a wildcard there and a
@@ -765,7 +808,7 @@ def sanitize_filter_value(value: str, field: str = "filter value", *, strip: boo
             holds both quote characters, or ends in a backslash.
     """
     value = _checked_filter_value(value, field, strip=strip)
-    if _SAFE_UNQUOTED_FILTER_RE.match(value):
+    if _stands_unquoted(value):
         return value
     if value.endswith("\\"):
         raise ValidationError(

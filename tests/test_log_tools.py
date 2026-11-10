@@ -480,11 +480,16 @@ class TestQueryLogsAggregationModes:
             return None
 
     def _install(self, monkeypatch: pytest.MonkeyPatch, total: int | None = 3) -> None:
-        async def fake_page(client: object, **kwargs: object) -> dict[str, object]:
+        async def fake_page(
+            client: object, *, offset: int, limit: int, **kwargs: object
+        ) -> dict[str, object]:
+            # The slice an appliance returns for the page asked for: a count
+            # asks beyond the last row and gets the total with no rows.
+            rows = TestQueryLogsAggregationModes.ROWS[offset : offset + limit]
             return {
                 "timed_out": False,
                 "tid": 11,
-                "logs": [dict(r) for r in TestQueryLogsAggregationModes.ROWS],
+                "logs": [dict(r) for r in rows],
                 "total": total,
             }
 

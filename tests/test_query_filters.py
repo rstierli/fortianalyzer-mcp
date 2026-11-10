@@ -467,6 +467,13 @@ class TestLiteralSpelling:
         result, _ = compile_to_string([_c("msg", "eq", "path\\to")], "traffic")
         assert result == 'msg=="path\\to"'
 
+    def test_a_value_that_is_an_operator_word_is_compiled_as_a_value(self) -> None:
+        """``app==or`` is ``Invalid filter`` on 7.6.8 and 8.0.2; ``app=="or"`` is not."""
+        result, _ = compile_to_string(
+            [_c("app", "eq", "or"), _c("user", "not_in", ["and", "admin"])], "traffic"
+        )
+        assert result == 'app=="or" and (user!="and" and user!=admin)'
+
     def test_eq_on_the_stored_reason_value_is_the_spelling_that_matched(self) -> None:
         """Measured on both builds: this returned the row, the doubled form 0 rows."""
         result, _ = compile_to_string([_c("reason", "eq", self.STORED_REASON)], "event")

@@ -565,6 +565,13 @@ rows shape.
 - `total`, `total_is_known`, `count_source` (`"logsearch_total_count"`)
 - plus `adom`, `logtype`, `filter`, `time_range`, `timezone`, `warnings`
 
+A logsearch stops once it has the rows for the page it was asked for, and its
+`total-count` then covers only the part of the window read by then (#148). So the
+count is taken from a page asked for at `COUNT_ONLY_OFFSET`, which no window
+reaches: the page cannot fill, the search reads the whole window, and
+`total-count` is the count. `total_is_known` is false if that page comes back
+with rows.
+
 Every error path (across `query_logs`, `fetch_more_logs`, and
 `analyze_policy_traffic`) returns one envelope built by
 `utils/responses.py::error_response`:

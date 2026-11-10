@@ -26,6 +26,7 @@ from fortianalyzer_mcp.utils.validation import (
     assert_within_directory,
     build_device_filter,
     get_default_adom,
+    plain_filter_token,
     sanitize_filter_value,
     validate_adom,
     validate_cve,
@@ -124,15 +125,10 @@ def _build_ips_filter(
         filters.append(f"attack={safe}")
     elif attack_contains:
         # Wildcard search: attack=*Remote.Code.Execution*
-        # The wildcard syntax requires an unquoted value, so reject any value
-        # that is not a simple token rather than quoting it: the sanitiser
-        # quotes with either quote character, and neither fits here.
-        safe = sanitize_filter_value(attack_contains, "attack_contains")
-        if safe.startswith(('"', "'")):
-            raise ValidationError(
-                f"Invalid attack_contains '{attack_contains}'. "
-                "Only letters, digits, '.', '-', '_' and ':' are allowed."
-            )
+        # The wildcard syntax requires an unquoted value, so a value that is
+        # not a simple token is refused rather than quoted: neither quote
+        # character fits here.
+        safe = plain_filter_token(attack_contains, "attack_contains")
         filters.append(f"attack=*{safe}*")
 
     # Action filter: (action="blocked" or action="dropped")
