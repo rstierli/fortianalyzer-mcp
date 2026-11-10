@@ -540,6 +540,12 @@ COMPOSITE_BREAKDOWNS = ("breakdowns",)
 #: ordinary TEXT treatment.
 COMPOSITE_FILTER_ENTRIES = ("filter_applied",)
 
+#: TEXT keys that hold a filter expression. A ``%`` in one is a ``like``
+#: wildcard and never the start of a percent-escape, so the free-text pass
+#: must not look through "percent-encoding" there: ``%admin%`` begins with
+#: ``%ad`` and ``%2026%`` with ``%20``.
+FILTER_EXPRESSION_KEYS = ("filter", "filter_applied", "pivot", "pivot_filter")
+
 #: fortiview ``top-threats`` pair, masked together by
 #: ``wrapper._mask_threat_pair``: a non-empty ``obf_url`` marks the row as
 #: a browsed-domain threat; ``obf_url`` itself is the ``[dot]``-escaped
