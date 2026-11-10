@@ -222,6 +222,20 @@ def _compute_has_more(offset: int, count: int, limit: int, total: int | None) ->
     return limit > 0 and count >= limit
 
 
+def _page_filled(count: int, limit: int) -> bool:
+    """True when a row page came back full, so its total-count is a lower bound.
+
+    A logsearch stops once it has the rows for the page it was asked for, and
+    ``total-count`` then covers only the part of the window read by then
+    (#148, the row-page half). Measured on 7.6.7 over 24 hours of traffic: a
+    full page of 10, 100 or 1000 rows reported about 252,500 where the window
+    held 1,284,942. A page that did not fill had read to the end of the
+    window, so its count is the window's: 949 rows of a 7-day attack window
+    came back with total-count 949, the whole-window count.
+    """
+    return limit > 0 and count >= limit
+
+
 def _coerce_total(value: Any) -> int | None:
     """Coerce a FAZ ``total-count`` value to int, or None if unavailable."""
     if isinstance(value, bool):
@@ -654,7 +668,11 @@ async def query_logs(
             - total: The handle's first-page Baseline total (int), or None if unknown.
               Stays fixed across fetch_more_logs pages so it does not wobble as the
               appliance re-counts a frozen window (see page_total for the live count).
-            - total_is_known: Whether `total` is authoritative (False => unknown)
+            - total_is_known: Whether `total` is authoritative (False => unknown
+              or a lower bound)
+            - total_is_lower_bound: True when the page filled: the search may have
+              stopped before the end of the window, so `total` is a floor. Use
+              count_only for the window's count.
             - page_total: The raw FortiAnalyzer total-count observed for this page's
               search (the live per-page figure; equals total on page 0)
             - initial_total: The first-page baseline (equals total on page 0)
@@ -1156,8 +1174,11 @@ async def query_logs(
         logs = project_rows(page["logs"], projection)
         count = len(logs)
         total = page["total"]
-        total_is_known = total is not None
-        has_more = _compute_has_more(offset, count, limit, total)
+        # A full page's total-count is a floor, not the window's count; it is
+        # still reported, marked, and paging falls back to the full page.
+        total_is_lower_bound = total is not None and _page_filled(count, limit)
+        total_is_known = total is not None and not total_is_lower_bound
+        has_more = _compute_has_more(offset, count, limit, total if total_is_known else None)
         next_offset = offset + count if has_more else None
         handle = page["tid"]
 
@@ -1174,6 +1195,7 @@ async def query_logs(
             total_is_known=total_is_known,
             timezone=tz_name,
             has_more=has_more,
+            total_is_lower_bound=total_is_lower_bound,
         )
         warnings.extend(filter_warnings)
         warnings.extend(projection_warnings)
@@ -1198,6 +1220,7 @@ async def query_logs(
                 "time_basis_source": time_basis_source,
                 "clock_skew_seconds": clock_skew_seconds,
                 "initial_total": total,
+                "initial_total_is_lower_bound": total_is_lower_bound,
                 "fields": fields,
             },
         )
@@ -1207,6 +1230,7 @@ async def query_logs(
             "count": count,
             "total": total,
             "total_is_known": total_is_known,
+            "total_is_lower_bound": total_is_lower_bound,
             "page_total": total,
             "initial_total": total,
             **_scanned_logs(page),
@@ -1344,6 +1368,10 @@ async def fetch_more_logs(
               None if no baseline was ever captured). It is NOT this page's live count.
             - page_total: The raw FortiAnalyzer total-count observed for THIS page's
               re-run search (the live figure; may differ from total on a busy window)
+            - total_is_lower_bound / page_total_is_lower_bound: True when that
+              figure came from a full page, so the search may have stopped before
+              the end of the window and the figure is a floor. A floor is never
+              compared for drift.
             - initial_total: The first-page baseline `total` was derived from
             - scanned_logs: How many logs the appliance read for THIS page's
               search, when it says (reported only)
@@ -1447,37 +1475,55 @@ async def fetch_more_logs(
         timezone = context.get("timezone", "unknown")
         time_basis_source = context.get("time_basis_source", "unknown")
         clock_skew_seconds = context.get("clock_skew_seconds")
+        # A full page's total-count is a floor (see _page_filled), and so is a
+        # baseline taken from a full page 0. Two floors cover different parts of
+        # the window, so a difference between them is not drift.
+        baseline_is_lower_bound = bool(context.get("initial_total_is_lower_bound"))
+        page_is_lower_bound = page_total is not None and _page_filled(count, limit)
+        comparable = not (baseline_is_lower_bound or page_is_lower_bound)
 
         # Compare this page's raw total-count against the first-page Baseline
         # total. The response `total` is always the baseline (or None when no
         # baseline was ever captured); `page_total` carries the live observation.
         # See ADR-0002 for the full branch table.
-        if initial_total is not None and page_total is not None and page_total != initial_total:
+        if (
+            comparable
+            and initial_total is not None
+            and page_total is not None
+            and page_total != initial_total
+        ):
             response_total = initial_total
             total_count_stability = "drifted"
             total_drift_detected = True
             total_delta = page_total - initial_total
-        elif initial_total is not None and page_total == initial_total:
+        elif comparable and initial_total is not None and page_total == initial_total:
             response_total = initial_total
             total_count_stability = "stable"
             total_drift_detected = False
             total_delta = 0
         else:
-            # No comparable pair: either no baseline, or this page omitted the
-            # count. Keep the baseline if we have one, else stay None (unknown).
+            # No comparable pair: no baseline, this page omitted the count, or
+            # one of the two is a floor. Keep the baseline if we have one, else
+            # stay None (unknown).
             response_total = initial_total
             total_count_stability = "unknown"
             total_drift_detected = False
             total_delta = None
-        total_is_known = response_total is not None
+        total_is_lower_bound = response_total is not None and baseline_is_lower_bound
+        total_is_known = response_total is not None and not baseline_is_lower_bound
 
         # has_more is decoupled from the response `total`: page against the best
         # available figure so a short page never stops paging early (favor
-        # completeness, best-effort -- see ADR-0002).
-        if total_drift_detected:
+        # completeness, best-effort -- see ADR-0002). A full page pages on the
+        # full-page heuristic: its own count is a floor that can sit at the end
+        # of this page while the window goes on.
+        if page_is_lower_bound:
+            paging_total = None
+            has_more_basis = "full_page_heuristic"
+        elif total_drift_detected:
             paging_total = max(initial_total, page_total)
             has_more_basis = "best_effort_max_observed_total"
-        elif initial_total is not None:
+        elif initial_total is not None and not baseline_is_lower_bound:
             paging_total = initial_total
             has_more_basis = "stable_total"
         elif page_total is not None:
@@ -1490,14 +1536,16 @@ async def fetch_more_logs(
         next_offset = offset + count if has_more else None
 
         # Size the high-volume warning on the largest observed total, not the
-        # (possibly smaller) baseline returned as `total`.
+        # (possibly smaller) baseline returned as `total`; a full page sizes it
+        # on its own floor.
         warnings = build_warnings(
             requested_limit=requested_limit,
             limit=limit,
-            total=paging_total,
+            total=page_total if page_is_lower_bound else paging_total,
             total_is_known=paging_total is not None,
             timezone=timezone,
             has_more=has_more,
+            total_is_lower_bound=page_is_lower_bound,
         )
         warnings.extend(projection_warnings)
         if count == 0 and paging_total is not None and paging_total > offset:
@@ -1538,7 +1586,9 @@ async def fetch_more_logs(
             "time_range": context.get("time_range"),
             "total": response_total,
             "total_is_known": total_is_known,
+            "total_is_lower_bound": total_is_lower_bound,
             "page_total": page_total,
+            "page_total_is_lower_bound": page_is_lower_bound,
             "initial_total": initial_total,
             **_scanned_logs(page),
             "total_count_stability": total_count_stability,

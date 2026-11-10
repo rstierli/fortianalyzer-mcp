@@ -493,8 +493,16 @@ rows shape.
 - `status`, `count`, `logs`
 - `total`, `total_is_known` — the handle's **first-page Baseline total** (per ADR-0002),
   held fixed for every page so it does not wobble as the appliance re-counts a frozen
-  window; `total_is_known=false` when no baseline was captured. `fetch_more_logs` never
-  promotes a later page's count into `total`
+  window; `total_is_known=false` when no baseline was captured or the baseline is a
+  floor. `fetch_more_logs` never promotes a later page's count into `total`
+- `total_is_lower_bound`, `page_total_is_lower_bound` (the latter on `fetch_more_logs`) —
+  true when that figure came from a page that filled. A logsearch stops once it has the
+  rows for the page it was asked for, so a full page's `total-count` covers only the
+  part of the window read by then (#148; 7.6.7, 24 h of traffic: about 252,500 on a
+  full page where the window held 1,284,942). The figure is still reported, with a
+  warning pointing at `count_only`; a full page pages on `full_page_heuristic`, and a
+  floor is never compared for drift. A page that did not fill read to the end of the
+  window, so its count is exact
 - `page_total` — the raw FAZ `total-count` observed for the current page's re-run search
   (the live per-page figure; equals `total` on page 0)
 - `initial_total` — the baseline `total` was derived from

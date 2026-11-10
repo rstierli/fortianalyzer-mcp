@@ -116,15 +116,18 @@ def build_warnings(
     total_is_known: bool,
     timezone: str,
     has_more: bool,
+    total_is_lower_bound: bool = False,
 ) -> list[str]:
     """Build the deterministic ``warnings`` list for a log query response.
 
-    Emits one message for each of exactly four conditions: the requested limit was
-    clamped; the total is unknown; the FortiAnalyzer timezone is unknown; or the
-    result set is large enough that aggregation tools are a better fit. The first
-    and third are shared with the aggregation paths through
-    :func:`limit_clamped_warning` and :func:`unknown_timezone_warning`; the order
-    here is unchanged.
+    Emits one message for each of exactly five conditions: the requested limit was
+    clamped; the total is unknown; the total is a lower bound; the FortiAnalyzer
+    timezone is unknown; or the result set is large enough that aggregation tools
+    are a better fit. The first and fourth are shared with the aggregation paths
+    through :func:`limit_clamped_warning` and :func:`unknown_timezone_warning`.
+
+    A lower bound still sizes the large-result advice: the window holds at least
+    that many matches, so a floor past the threshold is a large result too.
     """
     warnings: list[str] = []
     clamped = limit_clamped_warning(requested_limit, limit)
@@ -135,20 +138,27 @@ def build_warnings(
             "Total match count is unavailable from FortiAnalyzer for this search; "
             "has_more is best-effort."
         )
+    elif total_is_lower_bound:
+        warnings.append(
+            f"This page filled, so FortiAnalyzer may have stopped the search before the "
+            f"end of the window: total ({total}) is a lower bound. Use "
+            "query_logs(count_only=True) for the window's count."
+        )
     unknown_tz = unknown_timezone_warning(timezone)
     if unknown_tz is not None:
         warnings.append(unknown_tz)
     if (
         has_more
-        and total_is_known
+        and (total_is_known or total_is_lower_bound)
         and total is not None
         and total >= max(10 * limit, _HIGH_VOLUME_FLOOR)
     ):
         # Names the tool call explicitly rather than "this query's own
         # group_by/sample_by": fetch_more_logs emits this same warning and has
         # neither parameter, so the shorthand pointed its readers at nothing.
+        at_least = "at least " if total_is_lower_bound else ""
         warnings.append(
-            f"Large result set ({total} matches); only this page is returned. Aggregate "
+            f"Large result set ({at_least}{total} matches); only this page is returned. Aggregate "
             "instead of paging rows: query_logs(group_by=...) or "
             "query_logs(sample_by=[...]), or analyze_policy_traffic for a per-policy "
             "volume question. Otherwise narrow the time window."

@@ -242,7 +242,9 @@ class TestQueryLogsPagination:
         assert result["count"] == 10
         assert [row["id"] for row in result["logs"]] == list(range(10))
         assert result["total"] == 25  # from total-count
-        assert result["total_is_known"] is True
+        # A full page: the search may have stopped early, so 25 is a floor.
+        assert result["total_is_known"] is False
+        assert result["total_is_lower_bound"] is True
         assert result["has_more"] is True
         assert isinstance(result["tid"], int)
         assert result["adom"] == "root"
@@ -305,8 +307,10 @@ class TestScannedLogs:
     ) -> None:
         _install(monkeypatch, FakeFaz(_rows(25), scanned_logs=4000))
 
-        first = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=10)
-        more = await log_tools.fetch_more_logs(tid=first["tid"], offset=10, limit=10)
+        # Pages that do not fill, so the totals are exact and only scanned-logs
+        # could move the basis -- which it must not.
+        first = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=30)
+        more = await log_tools.fetch_more_logs(tid=first["tid"], offset=10, limit=30)
 
         assert first["scanned_logs"] == 4000
         assert more["scanned_logs"] == 4000
@@ -395,6 +399,83 @@ class TestCountOnlyReadsTheWholeWindow:
 
         assert result["error"] == "search_timeout"
         assert "reads every log in the window" in result["recommendation"]
+
+
+class TestFullPageTotalIsAFloor:
+    """A row page that fills reports its ``total-count`` as a lower bound (#148).
+
+    The row-page half of #148. Measured on 7.6.7 over 24 hours of traffic: a
+    full page of 10, 100 or 1000 rows reported about 252,500 where the window
+    held 1,284,942; 949 rows of a 7-day attack window, a page that did not
+    fill, came back with the whole-window count.
+    """
+
+    async def test_a_full_page_reports_its_total_as_a_floor(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install(monkeypatch, FakeFaz(_rows(2500), segments=[1200, 800, 500]))
+
+        result = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=100)
+
+        assert result["total"] == 1200
+        assert result["total_is_known"] is False
+        assert result["total_is_lower_bound"] is True
+        assert result["has_more"] is True
+        assert result["has_more_basis"] == "full_page_heuristic"
+        assert any("lower bound" in w and "count_only" in w for w in result["warnings"])
+
+    async def test_a_page_that_did_not_fill_is_exact(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _install(monkeypatch, FakeFaz(_rows(65), segments=[26, 39]))
+
+        result = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=100)
+
+        assert result["count"] == 65
+        assert result["total"] == 65
+        assert result["total_is_known"] is True
+        assert result["total_is_lower_bound"] is False
+        assert result["has_more"] is False
+        assert not any("lower bound" in w for w in result["warnings"])
+
+    async def test_two_floors_are_not_drift(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Floors from two full pages cover different parts of the window."""
+        _install(monkeypatch, FakeFaz(_rows(2500), segments=[1200, 800, 500]))
+
+        first = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=1000)
+        more = await log_tools.fetch_more_logs(tid=first["tid"], offset=1000, limit=1000)
+
+        assert more["total"] == 1200
+        assert more["total_is_lower_bound"] is True
+        assert more["page_total"] == 2000
+        assert more["page_total_is_lower_bound"] is True
+        assert more["total_drift_detected"] is False
+        assert more["total_count_stability"] == "unknown"
+        assert more["has_more"] is True
+        assert not any("row offsets may also shift" in w for w in more["warnings"])
+
+    async def test_the_last_short_page_pages_on_its_own_count(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A page that did not fill read to the end of the window, so its count
+        stops paging even under a floor baseline."""
+        _install(monkeypatch, FakeFaz(_rows(2500), segments=[1200, 800, 500]))
+
+        first = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=1000)
+        last = await log_tools.fetch_more_logs(tid=first["tid"], offset=2000, limit=1000)
+
+        assert last["count"] == 500
+        assert last["page_total"] == 2500
+        assert last["page_total_is_lower_bound"] is False
+        assert last["has_more_basis"] == "best_effort_page_total"
+        assert last["has_more"] is False
+
+    async def test_a_floor_still_sizes_the_large_result_advice(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install(monkeypatch, FakeFaz(_rows(30000), segments=[20000, 10000]))
+
+        result = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=100)
+
+        assert any("at least 20000 matches" in w for w in result["warnings"])
 
 
 class TestFetchMoreLogs:
@@ -699,8 +780,10 @@ class TestTotalStability:
         fake = FakeFaz(_rows(25), total_overrides=[25, 25])
         _install(monkeypatch, fake)
 
-        first = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=10)
-        more = await log_tools.fetch_more_logs(tid=first["tid"], offset=10, limit=10)
+        # Pages that do not fill: a full page's total is a floor and is never
+        # compared (TestFullPageTotalIsAFloor), so the comparison needs short ones.
+        first = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=30)
+        more = await log_tools.fetch_more_logs(tid=first["tid"], offset=10, limit=30)
 
         assert more["status"] == "success"
         assert more["total"] == 25
@@ -718,12 +801,12 @@ class TestTotalStability:
         fake = FakeFaz(_rows(25), total_overrides=[230071, 230741])
         _install(monkeypatch, fake)
 
-        first = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=5)
+        first = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=100)
         assert first["total"] == 230071
         assert first["initial_total"] == 230071
         assert first["page_total"] == 230071
 
-        more = await log_tools.fetch_more_logs(tid=first["tid"], offset=5, limit=5)
+        more = await log_tools.fetch_more_logs(tid=first["tid"], offset=5, limit=100)
 
         assert more["total"] == 230071
         assert more["page_total"] == 230741
@@ -743,8 +826,8 @@ class TestTotalStability:
         fake = FakeFaz(_rows(10), total_overrides=[10, 1000])
         _install(monkeypatch, fake)
 
-        first = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=5)
-        more = await log_tools.fetch_more_logs(tid=first["tid"], offset=5, limit=5)
+        first = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=20)
+        more = await log_tools.fetch_more_logs(tid=first["tid"], offset=5, limit=20)
 
         assert more["page_total"] == 1000
         assert more["total"] == 10  # baseline preserved
@@ -774,7 +857,7 @@ class TestTotalStability:
         fake = FakeFaz(_rows(25))
         _install(monkeypatch, fake)
 
-        r = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=10)
+        r = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=30)
 
         assert r["page_total"] == 25
         assert r["initial_total"] == 25
@@ -825,7 +908,7 @@ class TestTotalStability:
         fake = FakeFaz(_rows(25), total_overrides=[25, None])
         _install(monkeypatch, fake)
 
-        first = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=10)
+        first = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=30)
         more = await log_tools.fetch_more_logs(tid=first["tid"], offset=10, limit=10)
 
         assert more["total"] == 25
@@ -877,21 +960,21 @@ class TestTotalStability:
         fake = FakeFaz(_rows(20), total_overrides=[240000, 230000, 240500])
         _install(monkeypatch, fake)
 
-        first = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=5)
+        first = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=25)
         assert first["initial_total"] == 240000
 
-        more1 = await log_tools.fetch_more_logs(tid=first["tid"], offset=5, limit=5)
+        more1 = await log_tools.fetch_more_logs(tid=first["tid"], offset=5, limit=25)
         assert more1["total"] == 240000
         assert more1["page_total"] == 230000
         assert more1["total_delta"] == -10000
         assert more1["has_more_basis"] == "best_effort_max_observed_total"
 
-        more2 = await log_tools.fetch_more_logs(tid=first["tid"], offset=10, limit=5)
+        more2 = await log_tools.fetch_more_logs(tid=first["tid"], offset=10, limit=25)
         assert more2["total"] == 240000
         assert more2["page_total"] == 240500
         assert more2["total_delta"] == 500
 
         # Beyond the dataset: an empty page stops paging cleanly regardless of total.
-        more3 = await log_tools.fetch_more_logs(tid=first["tid"], offset=20, limit=5)
+        more3 = await log_tools.fetch_more_logs(tid=first["tid"], offset=20, limit=25)
         assert more3["count"] == 0
         assert more3["has_more"] is False

@@ -117,11 +117,14 @@ class TestQueryLogsContractFields:
 
         r = await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=10)
 
-        assert r["total_is_known"] is True
+        # A full page: its total-count is a floor, said in one warning.
+        assert r["total_is_known"] is False
+        assert r["total_is_lower_bound"] is True
         assert r["offset"] == 0
         assert r["limit"] == 10
         assert r["next_offset"] == 10  # offset + count, has_more
-        assert r["warnings"] == []
+        assert len(r["warnings"]) == 1
+        assert "total (25) is a lower bound" in r["warnings"][0]
         # Spec-compliant polling: the runner polls logsearch_fetch until
         # percentage=100, so at least one fetch must have happened.
         assert len(fake.fetch_calls) >= 1
@@ -251,9 +254,12 @@ class TestFetchMoreLogsContract:
 
         assert more["offset"] == 10
         assert more["limit"] == 10
-        assert more["total_is_known"] is True
+        assert more["total_is_known"] is False
+        assert more["total_is_lower_bound"] is True
+        assert more["page_total_is_lower_bound"] is True
         assert more["next_offset"] == 20  # offset + count, has_more
-        assert more["warnings"] == []
+        assert len(more["warnings"]) == 1
+        assert "total (25) is a lower bound" in more["warnings"][0]
         assert "returned_offset" not in more
 
     async def test_unknown_handle_error_uses_error_key(

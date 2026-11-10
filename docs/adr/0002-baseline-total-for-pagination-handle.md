@@ -63,3 +63,18 @@ workload ever needs guaranteed completeness under non-monotonic drift.
 - `total_count_stability` and `has_more_basis` answer different questions and may legitimately differ
   (e.g. a later page omitting `total-count` is `stability="unknown"` while `has_more_basis` stays
   `stable_total` because the baseline is still available).
+
+## Amendment: a full page's total is a floor (#148)
+
+A logsearch stops once it has the rows for the page it was asked for, so the `total-count` of a page
+that fills covers only the part of the window read by then. Measured on 7.6.7 over 24 hours of traffic:
+about 252,500 on a full page where the window held 1,284,942. A page that does not fill has read to the
+end of the window and its count is the window's.
+
+So a baseline taken from a full page 0 is a **floor**, not the whole-window total this ADR assumed:
+`total` still carries it, with `total_is_known=false` and `total_is_lower_bound=true`. A full later page
+reports `page_total_is_lower_bound=true` and pages on `full_page_heuristic`. Two figures of which either
+is a floor are never compared: they cover different parts of the window, so a difference between them
+is not drift, and `total_count_stability` is `unknown`. Under a floor baseline, a page that did not fill
+pages on its own exact count (`best_effort_page_total`). The drift branches above still apply between
+two exact counts, which now means rows indexed into the window after page 0.
