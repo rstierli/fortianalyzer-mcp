@@ -176,6 +176,15 @@ class TestAttackExactLiteral:
         with pytest.raises(ValidationError, match="attack_contains"):
             pcap_tools._build_ips_filter(attack_contains=name)
 
+    @pytest.mark.parametrize("name", ["or", "and", "Not"])
+    def test_attack_contains_takes_an_operator_word(self, name: str) -> None:
+        """Between the wildcards the word is not on its own: ``attack=*or*``,
+        ``attack=*and*`` and ``attack=*Not*`` are accepted on 7.6.8 and 8.0.2."""
+        assert pcap_tools._build_ips_filter(attack_contains=name) == f"attack=*{name}*"
+
+    def test_attack_exact_quotes_an_operator_word_once(self) -> None:
+        assert pcap_tools._build_ips_filter(attack_exact="or") == 'attack="or"'
+
 
 class TestPCAPClient:
     """Tests for PCAP client methods."""
