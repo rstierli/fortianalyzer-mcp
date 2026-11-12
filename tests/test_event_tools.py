@@ -530,6 +530,165 @@ class TestGetAlertsProjection:
         assert result["warnings"]
 
 
+class TestGetAlertsFilterFields:
+    """#184: FortiAnalyzer answers a filter on a field alerts do not have with
+    status success and 0 rows, so a mistyped field reads as "no alerts".
+
+    get_alerts names such a field in a warning. It does not refuse the
+    filter: the known names are this server's knowledge, and the appliance
+    takes at least one name no reference lists (srcip, measured).
+    """
+
+    def _install(
+        self, monkeypatch: pytest.MonkeyPatch, rows: tuple[dict[str, object], ...] = ()
+    ) -> list[dict[str, object]]:
+        """A fake client that records what each get_alerts call was sent."""
+        calls: list[dict[str, object]] = []
+
+        class FakeClient:
+            async def get_system_timezone(self) -> None:
+                return None
+
+            async def get_alerts(self, **kwargs: object) -> object:
+                calls.append(kwargs)
+                return list(rows)
+
+        monkeypatch.setattr(event_tools, "_get_client", lambda: FakeClient())
+        return calls
+
+    async def test_an_unknown_filter_field_is_named_in_a_warning(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = self._install(monkeypatch)
+
+        result = await event_tools.get_alerts(filter='nosuchfield=="x"')
+
+        # Not a refusal: the filter went to the appliance as written ...
+        assert calls[0]["filter"] == 'nosuchfield=="x"'
+        # ... and its answer, 0 rows and no error, comes back with the warning.
+        assert result["status"] == "success"
+        assert result["count"] == 0
+        (warning,) = result["warnings"]
+        assert "'nosuchfield'" in warning
+        assert "0 rows" in warning and "no error" in warning
+
+    async def test_rows_the_appliance_returns_are_kept(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A name this server does not know may still be one the appliance
+        takes, so the warning never replaces the answer."""
+        self._install(monkeypatch, rows=({"alertid": "A-1", "severity": "high"},))
+
+        result = await event_tools.get_alerts(filter="nosuchfield==1")
+
+        assert result["status"] == "success"
+        assert [row["alertid"] for row in result["data"]] == ["A-1"]
+        assert len(result["warnings"]) == 1
+
+    @pytest.mark.parametrize("filter", ["srcip==192.0.2.10", 'srcip=="192.0.2.10"'])
+    async def test_srcip_is_known_though_no_reference_lists_it(
+        self, monkeypatch: pytest.MonkeyPatch, filter: str
+    ) -> None:
+        """Measured: srcip==<epip> returns the same rows as epip==<epip>."""
+        self._install(monkeypatch)
+
+        result = await event_tools.get_alerts(filter=filter)
+
+        assert result["status"] == "success"
+        assert result["warnings"] == []
+
+    @pytest.mark.parametrize("field", ["alertid", "severity", "epip", "triggername", "euid"])
+    async def test_a_field_of_the_alert_vocabulary_does_not_warn(
+        self, monkeypatch: pytest.MonkeyPatch, field: str
+    ) -> None:
+        self._install(monkeypatch)
+
+        result = await event_tools.get_alerts(filter=f"{field}==x")
+
+        assert result["warnings"] == []
+
+    @pytest.mark.parametrize("field", ["event_value", "trigger_name", "count", "comment", "flags"])
+    async def test_a_filter_field_the_api_reference_lists_does_not_warn(
+        self, monkeypatch: pytest.MonkeyPatch, field: str
+    ) -> None:
+        """The endpoint's reference lists these as its filter fields; they are
+        not keys of an alert row, so the alert vocabulary does not carry them."""
+        self._install(monkeypatch)
+
+        result = await event_tools.get_alerts(filter=f"{field}==x")
+
+        assert result["warnings"] == []
+
+    async def test_only_the_unknown_field_of_a_compound_filter_is_named(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._install(monkeypatch)
+
+        result = await event_tools.get_alerts(
+            filter='severity==high and (nosuchfield=="x" or epip==192.0.2.10)'
+        )
+
+        (warning,) = result["warnings"]
+        assert "'nosuchfield'" in warning
+        assert "'severity'" not in warning and "'epip'" not in warning
+
+    async def test_each_unknown_field_is_named_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._install(monkeypatch)
+
+        result = await event_tools.get_alerts(
+            filter="nosuchfield==1 or nosuchfield==2 or otherfield==3"
+        )
+
+        assert len(result["warnings"]) == 2
+        assert "'nosuchfield'" in result["warnings"][0]
+        assert "'otherfield'" in result["warnings"][1]
+
+    async def test_clause_shaped_text_inside_a_value_is_not_a_field(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The triage skill writes the caller's alert id into one quoted
+        literal. What the literal holds is a value, whatever it looks like."""
+        self._install(monkeypatch)
+
+        result = await event_tools.get_alerts(filter="alertid=='x\" or nosuchfield==\"1'")
+
+        assert result["warnings"] == []
+
+    async def test_a_literal_no_clause_precedes_is_still_a_literal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Read by the masking layer's rules: clause-shaped text inside such a
+        literal names no field, and a clause after the literal is still read."""
+        self._install(monkeypatch)
+
+        inside = await event_tools.get_alerts(filter='"it\'s nosuchfield==1" and severity==high')
+        after = await event_tools.get_alerts(filter='"it\'s" and nosuchfield==1')
+
+        assert inside["warnings"] == []
+        (warning,) = after["warnings"]
+        assert "'nosuchfield'" in warning
+
+    async def test_the_warning_joins_the_projection_warnings(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._install(monkeypatch)
+
+        result = await event_tools.get_alerts(
+            filter='nosuchfield=="x"', fields=["alertid", "mystery_field"]
+        )
+
+        assert len(result["warnings"]) == 2
+        assert any("'nosuchfield'" in w for w in result["warnings"])
+        assert any("mystery_field" in w for w in result["warnings"])
+
+    async def test_no_filter_no_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._install(monkeypatch)
+
+        result = await event_tools.get_alerts()
+
+        assert result["warnings"] == []
+
+
 class TestGetAlertLogsProjection:
     """Alert logs project under the event vocabulary -- they're the logs that
     triggered the alert, not the alerts themselves.
