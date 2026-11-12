@@ -219,6 +219,80 @@ class TestDispatcher:
         assert result["error"] == "skill_output_invalid"
         assert result["skill"] == "incidents"
 
+    async def test_refused_params_are_reported_without_the_values_sent(self):
+        """The refusal used to be pydantic's own text, which quotes each
+        offending input cut to a head and a tail. With masking on the params
+        are resolved before they are typed, so the quote was the plaintext of
+        the caller's token, whole or in pieces."""
+        result = await faz_skill(
+            skill="hunt",
+            params={
+                "entity": "workstation-14.example.net",
+                "ttp": "T1059",
+                "sweep_limit": "portal.example.com",
+                "note": "p" * 60 + ":analyst@example.org",
+            },
+        )
+
+        assert result["error"] == "invalid_skill_params"
+        for sent in ("workstation", "portal", "analyst", "example", "pppp", "T1059"):
+            assert sent not in result["message"]
+        assert "input_value" not in result["message"]
+        # It still says what is wrong, and where.
+        assert "2 validation errors for HuntParams" in result["message"]
+        assert "sweep_limit: Input should be a valid integer" in result["message"]
+        assert "note: Extra inputs are not permitted [extra_forbidden]" in result["message"]
+
+    async def test_a_refusal_of_the_params_as_a_whole_has_no_field_to_name(self):
+        result = await faz_skill(
+            skill="hunt", params={"entity": "workstation-14.example.net", "ttp": "T1059"}
+        )
+
+        assert result["error"] == "invalid_skill_params"
+        assert result["message"].startswith("1 validation error for HuntParams: Value error, ")
+        assert "exactly one subject" in result["message"]
+        assert "workstation" not in result["message"]
+
+    async def test_a_refusal_names_a_nested_field_by_its_path(self):
+        result = await faz_skill(
+            skill="threat_intel",
+            params={"indicators": [{"value": "portal.example.com", "type": "Hostname"}]},
+        )
+
+        assert result["error"] == "invalid_skill_params"
+        assert "indicators/0/type: Input should be" in result["message"]
+        assert "portal.example.com" not in result["message"]
+        assert "Hostname" not in result["message"]
+
+    async def test_invalid_output_is_reported_without_the_data_it_choked_on(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        """A handler that fails to model a row must not hand the row back,
+        in the reply or in the log line beside it."""
+        import dataclasses
+
+        from fortianalyzer_mcp.skills.models import LogSearchResult
+
+        async def bad_handler(parsed: Any) -> Any:
+            return LogSearchResult.model_validate(
+                {"rows": "srcip=192.0.2.19 user=jdoe hostname=workstation-14"}
+            )
+
+        monkeypatch.setitem(
+            SKILLS, "log_search", dataclasses.replace(SKILLS["log_search"], handler=bad_handler)
+        )
+        with caplog.at_level("ERROR"):
+            result = await faz_skill(
+                skill="log_search", params={"logtype": "traffic", "time_range": "1-hour"}
+            )
+
+        assert result["error"] == "skill_output_invalid"
+        assert "rows: Input should be a valid list [list_type]" in result["message"]
+        for text in (result["message"], caplog.text):
+            assert "LogSearchResult" in text
+            for row_value in ("192.0.2.19", "jdoe", "workstation-14"):
+                assert row_value not in text
+
     async def test_unexpected_exception_maps_to_skill_error(self, monkeypatch: pytest.MonkeyPatch):
         import dataclasses
 
