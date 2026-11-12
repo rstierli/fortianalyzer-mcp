@@ -2673,14 +2673,22 @@ def _substring_clause(field: str, value: str, name: str) -> str:
     return f"{field} like {_param_value(value, name, like=True)}"
 
 
-def _sweep_pivot(params: HuntParams) -> str | None:
+def _sweep_pivot(params: HuntParams, logtype: str | None = None) -> str | None:
     """The filter clause the sweep searches run on — auditable, never a guess.
 
-    - indicator: an equality on the field the indicator's type maps to
-      (IP -> srcip, Domain -> hostname, URL -> url, Hash -> a 'checksum'
-      substring). Sanitised.
+    - indicator: a match on the fields that carry the indicator's type
+      (#184). IP -> srcip or dstip, since an address is as often the
+      destination. Domain -> qname in dns logs, whose rows carry no
+      hostname (measured on 7.6.7 and 8.0.2), and hostname in any other
+      ``logtype``. URL -> url. Hash -> a substring of filehash or
+      analyticscksum: virus logs on 7.6.7 carry the SHA-256 in
+      analyticscksum and leave filehash empty, and matching either covers
+      a build that fills filehash. Sanitised.
     - filter: passed through verbatim (the caller owns its correctness).
     - ttp only: folded into an 'attack' substring match.
+
+    Only a Domain indicator's clause depends on ``logtype``, the log type
+    the search is for.
 
     Returns ``None`` when no usable pivot can be derived (the sweep then
     degrades to a gap rather than sweeping on nothing).
@@ -2692,17 +2700,20 @@ def _sweep_pivot(params: HuntParams) -> str | None:
         return params.filter
 
     if params.indicator is not None:
-        field = {
-            "IP": "srcip",
-            "Domain": "hostname",
-            "URL": "url",
-            "Hash": "checksum",
+        on_dns = logtype is not None and logtype.strip().lower() == "dns"
+        fields = {
+            "IP": ("srcip", "dstip"),
+            "Domain": ("qname",) if on_dns else ("hostname",),
+            "URL": ("url",),
+            "Hash": ("filehash", "analyticscksum"),
         }[params.indicator.type]
-        # Hash is matched as a substring (the checksum field name varies by
-        # logtype); IP/Domain/URL as equality.
+        value = params.indicator.value
+        # Hash is matched as a substring; IP/Domain/URL as equality.
         if params.indicator.type == "Hash":
-            return _substring_clause(field, params.indicator.value, "indicator")
-        return f"{field}=={_param_value(params.indicator.value, 'indicator')}"
+            clauses = [_substring_clause(field, value, "indicator") for field in fields]
+        else:
+            clauses = [f"{field}=={_param_value(value, 'indicator')}" for field in fields]
+        return clauses[0] if len(clauses) == 1 else f"({' or '.join(clauses)})"
 
     if params.ttp is not None:
         return _substring_clause("attack", params.ttp, "ttp")
@@ -2718,6 +2729,8 @@ async def _hunt_sweep(
     One logview search slot per swept log type (capped by
     ``max_sweep_searches``; excess dropped and named in ``warnings``), plus
     ``threat_intel`` for an IP/URL/Domain indicator (plain GETs, no slot).
+    A Hash indicator also sweeps ``virus``, the log type that carries file
+    hashes.
     Degrades to a ``FeatureGap`` when no sweep pivot can be derived.
     """
     from fortianalyzer_mcp.tools.log_tools import query_logs
@@ -2728,11 +2741,25 @@ async def _hunt_sweep(
             reason="no sweep pivot could be derived from the subject; nothing to hunt on"
         )
 
+    logtypes = list(params.sweep_logtypes)
+    if (
+        params.indicator is not None
+        and params.indicator.type == "Hash"
+        and "virus" not in {logtype.strip().lower() for logtype in logtypes}
+    ):
+        # First, so the fan-out cap never drops the one log type measured to
+        # carry the hash (#184).
+        logtypes.insert(0, "virus")
+        warnings.append(
+            "sweep: 'virus' added to the swept log types for a Hash indicator "
+            "(virus logs carry the file hash)"
+        )
+
     matches: list[SweepMatch] = []
     consumed = 0
     dropped = 0
     budget = params.max_sweep_searches
-    for logtype in params.sweep_logtypes:
+    for logtype in logtypes:
         if consumed >= budget:
             dropped += 1
             matches.append(
@@ -2748,12 +2775,13 @@ async def _hunt_sweep(
             )
             continue
         consumed += 1
+        clause = _sweep_pivot(params, logtype)
         logs_res, err = await _call(
             query_logs,
             adom=params.adom,
             logtype=logtype,
             time_range=time_range,
-            filter=pivot,
+            filter=clause,
             limit=params.sweep_limit,
             # SweepMatch.rows is documented "Verbatim matched rows", and the
             # sweep fans out over logtypes whose curated sets differ -- a
@@ -2764,13 +2792,16 @@ async def _hunt_sweep(
             matches.append(
                 SweepMatch(
                     logtype=logtype,
+                    pivot_filter=clause,
                     rows=FeatureGap(reason=f"sweep '{logtype}' search unavailable: {err}"),
                 )
             )
             warnings.append(f"sweep[{logtype}]: search unavailable: {err}")
         else:
             rows = logs_res.get("logs") or []
-            matches.append(SweepMatch(logtype=logtype, rows=rows, row_count=len(rows)))
+            matches.append(
+                SweepMatch(logtype=logtype, pivot_filter=clause, rows=rows, row_count=len(rows))
+            )
             warnings.extend(f"sweep[{logtype}]: {w}" for w in logs_res.get("warnings") or [])
 
     # Threat-intel: reputation for an IP/URL/Domain indicator (a hash is not
@@ -2807,8 +2838,11 @@ async def _hunt_sweep(
         threat_intel = FeatureGap(reason="no single indicator to enrich (filter/ttp hunt)")
 
     total = sum(m.row_count for m in matches)
+    # One clause for the whole sweep only when every search ran on it; a
+    # Domain indicator swept across dns and other log types ran on two.
+    ran_on = {m.pivot_filter for m in matches if m.pivot_filter is not None}
     return HuntSweep(
-        pivot_filter=pivot,
+        pivot_filter=next(iter(ran_on), pivot) if len(ran_on) < 2 else None,
         ttp=params.ttp,
         matches=matches,
         threat_intel=threat_intel,

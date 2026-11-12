@@ -59,6 +59,26 @@ def logs_ok(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {"status": "success", "tid": 1, "logs": rows, "total": len(rows)}
 
 
+def by_logtype(**responses: dict[str, Any]) -> Any:
+    """Side effect for ``query_logs``, dispatching on logtype."""
+
+    def _route(**kwargs: Any) -> dict[str, Any]:
+        return responses[kwargs["logtype"]]
+
+    return _route
+
+
+@pytest.fixture
+def soar() -> Any:
+    """Quiet SOAR and threat-landscape readers, for an indicator sweep."""
+    with (
+        t(GET_LINKED, return_value=ok(data=[])),
+        t(GET_ENRICH, return_value=ok(data=[])),
+        t(GET_FORTIVIEW_DATA, return_value=ok(data=[])),
+    ):
+        yield
+
+
 # The fixture host: risk_score 0.248 among a crowd of ~0.1x hosts, plus
 # critical/high vuln-stats — the RFC's "genuinely high-risk entity" case.
 HOT_ENDPOINT = {
@@ -132,11 +152,14 @@ class TestHuntSweep:
             )
         assert result.subject_type == "indicator"
         assert isinstance(result.sweep, HuntSweep)
-        assert result.sweep.pivot_filter == "srcip==198.21.33.3"
+        assert result.sweep.pivot_filter == "(srcip==198.21.33.3 or dstip==198.21.33.3)"
         assert result.sweep.sweep_searches_run == 2
         assert result.sweep.total_matches == 2  # one row per logtype
         # Every sweep search ran on the indicator pivot.
-        assert all(c.kwargs["filter"] == "srcip==198.21.33.3" for c in ql.call_args_list)
+        assert all(
+            c.kwargs["filter"] == "(srcip==198.21.33.3 or dstip==198.21.33.3)"
+            for c in ql.call_args_list
+        )
         assert threats_mock.call_args.kwargs["view_name"] == "top-threats"
         # An IP indicator gets SOAR reputation; behaviour half is a gap.
         assert not isinstance(result.sweep.threat_intel, FeatureGap)
@@ -151,9 +174,15 @@ class TestHuntSweep:
                 )
             )
         assert isinstance(result.sweep, HuntSweep)
-        assert result.sweep.pivot_filter == 'checksum like "%deadbeef%"'
+        assert (
+            result.sweep.pivot_filter
+            == '(filehash like "%deadbeef%" or analyticscksum like "%deadbeef%")'
+        )
         assert isinstance(result.sweep.threat_intel, FeatureGap)
-        assert ql.call_args.kwargs["filter"] == 'checksum like "%deadbeef%"'
+        assert (
+            ql.call_args.kwargs["filter"]
+            == '(filehash like "%deadbeef%" or analyticscksum like "%deadbeef%")'
+        )
 
     async def test_filter_hypothesis_sweep(self):
         with t(QUERY_LOGS, return_value=logs_ok([{"x": 1}])) as ql:
@@ -165,6 +194,160 @@ class TestHuntSweep:
         assert result.sweep.pivot_filter == "dstport==4444"
         assert result.sweep.ttp == "T1571"
         assert ql.call_args.kwargs["filter"] == "dstport==4444"
+
+    async def test_ip_indicator_is_matched_as_source_or_destination(self, soar):
+        """#184: an address that is a destination sits in dstip, so an IP
+        indicator is matched on either side, on every swept log type."""
+        clause = "(srcip==203.0.113.7 or dstip==203.0.113.7)"
+        with t(QUERY_LOGS, return_value=logs_ok([])) as ql:
+            result = await handlers.run_hunt(
+                HuntParams(indicator=IndicatorSubject(value="203.0.113.7", type="IP"))
+            )
+        assert [c.kwargs["logtype"] for c in ql.call_args_list] == [
+            "traffic",
+            "attack",
+            "app-ctrl",
+            "dns",
+        ]
+        assert [c.kwargs["filter"] for c in ql.call_args_list] == [clause] * 4
+        assert isinstance(result.sweep, HuntSweep)
+        assert result.sweep.pivot_filter == clause
+        assert [m.pivot_filter for m in result.sweep.matches] == [clause] * 4
+
+    async def test_domain_indicator_is_matched_on_qname_in_dns_logs(self, soar):
+        """#184: a dns row carries the queried name in qname and no hostname."""
+        with t(QUERY_LOGS, return_value=logs_ok([])) as ql:
+            result = await handlers.run_hunt(
+                HuntParams(indicator=IndicatorSubject(value="bad.example.com", type="Domain"))
+            )
+        sent = {c.kwargs["logtype"]: c.kwargs["filter"] for c in ql.call_args_list}
+        assert sent == {
+            "traffic": "hostname==bad.example.com",
+            "attack": "hostname==bad.example.com",
+            "app-ctrl": "hostname==bad.example.com",
+            "dns": "qname==bad.example.com",
+        }
+        # The clause differs by log type: each match shows the one its search
+        # ran on, and the sweep claims no single clause.
+        assert isinstance(result.sweep, HuntSweep)
+        assert {m.logtype: m.pivot_filter for m in result.sweep.matches} == sent
+        assert result.sweep.pivot_filter is None
+
+    @pytest.mark.parametrize("logtype", ["dns", "DNS"])
+    async def test_domain_sweep_of_dns_alone_reports_its_one_clause(self, soar, logtype):
+        with t(QUERY_LOGS, return_value=logs_ok([])) as ql:
+            result = await handlers.run_hunt(
+                HuntParams(
+                    indicator=IndicatorSubject(value="bad.example.com", type="Domain"),
+                    sweep_logtypes=[logtype],
+                )
+            )
+        assert ql.call_args.kwargs["filter"] == "qname==bad.example.com"
+        assert isinstance(result.sweep, HuntSweep)
+        assert result.sweep.pivot_filter == "qname==bad.example.com"
+
+    async def test_hash_indicator_sweeps_virus_logs_on_either_hash_field(self):
+        """#184: virus logs carry the file hash, in analyticscksum on 7.6.7
+        and possibly in filehash on another build, and virus is not one of
+        the default sweep log types."""
+        digest = "d41d8cd98f00b204e9800998ecf8427e"
+        clause = (
+            '(filehash like "%d41d8cd98f00b204e9800998ecf8427e%" or '
+            'analyticscksum like "%d41d8cd98f00b204e9800998ecf8427e%")'
+        )
+        with t(QUERY_LOGS, return_value=logs_ok([])) as ql:
+            result = await handlers.run_hunt(
+                HuntParams(indicator=IndicatorSubject(value=digest, type="Hash"))
+            )
+        assert sorted(c.kwargs["logtype"] for c in ql.call_args_list) == [
+            "app-ctrl",
+            "attack",
+            "dns",
+            "traffic",
+            "virus",
+        ]
+        assert [c.kwargs["filter"] for c in ql.call_args_list] == [clause] * 5
+        assert isinstance(result.sweep, HuntSweep)
+        assert result.sweep.pivot_filter == clause
+        assert result.sweep.sweep_searches_run == 5
+        # The result says the log type was added.
+        assert any(w.startswith("sweep:") and "'virus' added" in w for w in result.warnings)
+
+    async def test_hash_sweep_that_names_virus_does_not_add_it_again(self):
+        with t(QUERY_LOGS, return_value=logs_ok([])) as ql:
+            result = await handlers.run_hunt(
+                HuntParams(
+                    indicator=IndicatorSubject(value="deadbeef", type="Hash"),
+                    sweep_logtypes=["traffic", "virus"],
+                )
+            )
+        assert [c.kwargs["logtype"] for c in ql.call_args_list] == ["traffic", "virus"]
+        assert not any("'virus' added" in w for w in result.warnings)
+
+    async def test_added_virus_search_is_not_the_one_the_cap_drops(self):
+        # virus is the log type that carries the hash, so it is swept first
+        # and the fan-out cap drops a caller's log type instead, by name.
+        with t(QUERY_LOGS, return_value=logs_ok([])) as ql:
+            result = await handlers.run_hunt(
+                HuntParams(
+                    indicator=IndicatorSubject(value="deadbeef", type="Hash"),
+                    sweep_logtypes=["traffic"],
+                    max_sweep_searches=1,
+                )
+            )
+        assert [c.kwargs["logtype"] for c in ql.call_args_list] == ["virus"]
+        assert isinstance(result.sweep, HuntSweep)
+        assert result.sweep.sweep_searches_dropped == 1
+        assert any("'traffic' search dropped" in w for w in result.warnings)
+
+    @pytest.mark.parametrize(
+        ("subject", "clause"),
+        [
+            (
+                {"indicator": {"value": "bad.example.com/x", "type": "URL"}},
+                'url=="bad.example.com/x"',
+            ),
+            ({"filter": "dstport==4444"}, "dstport==4444"),
+            ({"ttp": "T1071"}, 'attack like "%T1071%"'),
+        ],
+        ids=["url", "filter", "ttp"],
+    )
+    async def test_other_subjects_sweep_on_the_clause_they_did(self, soar, subject, clause):
+        # Not changed by #184: one clause, the caller's log types, no more.
+        with t(QUERY_LOGS, return_value=logs_ok([])) as ql:
+            result = await handlers.run_hunt(HuntParams(**subject))
+        assert [c.kwargs["logtype"] for c in ql.call_args_list] == [
+            "traffic",
+            "attack",
+            "app-ctrl",
+            "dns",
+        ]
+        assert [c.kwargs["filter"] for c in ql.call_args_list] == [clause] * 4
+        assert isinstance(result.sweep, HuntSweep)
+        assert result.sweep.pivot_filter == clause
+
+    async def test_no_search_runs_on_a_clause_the_result_does_not_show(self):
+        """A failed search still shows the clause it ran on; a search the
+        cap dropped never ran and shows none."""
+        with t(
+            QUERY_LOGS,
+            side_effect=by_logtype(
+                virus=logs_ok([{"analyticscksum": "deadbeef"}]),
+                traffic={"status": "error", "message": "logview unavailable"},
+            ),
+        ) as ql:
+            result = await handlers.run_hunt(
+                HuntParams(
+                    indicator=IndicatorSubject(value="deadbeef", type="Hash"),
+                    sweep_logtypes=["virus", "traffic", "dns", "attack"],
+                    max_sweep_searches=2,
+                )
+            )
+        assert isinstance(result.sweep, HuntSweep)
+        ran = [(c.kwargs["logtype"], c.kwargs["filter"]) for c in ql.call_args_list]
+        shown = [(m.logtype, m.pivot_filter) for m in result.sweep.matches]
+        assert shown[: len(ran)] == ran
+        assert shown[len(ran) :] == [("dns", None), ("attack", None)]
 
     async def test_sweep_fanout_cap_drops_and_warns(self):
         # 4 logtypes but a cap of 2 -> 2 run, 2 dropped, no silent loss.
@@ -482,6 +665,24 @@ class TestHuntDispatch:
         assert result["schema_version"] == SCHEMA_VERSION
         assert result["result"]["subject_type"] == "hypothesis"
 
+    async def test_each_match_carries_the_clause_its_search_ran_on(self, soar):
+        with t(QUERY_LOGS, return_value=logs_ok([])):
+            result = await faz_skill(
+                skill="hunt",
+                params={
+                    "indicator": {"value": "bad.example.com", "type": "Domain"},
+                    "sweep_logtypes": ["traffic", "dns"],
+                },
+            )
+        assert result["status"] == "success"
+        sweep = result["result"]["sweep"]
+        # The field each search matched on (the value is masked when masking is on).
+        assert [(m["logtype"], m["pivot_filter"].split("==")[0]) for m in sweep["matches"]] == [
+            ("traffic", "hostname"),
+            ("dns", "qname"),
+        ]
+        assert sweep["pivot_filter"] is None
+
     async def test_missing_subject_rejected(self):
         result = await faz_skill(skill="hunt", params={})
         assert result["status"] == "error"
@@ -519,7 +720,7 @@ class TestSweepPivotOperator:
         pivot = handlers._sweep_pivot(
             HuntParams(indicator=IndicatorSubject(value="deadbeef", type="Hash"))
         )
-        assert pivot == 'checksum like "%deadbeef%"'
+        assert pivot == '(filehash like "%deadbeef%" or analyticscksum like "%deadbeef%")'
 
     @pytest.mark.parametrize(
         "params",
@@ -545,7 +746,7 @@ class TestSweepPivotOperator:
         pivot = handlers._sweep_pivot(
             HuntParams(indicator=IndicatorSubject(value="dead\\", type="Hash"))
         )
-        assert pivot == 'checksum like "%dead\\\\%"'
+        assert pivot == '(filehash like "%dead\\\\%" or analyticscksum like "%dead\\\\%")'
 
     @pytest.mark.parametrize(
         "params",

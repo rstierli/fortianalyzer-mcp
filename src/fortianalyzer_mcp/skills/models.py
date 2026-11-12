@@ -980,7 +980,9 @@ class HuntParams(BaseModel):
         default_factory=lambda: ["traffic", "attack", "app-ctrl", "dns"],
         description="Log types swept for the indicator/TTP/filter. Each is one "
         "logview search slot; the total is capped by max_sweep_searches. "
-        "('attack' is FAZ's IPS log type; 'ips' is not a valid FAZ logtype.)",
+        "('attack' is FAZ's IPS log type; 'ips' is not a valid FAZ logtype.) "
+        "A Hash indicator also sweeps 'virus', the log type that carries file "
+        "hashes, when it is not listed.",
     )
     max_sweep_searches: int = Field(
         default=6,
@@ -1042,11 +1044,18 @@ class SweepMatch(BaseModel):
     ``rows`` are verbatim FAZ log rows the sweep filter matched. Degrades to
     a ``FeatureGap`` when that search failed or was dropped by the fan-out
     cap — never silently omitted.
+
+    ``pivot_filter`` is the clause this log type's search ran on.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     logtype: str
+    pivot_filter: str | None = Field(
+        default=None,
+        description="The filter clause this log type's search ran on (None when "
+        "the search was dropped by the fan-out cap and never ran)",
+    )
     rows: list[dict[str, Any]] | FeatureGap = Field(
         description="Verbatim matched rows — or the gap marker for this log type"
     )
@@ -1057,8 +1066,9 @@ class HuntSweep(BaseModel):
     """The hunt (sweep) half: where the indicator/TTP/filter appears.
 
     ``pivot_filter`` is the exact filter clause every sweep search ran on,
-    so the hunt is auditable and never a guess. ``matches`` is one
-    ``SweepMatch`` per swept log type. ``threat_intel`` enriches an
+    when they all ran on one; each ``SweepMatch`` carries the clause its own
+    search ran on, so the hunt is auditable and never a guess. ``matches``
+    is one ``SweepMatch`` per swept log type. ``threat_intel`` enriches an
     IP/URL/Domain indicator with stored SOAR reputation (a gap for a hash,
     a bare filter, or when SOAR is unavailable).
     """
@@ -1066,8 +1076,10 @@ class HuntSweep(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     pivot_filter: str | None = Field(
-        description="The filter clause the sweep searches ran on (None when no "
-        "usable sweep pivot could be derived)"
+        description="The filter clause the sweep searches ran on. None when they "
+        "did not all run on the same one (a Domain indicator is matched on qname "
+        "in dns logs and on hostname elsewhere): each match's pivot_filter then "
+        "shows its own"
     )
     ttp: str | None = Field(default=None, description="The TTP hint, recorded verbatim")
     matches: list[SweepMatch] = Field(default_factory=list)

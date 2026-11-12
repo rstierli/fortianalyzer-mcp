@@ -869,7 +869,7 @@ faz_skill(skill="hunt", params={"indicator": {"value": "203.0.113.7", "type": "I
   "subject_type": "indicator",
   "headline": "indicator IP 203.0.113.7; sweep: 12 matches across 4 searches",
   "sweep": {
-    "pivot_filter": "srcip==203.0.113.7",
+    "pivot_filter": "(srcip==203.0.113.7 or dstip==203.0.113.7)",
     "matches": [
       {"logtype": "traffic",  "row_count": 9},
       {"logtype": "dns",      "row_count": 3},
@@ -890,7 +890,9 @@ faz_skill(skill="hunt", params={"indicator": {"value": "203.0.113.7", "type": "I
 }
 ```
 
-One call fans the pivot `srcip==203.0.113.7` across four log types (verbatim matched rows, capped) and attaches the stored SOAR reputation — here `Malicious` — so the analyst sees both *where* the IOC landed and *what it is*, in a single structured result.
+One call fans the pivot `(srcip==203.0.113.7 or dstip==203.0.113.7)` across four log types (verbatim matched rows, capped) and attaches the stored SOAR reputation, here `Malicious`, so the analyst sees both *where* the IOC landed and *what it is*, in a single structured result.
+
+The sweep matches an indicator on the fields the rows carry: an IP as source or destination, a domain on `qname` in dns logs and on `hostname` elsewhere, a file hash on `filehash` or `analyticscksum` (with the `virus` log type added to the sweep). Each match carries the clause its own search ran on in `pivot_filter`, and the sweep-level `pivot_filter` is `null` when the clause differs by log type.
 
 **Trace an incident backward and forward** — the full picture of `IN00000001`.
 ```jsonc
