@@ -9,7 +9,9 @@ Three things keep the plaintext from leaving again:
 - what was resolved is recorded for the call, each value whole and each token
   inside it, and the output side puts the caller's own text back under every
   key it scans, ahead of the device-identity keep set;
-- a refused skill call is reported without its input.
+- a refusal does not hand back a piece of what it refused: a refused skill
+  call is reported without its input, and a message cut to its length bound
+  loses what the cut left of a recorded value.
 
 The first is a deny-list and the second depends on the key that carries the
 echo, so both fail open for the next new argument. This sweep is the other
@@ -549,6 +551,25 @@ class TestAnEchoOfOnePartOfAValue:
                         # The caller's own token may come back; the pieces may not.
                         text = str(reply).lower().replace(token.lower(), "")
                         assert [piece for piece in pieces if piece in text] == []
+
+    async def test_a_message_cut_at_its_length_bound_holds_no_piece_of_the_plaintext(
+        self, masked: tuple[MCPServer, Sweep]
+    ) -> None:
+        """A refusal that quotes the whole argument is as long as the
+        argument, and an error message is cut at 500 characters. Where the
+        cut fell inside the value the token resolved to, the reply held the
+        head of it."""
+        _, sweep = masked
+        search_log_file = sweep.tools["search_log_file"]
+
+        for plaintext, token in sweep.tokens.items():
+            pieces = {plaintext[start : start + 4].lower() for start in range(len(plaintext) - 3)}
+            for pad in range(400, 500):
+                reply = await search_log_file(device="p" * pad + " " + token)
+
+                assert reply["status"] == "error"
+                text = str(reply).lower().replace(token.lower(), "")
+                assert [piece for piece in pieces if piece in text] == [], pad
 
 
 @skip_if_dynamic_mode

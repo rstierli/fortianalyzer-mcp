@@ -1359,6 +1359,84 @@ class TestAResolvedValueIsNotKeptReadable:
         }
 
 
+class TestAKnownValueCutShortByTheMessageBound:
+    """An error message is cut at a fixed length and the cut is marked.
+
+    A message that quotes an argument is as long as the argument, so the cut
+    can fall inside a value the reply knows. Pass 2 then no longer found the
+    value, and its head came back in front of the mark. The end of such a
+    message is now dropped from where it starts to spell a known value.
+    """
+
+    REAL = "fw-core.example.net"
+    CUT = "... (truncated)"
+
+    def test_no_head_of_a_resolved_value_is_left_in_front_of_the_mark(
+        self, masker: OutputMasker, engine: FPEEngine
+    ):
+        token = engine.mint("hostname", self.REAL)
+
+        for kept in range(1, len(self.REAL)):
+            reply = {
+                "status": "error",
+                "message": f"Invalid device 'lab {self.REAL[:kept]}{self.CUT}",
+            }
+
+            out = masker.mask_result(reply, {self.REAL: token})
+
+            assert out["message"] == f"Invalid device 'lab {self.CUT}", kept
+
+    def test_a_value_that_fits_whole_is_the_callers_token(
+        self, masker: OutputMasker, engine: FPEEngine
+    ):
+        token = engine.mint("hostname", self.REAL)
+        reply = {"message": f"Invalid device 'lab {self.REAL}{self.CUT}"}
+
+        out = masker.mask_result(reply, {self.REAL: token})
+
+        assert out["message"] == f"Invalid device 'lab {token}{self.CUT}"
+
+    def test_the_cut_inside_a_longer_recorded_value_takes_the_whole_of_it(
+        self, masker: OutputMasker, engine: FPEEngine
+    ):
+        """The argument as a whole is recorded too; what is left of it is
+        the caller's own text and a head of the value."""
+        token = engine.mint("hostname", self.REAL)
+        resolved = {f"lab {self.REAL}": f"lab {token}", self.REAL: token}
+        reply = {"message": f"Invalid device 'lab {self.REAL[:7]}{self.CUT}"}
+
+        out = masker.mask_result(reply, resolved)
+
+        assert out["message"] == f"Invalid device '{self.CUT}"
+
+    def test_a_value_a_row_of_the_same_reply_carries_is_treated_the_same(
+        self, masker: OutputMasker
+    ):
+        reply = {"logs": [{"srcname": self.REAL}], "message": f"skipped {self.REAL[:9]}{self.CUT}"}
+
+        out = masker.mask_result(reply)
+
+        assert out["message"] == f"skipped {self.CUT}"
+
+    def test_a_head_that_only_ends_a_longer_name_is_left(
+        self, masker: OutputMasker, engine: FPEEngine
+    ):
+        """The left boundary of the swap: ``lab-fw-core`` is another name."""
+        token = engine.mint("hostname", self.REAL)
+        reply = {"message": f"Invalid device 'lab-{self.REAL[:7]}{self.CUT}"}
+
+        assert masker.mask_result(reply, {self.REAL: token}) == reply
+
+    def test_a_cut_message_that_ends_in_nothing_known_is_left(
+        self, masker: OutputMasker, engine: FPEEngine
+    ):
+        token = engine.mint("hostname", self.REAL)
+        reply = {"message": f"Invalid ADOM name 'pppppppp{self.CUT}"}
+
+        assert masker.mask_result(reply, {self.REAL: token}) == reply
+        assert masker.mask_result(reply) == reply
+
+
 class TestHandlerDescription:
     def test_embedded_ip_and_email_are_masked_in_the_description(self, masker: OutputMasker):
         masked = masker.mask_result(HANDLER)

@@ -110,6 +110,7 @@ from fortianalyzer_mcp.masking.fpe_engine import (
     begin_v2_verification_budget,
 )
 from fortianalyzer_mcp.masking.unmask import ArgUnmasker, recording_resolved_values
+from fortianalyzer_mcp.utils.responses import TRUNCATION_MARK
 
 logger = logging.getLogger(__name__)
 
@@ -221,6 +222,11 @@ _MIN_SUBSTITUTION_LEN = 4
 
 
 _PERCENT_RUN_RE = re.compile(r"(?:%[0-9A-Fa-f]{2})+")
+
+#: A character that continues a name to its left. The known-value swap does
+#: not start inside a longer name (see ``_build_substitution_plan``), and
+#: neither does the rule for a value a cut message kept only the head of.
+_NAME_CHAR_RE = re.compile(r"[A-Za-z0-9._-]")
 
 
 def _unquote_utf8(text: str) -> str:
@@ -1533,7 +1539,37 @@ class OutputMasker:
                 return self.placeholder(found)
             return plan.folded.get(key) or self.placeholder(found)
 
-        return plan.pattern.sub(swap, text)
+        swapped = plan.pattern.sub(swap, text)
+        if swapped.endswith(TRUNCATION_MARK):
+            return self._drop_cut_value(swapped, plan)
+        return swapped
+
+    @staticmethod
+    def _drop_cut_value(text: str, plan: "_SubstitutionPlan") -> str:
+        """Drop what a message cut to its length bound kept of a known value.
+
+        ``error_response`` cuts a message at a fixed length and marks the
+        cut. A message that quotes an argument is as long as the argument,
+        so the cut can fall inside a value this response knows. The swap
+        then no longer finds the value, and its head stayed readable in front
+        of the mark, also for a value the caller's own token had resolved to.
+        So the text in front of the mark is dropped from the point where it
+        starts to spell a known value, under the left boundary the swap uses.
+        A value that fits whole was swapped before this runs.
+
+        Dropped, not swapped for the token: a cut inside the argument as a
+        whole would put back the whole text the caller sent, of any length,
+        and the bound on the message is there for a reason.
+        """
+        body = text[: -len(TRUNCATION_MARK)]
+        longest = max(len(raw) for raw in plan.folded)
+        for start in range(max(0, len(body) - longest), len(body)):
+            if start and _NAME_CHAR_RE.match(body[start - 1]):
+                continue
+            tail = body[start:].casefold()
+            if any(raw.startswith(tail) for raw in plan.folded):
+                return body[:start] + TRUNCATION_MARK
+        return text
 
     # -- the two passes -------------------------------------------------- #
 

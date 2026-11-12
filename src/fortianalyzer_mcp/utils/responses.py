@@ -14,6 +14,11 @@ from fortianalyzer_mcp.utils.validation import MASK_VALUE, SENSITIVE_FIELDS
 # Max length of a (redacted) human error message echoed back to the caller.
 _MAX_MESSAGE_LEN = 500
 
+#: What ends a message that was cut to that length. Output masking reads it:
+#: the cut can fall inside a value it would have masked whole
+#: (``OutputMasker._drop_cut_value``).
+TRUNCATION_MARK = "... (truncated)"
+
 # High-volume floor for the aggregation warning (see build_warnings).
 _HIGH_VOLUME_FLOOR = 10_000
 
@@ -186,7 +191,7 @@ def error_response(
     """
     msg = redact(str(message))
     if len(msg) > _MAX_MESSAGE_LEN:
-        msg = msg[:_MAX_MESSAGE_LEN] + "... (truncated)"
+        msg = msg[:_MAX_MESSAGE_LEN] + TRUNCATION_MARK
     resp: dict[str, Any] = {
         "status": "error",
         "error": error,
