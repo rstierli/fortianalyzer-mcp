@@ -25,6 +25,7 @@ assertions are about the JSON-RPC requests that would reach the appliance.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable
 from typing import Any
@@ -369,3 +370,81 @@ class TestLayoutWithSchedule:
         )
 
         assert result["schedule_created"] is False
+
+
+class TestScheduleLookupFails:
+    """A failed lookup says nothing about the layout, so no report is started.
+
+    Running through schedule-param would ignore the devices of a schedule that
+    may exist; running the flat form would name a schedule that may not.
+    """
+
+    @BOTH_TOOLS
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            pytest.param(
+                {"status": {"code": -3, "message": "Permission denied"}},
+                id="the appliance answers with an error",
+            ),
+            pytest.param(TimeoutError(), id="a failure that carries no text"),
+        ],
+    )
+    async def test_no_report_is_started(
+        self,
+        tool: Any,
+        failure: dict[str, Any] | Exception,
+        appliance: Callable[..., _Appliance],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async def no_sleep(_seconds: float) -> None:
+            return None
+
+        # The client retries a transport error with a backoff; do not wait it out.
+        monkeypatch.setattr(asyncio, "sleep", no_sleep)
+        faz = appliance(failure)
+
+        result = await tool(layout=str(LAYOUT_ID), adom="root", time_range="7-day")
+
+        assert result["status"] == "error"
+        assert "tid" not in result
+        assert RUN_URL not in faz.urls()
+        assert faz.writes() == []
+
+    @BOTH_TOOLS
+    @pytest.mark.parametrize(
+        ("failure", "reason"),
+        [
+            pytest.param(
+                {"status": {"code": -3, "message": "Permission denied"}},
+                f"Permission denied (url: GET {SCHEDULE_LIST_URL})",
+                id="the appliance answers with an error",
+            ),
+            pytest.param(TimeoutError(), "TimeoutError", id="a failure that carries no text"),
+            pytest.param(
+                ConnectionError("login failed: password=not-a-real-secret"),
+                "login failed: password=***REDACTED***",
+                id="a failure whose text carries a secret",
+            ),
+        ],
+    )
+    async def test_the_reply_names_the_failure_and_says_nothing_started(
+        self,
+        tool: Any,
+        failure: dict[str, Any] | Exception,
+        reason: str,
+        appliance: Callable[..., _Appliance],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async def no_sleep(_seconds: float) -> None:
+            return None
+
+        monkeypatch.setattr(asyncio, "sleep", no_sleep)
+        appliance(failure)
+
+        result = await tool(layout=str(LAYOUT_ID), adom="root", time_range="7-day")
+
+        assert result["message"] == (
+            f"Failed to look up the schedule for layout-id {LAYOUT_ID}: {reason}. "
+            "No report was started."
+        )

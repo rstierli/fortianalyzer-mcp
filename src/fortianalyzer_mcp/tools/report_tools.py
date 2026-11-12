@@ -244,8 +244,9 @@ async def _check_schedule_exists(client: Any, adom: str, layout_id: int) -> dict
         return {"exists": False}
 
     except Exception as e:
-        logger.warning(f"Failed to look up the schedule: {e}")
-        return {"exists": False, "error": str(e)}
+        error = str(e) or type(e).__name__
+        logger.warning(f"Failed to look up the schedule: {redact(error)}")
+        return {"exists": False, "error": error}
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -442,11 +443,15 @@ async def run_report(
             logger.info(f"Found layout-id {layout_id} for '{layout}'")
 
         # Step 2: Look the layout's schedule up; it decides the form of the run.
+        # A failed lookup says nothing about the layout, so nothing is started.
         schedule_result = await _check_schedule_exists(client, adom, layout_id)
-        if schedule_result.get("error"):
+        if "error" in schedule_result:
             return {
                 "status": "error",
-                "message": f"Failed to look up the schedule: {schedule_result['error']}",
+                "message": (
+                    f"Failed to look up the schedule for layout-id {layout_id}: "
+                    f"{redact(schedule_result['error'])}. No report was started."
+                ),
             }
 
         # Step 3: Resolve the time range. A custom "start|end" range is passed
@@ -769,11 +774,15 @@ async def run_and_wait_report(
             logger.info(f"Found layout-id {layout_id} for '{layout}'")
 
         # Step 2: Look the layout's schedule up; it decides the form of the run.
+        # A failed lookup says nothing about the layout, so nothing is started.
         schedule_result = await _check_schedule_exists(client, adom, layout_id)
-        if schedule_result.get("error"):
+        if "error" in schedule_result:
             return {
                 "status": "error",
-                "message": f"Failed to look up the schedule: {schedule_result['error']}",
+                "message": (
+                    f"Failed to look up the schedule for layout-id {layout_id}: "
+                    f"{redact(schedule_result['error'])}. No report was started."
+                ),
             }
 
         # Step 3: Resolve the time range and device filter. A custom "start|end"
