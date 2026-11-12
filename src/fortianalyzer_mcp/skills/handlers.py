@@ -1346,7 +1346,22 @@ def _summarize_enrichment_sources(record: dict[str, Any]) -> list[dict[str, Any]
     return summaries
 
 
-async def run_threat_intel(params: ThreatIntelParams) -> ThreatIntelResult:
+def _indicator_lookup_unbounded(time_range: str) -> str:
+    """The result line for an indicator lookup a composing skill ran unbounded.
+
+    ``investigate`` and ``hunt`` have a window, and the indicator reads do
+    not use it (#184): reputation is a property of the indicator, and SOAR
+    hides an indicator last seen before the window it is given.
+    """
+    return (
+        f"threat_intel: indicator lookup not limited to the {time_range} window "
+        "(reputation is a property of the indicator, not of the window)"
+    )
+
+
+async def run_threat_intel(
+    params: ThreatIntelParams, *, landscape_time_range: str | None = None
+) -> ThreatIntelResult:
     """Stored SOAR reputation for a set of IP/URL/Domain indicators.
 
     Subjects are the explicit ``indicators`` list plus, when an
@@ -1356,6 +1371,10 @@ async def run_threat_intel(params: ThreatIntelParams) -> ThreatIntelResult:
     per-indicator read degrades to a warning with the record kept
     unenriched. The FortiView threat landscape is context and degrades to
     a gap marker. All reads are plain GETs — no logview search slots.
+
+    ``landscape_time_range`` is for a composing skill: it windows the threat
+    landscape alone, so the composer can leave ``params.time_range`` unset
+    and the indicator reads unbounded (#184).
     """
     from fortianalyzer_mcp.tools.fortiview_tools import get_fortiview_data
     from fortianalyzer_mcp.tools.soar_tools import get_indicator_enrichment, get_linked_indicators
@@ -1465,7 +1484,7 @@ async def run_threat_intel(params: ThreatIntelParams) -> ThreatIntelResult:
             view_name="top-threats",
             sort_by=VIEW_SORT_DEFAULTS["top-threats"],
             adom=params.adom,
-            time_range=params.time_range or "24-hour",
+            time_range=landscape_time_range or params.time_range or "24-hour",
             limit=10,
             fields=["*"],
         )
@@ -2225,7 +2244,8 @@ async def run_investigate(params: InvestigateParams) -> Investigation:
 
     # Indicator enrichment: threat_intel on the same subject. Its subject
     # call (linked-indicator resolution) is enrichment from this skill's
-    # point of view, so its hard fail degrades to a gap here.
+    # point of view, so its hard fail degrades to a gap here. The indicator
+    # reads are not given the window (#184); the threat landscape is.
     threat_intel: ThreatIntelResult | FeatureGap
     try:
         threat_intel = await run_threat_intel(
@@ -2234,11 +2254,12 @@ async def run_investigate(params: InvestigateParams) -> Investigation:
                 alert_id=params.alert_id,
                 incident_id=params.incident_id,
                 detail_level=params.detail_level,
-                time_range=params.time_range,
                 include_threat_landscape=params.include_threat_landscape,
-            )
+            ),
+            landscape_time_range=params.time_range,
         )
         warnings.extend(f"threat_intel: {w}" for w in threat_intel.warnings)
+        warnings.append(_indicator_lookup_unbounded(params.time_range))
     except SkillExecutionError as exc:
         warnings.append(f"indicator enrichment unavailable: {exc}")
         threat_intel = FeatureGap(reason=f"indicator enrichment unavailable: {exc}")
@@ -2814,7 +2835,8 @@ async def _hunt_sweep(
 
     One logview search slot per swept log type (capped by
     ``max_sweep_searches``; excess dropped and named in ``warnings``), plus
-    ``threat_intel`` for an IP/URL/Domain indicator (plain GETs, no slot).
+    ``threat_intel`` for an IP/URL/Domain indicator (plain GETs, no slot;
+    that lookup is not limited to the window, and a warning says so).
     A Hash indicator also sweeps ``virus``, the log type that carries file
     hashes. Each search returns one page: a match whose page was truncated
     has ``has_more`` set and makes ``total_matches`` a lower bound.
@@ -2911,16 +2933,19 @@ async def _hunt_sweep(
             # ti_type is a value of _INDICATOR_TYPE_CANONICAL, i.e. exactly one
             # of "IP"/"URL"/"Domain" — the IndicatorSpec.type Literal.
             spec = IndicatorSpec.model_validate({"value": params.indicator.value, "type": ti_type})
+            # The indicator read is not given the hunt window (#184); the
+            # threat landscape is.
             threat_intel = await run_threat_intel(
                 ThreatIntelParams(
                     adom=params.adom,
                     indicators=[spec],
                     detail_level=params.detail_level,
-                    time_range=time_range,
                     include_threat_landscape=params.include_threat_landscape,
-                )
+                ),
+                landscape_time_range=time_range,
             )
             warnings.extend(f"threat_intel: {w}" for w in threat_intel.warnings)
+            warnings.append(_indicator_lookup_unbounded(time_range))
         except SkillExecutionError as exc:
             warnings.append(f"indicator enrichment unavailable: {exc}")
             threat_intel = FeatureGap(reason=f"indicator enrichment unavailable: {exc}")

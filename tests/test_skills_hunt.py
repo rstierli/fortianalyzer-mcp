@@ -399,6 +399,66 @@ class TestHuntSweep:
         assert any("search unavailable" in w for w in result.warnings)
 
 
+def unbounded_lookup_lines(warnings: list[str]) -> list[str]:
+    """The lines that say the indicator lookup ignored the hunt window."""
+    return [w for w in warnings if w.startswith("threat_intel:") and "not limited to" in w]
+
+
+class TestHuntIndicatorWindow:
+    """#184: reputation is a property of the indicator, not of the window
+    being hunted, so the indicator read runs unbounded. SOAR otherwise hides
+    an indicator last seen before the window."""
+
+    async def test_reputation_lookup_is_unbounded_and_the_result_says_so(self):
+        with (
+            t(QUERY_LOGS, return_value=logs_ok([])) as ql,
+            t(
+                GET_ENRICH,
+                return_value=ok(
+                    data=[{"value": "203.0.113.7", "enrichment-reputation": "Malicious"}]
+                ),
+            ) as enrich,
+            t(GET_FORTIVIEW_DATA, return_value=ok(data=THREATS)) as threats_mock,
+        ):
+            result = await handlers.run_hunt(
+                HuntParams(
+                    indicator=IndicatorSubject(value="203.0.113.7", type="IP"),
+                    sweep_logtypes=["traffic"],
+                )
+            )
+        assert enrich.call_args.kwargs["time_range"] is None
+        assert isinstance(result.sweep, HuntSweep)
+        assert not isinstance(result.sweep.threat_intel, FeatureGap)
+        assert result.sweep.threat_intel.indicators[0].reputation == "Malicious"
+        # The sweep and the threat landscape are views of the window and stay on it.
+        assert ql.call_args.kwargs["time_range"] == "7-day"
+        assert threats_mock.call_args.kwargs["view_name"] == "top-threats"
+        assert threats_mock.call_args.kwargs["time_range"] == "7-day"
+        (line,) = unbounded_lookup_lines(result.warnings)
+        assert "7-day" in line
+
+    async def test_no_such_line_when_no_indicator_lookup_ran(self):
+        with t(QUERY_LOGS, return_value=logs_ok([])):
+            result = await handlers.run_hunt(
+                HuntParams(filter="dstport==4444", sweep_logtypes=["traffic"])
+            )
+        assert isinstance(result.sweep, HuntSweep)
+        assert isinstance(result.sweep.threat_intel, FeatureGap)
+        assert unbounded_lookup_lines(result.warnings) == []
+
+    async def test_envelope_says_the_reputation_lookup_ignored_the_window(self, soar):
+        with t(QUERY_LOGS, return_value=logs_ok([])):
+            result = await faz_skill(
+                skill="hunt",
+                params={
+                    "indicator": {"value": "bad.example.com", "type": "Domain"},
+                    "sweep_logtypes": ["dns"],
+                },
+            )
+        assert result["status"] == "success"
+        assert len(unbounded_lookup_lines(result["result"]["warnings"])) == 1
+
+
 class TestHuntSweepCounts:
     """#184: a sweep search returns one page. A page that filled is not the
     number of matches, and a sweep whose searches all failed is not a sweep

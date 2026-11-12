@@ -879,8 +879,10 @@ class InvestigateParams(BaseModel):
     incident_id: str | None = None
     time_range: str = Field(
         default="7-day",
-        description="Window for the summary, indicator and threat-landscape "
-        "sections (and the triage surrounding-activity context)",
+        description="Window for the summary and threat-landscape sections (and "
+        "the triage surrounding-activity context). The indicator lookups are "
+        "not limited to it: reputation is a property of the indicator, not of "
+        "the window",
     )
     detail_level: Literal["standard", "extended"] = Field(
         default="standard",
@@ -1008,7 +1010,8 @@ class HuntParams(BaseModel):
         description="Window for the sweep, the behavioural detections and the "
         "threat-landscape context. Windows wider than 7 days are capped to "
         "7-day (the sweep consumes logview search slots); the cap is reported "
-        "in warnings.",
+        "in warnings. The indicator's SOAR reputation lookup is not limited "
+        "to it.",
     )
     sweep_logtypes: list[str] = Field(
         default_factory=lambda: ["traffic", "attack", "app-ctrl", "dns"],
