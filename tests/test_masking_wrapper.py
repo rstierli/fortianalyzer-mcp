@@ -871,8 +871,14 @@ class TestMutatingToolGate:
         assert calls == [ip_token]  # NOT decrypted
 
     async def test_read_only_tool_still_restores(self, monkeypatch: pytest.MonkeyPatch):
+        import fortianalyzer_mcp.utils.config as config_mod
         from fortianalyzer_mcp.tool_annotations import READ_ONLY
 
+        # The token below is the v1 form, a bare address, and that is read
+        # as a token only while the v1 window is open (#180).
+        monkeypatch.setattr(
+            config_mod, "get_settings", lambda: _settings_with(FAZ_MASKING_ACCEPT_V1_TOKENS=True)
+        )
         mcp = self._install(monkeypatch)
         engine = FPEEngine(KEY)
         token = engine.mask_ip("192.0.2.102")
