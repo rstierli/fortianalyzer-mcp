@@ -1207,7 +1207,9 @@ _INDICATOR_TYPE_CANONICAL = {"ip": "IP", "url": "URL", "domain": "Domain"}
 _IDENTITY_ACTIVITY_CLAUSE = "(action==failure or subtype==vpn)"
 
 # risk_assessment weights and per-severity points (one-line adjustable).
-# Composite = round(_W_VULN*vuln + _W_THREAT*threat + _W_AUTH*auth).
+# Composite = round(_W_VULN*vuln + _W_THREAT*threat + _W_AUTH*auth) when all
+# three dimensions ran. One that did not run is left out and the weights of
+# the rest are renormalised to sum to 1 (#184).
 _W_VULN = 0.40
 _W_THREAT = 0.35
 _W_AUTH = 0.25
@@ -1876,8 +1878,13 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
     """Transparent composite 0-100 risk score for one endpoint or end-user.
 
     Entity resolution (one UEBA read) is the subject; each of the three
-    dimension reads is context and degrades to a subscore of 0 plus a
-    warning naming the gap. The auth-failure dimension runs exactly one
+    dimension reads is context. One that is unavailable is left out of the
+    composite, not scored 0: the weights of the dimensions that ran are
+    renormalised, and the result names it in ``dimensions_unavailable`` and
+    in a warning (#184). An end-user's threat dimension is never available:
+    FortiView top-threats accepts no user filter.
+
+    The auth-failure dimension runs exactly one
     logview search; every other read is a plain GET. Scoring is fully
     deterministic — the formula lives in the ``RiskAssessmentResult``
     docstring and the weights in the module constants above.
@@ -1955,10 +1962,11 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
             entity_filter_gap = f"end-user {params.euid} carries no 'euname'"
 
     vuln_counts: dict[str, int] = {}
+    vuln_available = False
     if not vuln_epids:
         warnings.append(
             "vulnerability dimension unavailable (no endpoint id associated with "
-            "this entity); its subscore is 0"
+            "this entity); left out of the composite"
         )
     else:
         vuln_res, err = await _call(
@@ -1968,18 +1976,31 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
             detectby=params.detectby,
         )
         if vuln_res is None:
-            warnings.append(f"vulnerability dimension unavailable ({err}); its subscore is 0")
+            warnings.append(
+                f"vulnerability dimension unavailable ({err}); left out of the composite"
+            )
         else:
+            vuln_available = True
             by_endpoint, orphans = _flatten_vuln_records(vuln_res.get("data"))
             rows = [row for group in by_endpoint.values() for row in group] + orphans
             vuln_counts = _severity_counts(rows)
     vuln_sub = _severity_points(vuln_counts, _VULN_POINTS)
 
     threat_counts: dict[str, int] = {}
-    if entity_filter is None:
+    threat_available = False
+    if params.euid is not None:
+        # top-threats rejects a filter on user ("filter user not supported",
+        # measured on 7.6.7 and 8.0.2) and on unauthuser, srcname and username
+        # (7.6.7), so the view is not asked for an end-user (#184).
+        warnings.append(
+            "threat dimension unavailable (FortiView top-threats accepts no user "
+            "filter, so threat detections cannot be tied to an end-user); left out "
+            "of the composite"
+        )
+    elif entity_filter is None:
         warnings.append(
             f"threat dimension unavailable ({entity_filter_gap}; nothing to tie "
-            "threat detections to); its subscore is 0"
+            "threat detections to); left out of the composite"
         )
     else:
         threats_res, err = await _call(
@@ -1993,8 +2014,9 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
             fields=["*"],
         )
         if threats_res is None:
-            warnings.append(f"threat dimension unavailable ({err}); its subscore is 0")
+            warnings.append(f"threat dimension unavailable ({err}); left out of the composite")
         else:
+            threat_available = True
             threat_counts = _severity_counts(_records(threats_res.get("data")))
     threat_sub = _severity_points(threat_counts, _THREAT_POINTS)
 
@@ -2003,7 +2025,7 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
     if entity_filter is None:
         warnings.append(
             f"auth-failure dimension unavailable ({entity_filter_gap}; nothing to "
-            "tie event logs to); its subscore is 0"
+            "tie event logs to); left out of the composite"
         )
     else:
         logs_res, err = await _call(
@@ -2018,7 +2040,9 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
             fields=["*"],
         )
         if logs_res is None:
-            warnings.append(f"auth-failure dimension unavailable ({err}); its subscore is 0")
+            warnings.append(
+                f"auth-failure dimension unavailable ({err}); left out of the composite"
+            )
         else:
             auth_available = True
             total = logs_res.get("total")
@@ -2033,7 +2057,26 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
                     )
     auth_sub = min(100, failures * _AUTH_POINTS_PER_FAILURE)
 
-    composite = int(round(_W_VULN * vuln_sub + _W_THREAT * threat_sub + _W_AUTH * auth_sub))
+    # The composite covers the dimensions that ran. One that did not run is
+    # left out, not scored 0, and the weights of the rest are renormalised to
+    # sum to 1 (#184). One that ran and found nothing is a real 0.
+    dimensions = {
+        "vulnerability": (vuln_available, _W_VULN, vuln_sub),
+        "threat": (threat_available, _W_THREAT, threat_sub),
+        "auth_failure": (auth_available, _W_AUTH, auth_sub),
+    }
+    ran = [(weight, sub) for available, weight, sub in dimensions.values() if available]
+    missing = [name for name, (available, _, _) in dimensions.items() if not available]
+    composite: int | None = None
+    if not ran:
+        warnings.append("no dimension ran; there is no composite score and no band")
+    else:
+        composite = int(round(sum(w * s for w, s in ran) / sum(w for w, _ in ran)))
+        if missing:
+            warnings.append(
+                f"composite covers {len(ran)} of 3 dimensions; {', '.join(missing)} "
+                "unavailable, and the weights of the rest are renormalised"
+            )
     return RiskAssessmentResult(
         entity=entity,
         vulnerability=RiskDimension(raw_counts=vuln_counts, subscore=vuln_sub, weight=_W_VULN),
@@ -2044,7 +2087,9 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
             weight=_W_AUTH,
         ),
         composite_score=composite,
-        band=_risk_band(composite),  # type: ignore[arg-type]
+        band=_risk_band(composite) if composite is not None else None,  # type: ignore[arg-type]
+        dimensions_scored=len(ran),
+        dimensions_unavailable=missing,  # type: ignore[arg-type]
         time_range=params.time_range,
         warnings=warnings,
     )

@@ -780,8 +780,9 @@ class RiskDimension(BaseModel):
     ``raw_counts`` holds the exact inputs the subscore was computed from
     (severity counts, or ``{"failures": n}``). It is empty when the
     dimension's read was unavailable — that case is always named in the
-    result's ``warnings``, so an empty read is distinguishable from a
-    genuine zero.
+    result's ``dimensions_unavailable`` and ``warnings``, so an empty read
+    is distinguishable from a genuine zero. An unavailable dimension's
+    ``subscore`` is 0 and is not part of the composite.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -789,8 +790,17 @@ class RiskDimension(BaseModel):
     raw_counts: dict[str, int] = Field(
         description="Raw inputs behind the subscore (empty when the read was unavailable)"
     )
-    subscore: int = Field(ge=0, le=100, description="Normalized 0-100 dimension score")
-    weight: float = Field(description="This dimension's weight in the composite")
+    subscore: int = Field(
+        ge=0,
+        le=100,
+        description="Normalized 0-100 dimension score (0, and left out of the "
+        "composite, when the dimension is unavailable)",
+    )
+    weight: float = Field(
+        description="This dimension's weight in the composite when all three "
+        "dimensions ran; the composite renormalises the weights of the "
+        "dimensions that ran"
+    )
 
 
 class RiskAssessmentResult(BaseModel):
@@ -806,14 +816,22 @@ class RiskAssessmentResult(BaseModel):
     - auth_failure = min(100, failures*5) over event-log auth failures
       (``action==failure``) tied to the entity in the window
     - composite_score = round(0.40*vulnerability + 0.35*threat
-      + 0.25*auth_failure)
+      + 0.25*auth_failure) when all three dimensions ran. A dimension that
+      did not run is left out and the weights of the rest are renormalised
+      to sum to 1: round(sum(weight*subscore) / sum(weight)) over the
+      dimensions that ran. Vulnerability 50 and auth_failure 20 with threat
+      unavailable give (0.40*50 + 0.25*20) / 0.65 = 38.46, so 38.
     - band: 0-24 "low", 25-49 "medium", 50-74 "high", 75-100 "critical"
 
     Severity labels are matched case-insensitively; labels outside the
     scoring table still appear in ``raw_counts`` but contribute 0 points.
-    A dimension whose read failed scores 0 **and is named in warnings** —
-    the composite then covers only the available dimensions and is never
-    silently presented as complete.
+    A dimension that did not run is **named in ``dimensions_unavailable``
+    and in warnings** and is not scored as 0: the composite covers
+    ``dimensions_scored`` of the three dimensions and is never silently
+    presented as complete. A dimension that ran and found nothing is a real
+    0 and stays in. For an end-user the threat dimension never runs:
+    FortiView top-threats accepts no user filter. When no dimension ran
+    there is no score, and ``composite_score`` and ``band`` are null.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -824,8 +842,24 @@ class RiskAssessmentResult(BaseModel):
     vulnerability: RiskDimension
     threat: RiskDimension
     auth_failure: RiskDimension
-    composite_score: int = Field(ge=0, le=100, description="Weighted composite, rounded")
-    band: Literal["low", "medium", "high", "critical"]
+    composite_score: int | None = Field(
+        ge=0,
+        le=100,
+        description="Weighted composite over the dimensions that ran, rounded; "
+        "null when no dimension ran",
+    )
+    band: Literal["low", "medium", "high", "critical"] | None = Field(
+        description="Band of the composite; null when no dimension ran"
+    )
+    dimensions_scored: int = Field(
+        ge=0,
+        le=3,
+        description="How many of the three dimensions the composite covers",
+    )
+    dimensions_unavailable: list[Literal["vulnerability", "threat", "auth_failure"]] = Field(
+        default_factory=list,
+        description="The dimensions that did not run and are left out of the composite",
+    )
     time_range: str
     warnings: list[str] = Field(default_factory=list)
 
