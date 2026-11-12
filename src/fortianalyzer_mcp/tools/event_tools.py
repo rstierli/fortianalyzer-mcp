@@ -8,7 +8,6 @@ import logging
 from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
-from fortianalyzer_mcp.masking.unmask import filter_fields
 from fortianalyzer_mcp.query.fields import get_vocabulary
 from fortianalyzer_mcp.query.shape import project_payload
 from fortianalyzer_mcp.server import get_faz_client, mcp
@@ -29,8 +28,12 @@ _VALID_TIMESCALES = {"month", "hour"}
 # reference lists event_value, trigger_name, count, comment and flags as
 # filter fields. srcip is in no reference and works: measured, it returns the
 # same alerts as epip (#184). user is the field the hunt skill ties an
-# end-user's alerts to. It was not measured on alerts, and it is listed so
-# that the server does not warn about a filter it wrote itself.
+# end-user's alerts to, and it is listed so that the server does not warn
+# about a filter it wrote itself. Measured over one 7-day window: on 8.0.2
+# user=="N/A" returned all 610 alerts and user!="N/A" none, where a field
+# alerts do not have returns none for either operator; on 7.6.8 both returned
+# none of 791, as for such a field. The names are compared as written:
+# Severity==... returned no alert on either build where severity==... did.
 _ALERT_FILTER_ONLY_FIELDS = frozenset(
     {"event_value", "trigger_name", "count", "comment", "flags", "srcip", "user"}
 )
@@ -72,6 +75,10 @@ def _unknown_filter_field_warnings(filter: str | None) -> list[str]:
     """
     if not filter:
         return []
+    # Imported here, so that a server with masking off loads the masking
+    # package only when a filter has to be read.
+    from fortianalyzer_mcp.masking.unmask import filter_fields
+
     known = get_vocabulary("alert").canonical | _ALERT_FILTER_ONLY_FIELDS
     unknown = dict.fromkeys(name for name in filter_fields(filter) if name not in known)
     return [

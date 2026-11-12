@@ -607,6 +607,31 @@ class TestGetAlertsFilterFields:
 
         assert result["warnings"] == []
 
+    @pytest.mark.parametrize("field", ["euname", "logtype", "vdom", "eventstatus", "tag"])
+    async def test_a_key_live_alert_rows_carry_does_not_warn(
+        self, monkeypatch: pytest.MonkeyPatch, field: str
+    ) -> None:
+        """Measured on 7.6.8 and 8.0.2: an alert row read with fields=["*"]
+        carries these keys, so a filter on one is not a mistyped name."""
+        self._install(monkeypatch)
+
+        result = await event_tools.get_alerts(filter=f"{field}==x")
+
+        assert result["warnings"] == []
+
+    async def test_a_field_name_in_another_case_warns(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Measured on 7.6.8 and 8.0.2: Severity==<value> returns no alert
+        where severity==<value> returns them, so the names are compared as
+        written."""
+        self._install(monkeypatch)
+
+        result = await event_tools.get_alerts(filter="Severity==high")
+
+        (warning,) = result["warnings"]
+        assert "'Severity'" in warning
+
     @pytest.mark.parametrize("field", ["event_value", "trigger_name", "count", "comment", "flags"])
     async def test_a_filter_field_the_api_reference_lists_does_not_warn(
         self, monkeypatch: pytest.MonkeyPatch, field: str
