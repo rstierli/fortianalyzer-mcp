@@ -195,15 +195,16 @@ class TestEnduserScoring:
             result = await handlers.run_risk_assessment(RiskAssessmentParams(euid=7))
         assert users.call_args.kwargs["euids"] == [7]
         vulns.assert_not_called()
-        assert fortiview.call_args.kwargs["filter"] == "user==alice"
+        # #184: top-threats takes no user filter, so the view is not asked.
+        fortiview.assert_not_called()
         assert logs.call_args.kwargs["filter"] == "action==failure and user==alice"
         assert result.entity == {"type": "enduser", "euid": 7, "record": ENDUSER}
         assert result.vulnerability.subscore == 0
         assert result.vulnerability.raw_counts == {}
         assert any("no endpoint id associated" in w for w in result.warnings)
-        # composite = round(0.40*0 + 0.35*0 + 0.25*15) = round(3.75) = 4
+        # auth is the one dimension that ran: composite = 0.25*15 / 0.25 = 15
         assert result.auth_failure.subscore == 15
-        assert result.composite_score == 4
+        assert result.composite_score == 15
         assert result.band == "low"
 
     async def test_endpoint_whose_address_no_literal_can_hold_degrades_the_entity_filter(self):
@@ -220,7 +221,7 @@ class TestEnduserScoring:
 
     async def test_user_whose_name_no_literal_can_hold_degrades_the_entity_filter(self):
         """A name that ends in a backslash cannot be written into a filter
-        (#164); the score is still produced, with the gap in the warnings."""
+        (#164); the result is still produced, with the gap in the warnings."""
         user = {"euid": 7, "euname": "value\\"}
         with (
             t(GET_ENDUSERS, return_value=ok(data=[user])),
@@ -272,8 +273,8 @@ class TestDimensionDegradation:
         assert result.vulnerability.subscore == 0
         assert result.vulnerability.raw_counts == {}
         assert any("vulnerability dimension unavailable" in w for w in result.warnings)
-        # composite = round(0.40*0 + 0.35*25 + 0.25*10) = round(11.25) = 11
-        assert result.composite_score == 11
+        # composite = round((0.35*25 + 0.25*10) / 0.60) = round(18.75) = 19
+        assert result.composite_score == 19
         assert result.band == "low"
 
     async def test_threat_read_failure_scores_zero_with_warning(self):
@@ -286,8 +287,8 @@ class TestDimensionDegradation:
             result = await handlers.run_risk_assessment(RiskAssessmentParams(epid=1025))
         assert result.threat.subscore == 0
         assert any("threat dimension unavailable" in w for w in result.warnings)
-        # composite = round(0.40*39 + 0.35*0 + 0.25*20) = round(20.6) = 21
-        assert result.composite_score == 21
+        # composite = round((0.40*39 + 0.25*20) / 0.65) = round(31.69) = 32
+        assert result.composite_score == 32
 
     async def test_auth_read_exception_scores_zero_with_warning(self):
         with (
@@ -302,6 +303,118 @@ class TestDimensionDegradation:
         assert any("auth-failure dimension unavailable" in w for w in result.warnings)
         assert result.composite_score == 0
         assert result.band == "low"
+
+
+# 2 critical -> vuln = 25 + 25 = 50
+FIFTY_POINT_VULNS = [{"epid": 1025, "vuln": [{"severity": "critical"}] * 2}]
+LINKED_ENDUSER = {"euid": 7, "euname": "alice", "epids": [1025]}
+ALL_DIMENSIONS = ["vulnerability", "threat", "auth_failure"]
+
+
+class TestCompositeCoverage:
+    """#184: the composite covers the dimensions that ran, with their weights
+    renormalised to sum to 1. A dimension that did not run is left out, not
+    scored 0, and the result says how many of the three it covers."""
+
+    async def test_enduser_threat_dimension_is_not_asked_of_top_threats(self):
+        """top-threats rejects every user field ("filter ... not supported"),
+        so an end-user's threat dimension is unavailable by construction."""
+        with (
+            t(GET_ENDUSERS, return_value=ok(data=[LINKED_ENDUSER])),
+            t(GET_ENDPOINT_VULNS, return_value=ok(data=FIFTY_POINT_VULNS)),
+            t(GET_FORTIVIEW) as fortiview,
+            t(QUERY_LOGS, return_value=logs_ok(4)),
+        ):
+            result = await handlers.run_risk_assessment(RiskAssessmentParams(euid=7))
+        fortiview.assert_not_called()
+        assert result.threat.raw_counts == {}
+        assert result.dimensions_unavailable == ["threat"]
+        reason = next(w for w in result.warnings if "threat dimension unavailable" in w)
+        assert "top-threats" in reason and "user" in reason
+
+    async def test_worked_example_enduser_score_covers_two_dimensions(self):
+        """The maintainer's worked example: vulnerability 50 and auth 20 with
+        threat unavailable give (0.40*50 + 0.25*20) / 0.65 = 38.46 -> 38."""
+        with (
+            t(GET_ENDUSERS, return_value=ok(data=[LINKED_ENDUSER])),
+            t(GET_ENDPOINT_VULNS, return_value=ok(data=FIFTY_POINT_VULNS)),
+            t(GET_FORTIVIEW),
+            t(QUERY_LOGS, return_value=logs_ok(4)),
+        ):
+            result = await handlers.run_risk_assessment(RiskAssessmentParams(euid=7))
+        assert result.vulnerability.subscore == 50
+        assert result.auth_failure.subscore == 20
+        assert result.composite_score == 38
+        assert result.band == "medium"
+        assert result.dimensions_scored == 2
+        assert result.dimensions_unavailable == ["threat"]
+        coverage = [w for w in result.warnings if "2 of 3 dimensions" in w]
+        assert len(coverage) == 1
+        assert "threat" in coverage[0]
+
+    async def test_any_unavailable_dimension_is_left_out_not_only_the_enduser_one(self):
+        """The same inputs on an endpoint whose threat read failed."""
+        with (
+            t(GET_ENDPOINTS, return_value=ok(data=[ENDPOINT])),
+            t(GET_ENDPOINT_VULNS, return_value=ok(data=FIFTY_POINT_VULNS)),
+            t(GET_FORTIVIEW, return_value={"status": "error", "message": "timeout"}),
+            t(QUERY_LOGS, return_value=logs_ok(4)),
+        ):
+            result = await handlers.run_risk_assessment(RiskAssessmentParams(epid=1025))
+        # (0.40*50 + 0.25*20) / 0.65 = 38.46 -> 38
+        assert result.composite_score == 38
+        assert result.band == "medium"
+        assert result.dimensions_scored == 2
+        assert result.dimensions_unavailable == ["threat"]
+
+    async def test_a_dimension_that_ran_and_found_nothing_is_a_real_zero(self):
+        """No CVEs is a measurement: its 0 stays in and pulls the score down.
+        Only the auth read failed here, so only auth is left out."""
+        with (
+            t(GET_ENDPOINTS, return_value=ok(data=[ENDPOINT])),
+            t(GET_ENDPOINT_VULNS, return_value=ok(data=[])),
+            t(GET_FORTIVIEW, return_value=ok(data=[{"severity": "critical"}] * 4)),  # 100
+            t(QUERY_LOGS, return_value={"status": "error", "message": "timeout"}),
+        ):
+            result = await handlers.run_risk_assessment(RiskAssessmentParams(epid=1025))
+        assert result.vulnerability.subscore == 0
+        assert result.threat.subscore == 100
+        # (0.40*0 + 0.35*100) / 0.75 = 46.67 -> 47; dropping the real 0 would give 100
+        assert result.composite_score == 47
+        assert result.band == "medium"
+        assert result.dimensions_scored == 2
+        assert result.dimensions_unavailable == ["auth_failure"]
+
+    async def test_all_three_dimensions_ran_says_so_and_adds_no_line(self):
+        with (
+            t(GET_ENDPOINTS, return_value=ok(data=[ENDPOINT])),
+            t(GET_ENDPOINT_VULNS, return_value=ok(data=VULN_PAYLOAD)),
+            t(GET_FORTIVIEW, return_value=ok(data=THREAT_ROWS)),
+            t(QUERY_LOGS, return_value=logs_ok(4)),
+        ):
+            result = await handlers.run_risk_assessment(RiskAssessmentParams(epid=1025))
+        assert result.composite_score == EXPECTED_COMPOSITE
+        assert result.dimensions_scored == 3
+        assert result.dimensions_unavailable == []
+        assert result.warnings == []
+
+    async def test_no_dimension_ran_gives_no_score(self):
+        """An end-user with no endpoint link whose auth search failed: nothing
+        was measured, so there is no score and no band to report."""
+        with (
+            t(GET_ENDUSERS, return_value=ok(data=[ENDUSER])),
+            t(GET_ENDPOINT_VULNS) as vulns,
+            t(GET_FORTIVIEW) as fortiview,
+            t(QUERY_LOGS, return_value={"status": "error", "message": "timeout"}),
+        ):
+            result = await handlers.run_risk_assessment(RiskAssessmentParams(euid=7))
+        vulns.assert_not_called()
+        fortiview.assert_not_called()
+        assert result.composite_score is None
+        assert result.band is None
+        assert result.dimensions_scored == 0
+        assert result.dimensions_unavailable == ALL_DIMENSIONS
+        assert any("no dimension ran" in w for w in result.warnings)
 
 
 class TestBands:
@@ -336,6 +449,38 @@ class TestDispatch:
         assert result["schema_version"] == SCHEMA_VERSION
         assert result["result"]["composite_score"] == EXPECTED_COMPOSITE
         assert result["result"]["band"] == "medium"
+
+    async def test_enduser_envelope_says_what_the_score_covers(self):
+        """#184, through the dispatcher: the worked example for an end-user."""
+        with (
+            t(GET_ENDUSERS, return_value=ok(data=[LINKED_ENDUSER])),
+            t(GET_ENDPOINT_VULNS, return_value=ok(data=FIFTY_POINT_VULNS)),
+            t(GET_FORTIVIEW) as fortiview,
+            t(QUERY_LOGS, return_value=logs_ok(4)),
+        ):
+            result = await faz_skill(skill="risk_assessment", params={"euid": 7})
+        fortiview.assert_not_called()
+        assert result["status"] == "success"
+        assert result["result"]["composite_score"] == 38
+        assert result["result"]["band"] == "medium"
+        assert result["result"]["dimensions_scored"] == 2
+        assert result["result"]["dimensions_unavailable"] == ["threat"]
+
+    async def test_no_dimension_ran_is_a_result_without_a_score(self):
+        """Only a failed subject fails the skill: with nothing measured the
+        envelope is still a success, and it carries no score."""
+        with (
+            t(GET_ENDUSERS, return_value=ok(data=[ENDUSER])),
+            t(GET_ENDPOINT_VULNS),
+            t(GET_FORTIVIEW),
+            t(QUERY_LOGS, return_value={"status": "error", "message": "timeout"}),
+        ):
+            result = await faz_skill(skill="risk_assessment", params={"euid": 7})
+        assert result["status"] == "success"
+        assert result["result"]["composite_score"] is None
+        assert result["result"]["band"] is None
+        assert result["result"]["dimensions_scored"] == 0
+        assert result["result"]["dimensions_unavailable"] == ALL_DIMENSIONS
 
     async def test_subject_failure_maps_to_skill_failed(self):
         with t(GET_ENDPOINTS, return_value=ok(data=[])):

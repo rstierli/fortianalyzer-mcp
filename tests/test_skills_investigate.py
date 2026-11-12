@@ -132,7 +132,8 @@ class TestInvestigate:
         assert result.threat_intel.indicators[0].reputation == "Malicious"
         assert result.threat_intel.threat_landscape == THREATS
         assert linked_mock.call_args.kwargs["incident_id"] == "inc-001"
-        assert linked_mock.call_args.kwargs["time_range"] == "7-day"
+        # #184: the indicator reads are not limited to the investigation window.
+        assert linked_mock.call_args.kwargs["time_range"] is None
         assert isinstance(result.assets, AssetLookupResult)
         assert result.assets.endpoint_count == 1
         assert endpoints_mock.call_args.kwargs["epids"] == [7]
@@ -244,6 +245,50 @@ class TestInvestigate:
         assert any("no indicators linked" in w for w in result.threat_intel.warnings)
 
 
+def unbounded_lookup_lines(warnings: list[str]) -> list[str]:
+    """The lines that say the indicator lookup ignored the window."""
+    return [w for w in warnings if w.startswith("threat_intel:") and "not limited to" in w]
+
+
+class TestInvestigateIndicatorWindow:
+    """#184: reputation is a property of the indicator, not of the window
+    being investigated, so the indicator reads run unbounded. SOAR otherwise
+    hides an indicator last seen before the window."""
+
+    async def test_indicator_reads_are_unbounded_and_the_result_says_so(self):
+        with (
+            t(GET_INCIDENT, return_value=ok(data=INCIDENT)),
+            t(GET_ALERTS, return_value=ok(data=[])),
+            t(GET_ALERT_INCIDENT_STATS, return_value=ok(data={})),
+            t(GET_LINKED, return_value=ok(data=LINKED_INDICATORS)) as linked_mock,
+            t(GET_ENRICH, return_value=ok(data=[ENRICHED_IP])) as enrich_mock,
+            t(GET_FORTIVIEW_DATA, return_value=ok(data=THREATS)) as landscape_mock,
+        ):
+            result = await handlers.run_investigate(
+                InvestigateParams(incident_id="inc-001", time_range="30-day")
+            )
+        assert linked_mock.call_args.kwargs["time_range"] is None
+        assert enrich_mock.call_args.kwargs["time_range"] is None
+        assert isinstance(result.threat_intel, ThreatIntelResult)
+        assert result.threat_intel.indicators[0].reputation == "Malicious"
+        # The threat landscape is a view of the window and stays on it.
+        assert landscape_mock.call_args.kwargs["view_name"] == "top-threats"
+        assert landscape_mock.call_args.kwargs["time_range"] == "30-day"
+        (line,) = unbounded_lookup_lines(result.warnings)
+        assert "30-day" in line
+
+    async def test_no_such_line_when_the_indicator_lookup_did_not_run(self):
+        with (
+            t(GET_INCIDENT, return_value=ok(data=INCIDENT)),
+            t(GET_ALERTS, return_value=ok(data=[])),
+            t(GET_ALERT_INCIDENT_STATS, return_value=ok(data={})),
+            t(GET_LINKED, return_value={"status": "error", "message": "SOAR not licensed"}),
+        ):
+            result = await handlers.run_investigate(InvestigateParams(incident_id="inc-001"))
+        assert isinstance(result.threat_intel, FeatureGap)
+        assert unbounded_lookup_lines(result.warnings) == []
+
+
 class TestInvestigateDispatch:
     async def test_success_envelope(self):
         with (
@@ -260,6 +305,21 @@ class TestInvestigateDispatch:
         assert result["result"]["subject_type"] == "incident"
         assert result["result"]["headline"].startswith("incident inc-001: priority high")
         assert result["result"]["triage"]["subject"] == INCIDENT
+
+    async def test_envelope_says_the_indicator_lookup_ignored_the_window(self):
+        with (
+            t(GET_INCIDENT, return_value=ok(data=INCIDENT)),
+            t(GET_ALERTS, return_value=ok(data=[])),
+            t(GET_ALERT_INCIDENT_STATS, return_value=ok(data={})),
+            t(GET_LINKED, return_value=ok(data=LINKED_INDICATORS)) as linked_mock,
+            t(GET_ENRICH, return_value=ok(data=[ENRICHED_IP])),
+            t(GET_FORTIVIEW_DATA, return_value=ok(data=THREATS)),
+        ):
+            result = await faz_skill(skill="investigate", params={"incident_id": "inc-001"})
+        assert result["status"] == "success"
+        assert linked_mock.call_args.kwargs["time_range"] is None
+        (line,) = unbounded_lookup_lines(result["result"]["warnings"])
+        assert "7-day" in line
 
     async def test_missing_subject_rejected(self):
         result = await faz_skill(skill="investigate", params={})

@@ -451,8 +451,8 @@ _NO_COERCIONS: Mapping[str, Mapping[str, int]] = {}
 # masking/fields.py, and the alert keys skills/handlers.py actually reads --
 # the same discipline the UEBA sets were rebuilt under.
 #
-# Out, for want of any evidence: `firstlogtime`, `count`, `comments` and
-# `adom` have zero occurrences as an alert response key anywhere in this repo.
+# Out, for want of any evidence: `count`, `comments` and `adom` have zero
+# occurrences as an alert response key anywhere in this repo.
 #
 # In, because the live fixture carries every one of them: the human-readable
 # endpoint identity (`epname`/`epip`, and their `dstep*` peers), the composite
@@ -497,6 +497,38 @@ _ALERT_FIELDS: frozenset[str] = frozenset(
         "groupby1",
         "groupby2",
         "target",
+        # The other keys a live alert row carries, read with fields=["*"] on
+        # 7.6.8 and 8.0.2 (#184). get_alerts warns on a filter field outside
+        # this set, so a key the rows carry must be in it. alert_category and
+        # alert_subcategory were on the 8.0.2 row only.
+        "ackflagn",
+        "alert_category",
+        "alert_part_info",
+        "alert_subcategory",
+        "alert_suppress",
+        "automation_stitch",
+        "devtype",
+        "dstepid",
+        "dsteuid",
+        "dsteuname",
+        "euname",
+        "event_count",
+        "eventstatus",
+        "external",
+        "filtercksum",
+        "filterkey",
+        "firstlogtime",
+        "grpbyep",
+        "handler_type",
+        "logcount",
+        "logtype",
+        "mitre_info",
+        "multiflag",
+        "readflag",
+        "resolution",
+        "tag",
+        "updatetime",
+        "vdom",
     }
 )
 _ALERT_PROJECTION: frozenset[str] = frozenset(

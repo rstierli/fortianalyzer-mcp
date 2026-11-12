@@ -1207,7 +1207,9 @@ _INDICATOR_TYPE_CANONICAL = {"ip": "IP", "url": "URL", "domain": "Domain"}
 _IDENTITY_ACTIVITY_CLAUSE = "(action==failure or subtype==vpn)"
 
 # risk_assessment weights and per-severity points (one-line adjustable).
-# Composite = round(_W_VULN*vuln + _W_THREAT*threat + _W_AUTH*auth).
+# Composite = round(_W_VULN*vuln + _W_THREAT*threat + _W_AUTH*auth) when all
+# three dimensions ran. One that did not run is left out and the weights of
+# the rest are renormalised to sum to 1 (#184).
 _W_VULN = 0.40
 _W_THREAT = 0.35
 _W_AUTH = 0.25
@@ -1344,7 +1346,22 @@ def _summarize_enrichment_sources(record: dict[str, Any]) -> list[dict[str, Any]
     return summaries
 
 
-async def run_threat_intel(params: ThreatIntelParams) -> ThreatIntelResult:
+def _indicator_lookup_unbounded(time_range: str) -> str:
+    """The result line for an indicator lookup a composing skill ran unbounded.
+
+    ``investigate`` and ``hunt`` have a window, and the indicator reads do
+    not use it (#184): reputation is a property of the indicator, and SOAR
+    hides an indicator last seen before the window it is given.
+    """
+    return (
+        f"threat_intel: indicator lookup not limited to the {time_range} window "
+        "(reputation is a property of the indicator, not of the window)"
+    )
+
+
+async def run_threat_intel(
+    params: ThreatIntelParams, *, landscape_time_range: str | None = None
+) -> ThreatIntelResult:
     """Stored SOAR reputation for a set of IP/URL/Domain indicators.
 
     Subjects are the explicit ``indicators`` list plus, when an
@@ -1354,6 +1371,10 @@ async def run_threat_intel(params: ThreatIntelParams) -> ThreatIntelResult:
     per-indicator read degrades to a warning with the record kept
     unenriched. The FortiView threat landscape is context and degrades to
     a gap marker. All reads are plain GETs — no logview search slots.
+
+    ``landscape_time_range`` is for a composing skill: it windows the threat
+    landscape alone, so the composer can leave ``params.time_range`` unset
+    and the indicator reads unbounded (#184).
     """
     from fortianalyzer_mcp.tools.fortiview_tools import get_fortiview_data
     from fortianalyzer_mcp.tools.soar_tools import get_indicator_enrichment, get_linked_indicators
@@ -1463,7 +1484,7 @@ async def run_threat_intel(params: ThreatIntelParams) -> ThreatIntelResult:
             view_name="top-threats",
             sort_by=VIEW_SORT_DEFAULTS["top-threats"],
             adom=params.adom,
-            time_range=params.time_range or "24-hour",
+            time_range=landscape_time_range or params.time_range or "24-hour",
             limit=10,
             fields=["*"],
         )
@@ -1876,8 +1897,13 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
     """Transparent composite 0-100 risk score for one endpoint or end-user.
 
     Entity resolution (one UEBA read) is the subject; each of the three
-    dimension reads is context and degrades to a subscore of 0 plus a
-    warning naming the gap. The auth-failure dimension runs exactly one
+    dimension reads is context. One that is unavailable is left out of the
+    composite, not scored 0: the weights of the dimensions that ran are
+    renormalised, and the result names it in ``dimensions_unavailable`` and
+    in a warning (#184). An end-user's threat dimension is never available:
+    FortiView top-threats accepts no user filter.
+
+    The auth-failure dimension runs exactly one
     logview search; every other read is a plain GET. Scoring is fully
     deterministic — the formula lives in the ``RiskAssessmentResult``
     docstring and the weights in the module constants above.
@@ -1955,10 +1981,11 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
             entity_filter_gap = f"end-user {params.euid} carries no 'euname'"
 
     vuln_counts: dict[str, int] = {}
+    vuln_available = False
     if not vuln_epids:
         warnings.append(
             "vulnerability dimension unavailable (no endpoint id associated with "
-            "this entity); its subscore is 0"
+            "this entity); left out of the composite"
         )
     else:
         vuln_res, err = await _call(
@@ -1968,18 +1995,31 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
             detectby=params.detectby,
         )
         if vuln_res is None:
-            warnings.append(f"vulnerability dimension unavailable ({err}); its subscore is 0")
+            warnings.append(
+                f"vulnerability dimension unavailable ({err}); left out of the composite"
+            )
         else:
+            vuln_available = True
             by_endpoint, orphans = _flatten_vuln_records(vuln_res.get("data"))
             rows = [row for group in by_endpoint.values() for row in group] + orphans
             vuln_counts = _severity_counts(rows)
     vuln_sub = _severity_points(vuln_counts, _VULN_POINTS)
 
     threat_counts: dict[str, int] = {}
-    if entity_filter is None:
+    threat_available = False
+    if params.euid is not None:
+        # top-threats rejects a filter on user ("filter user not supported",
+        # measured on 7.6.7 and 8.0.2) and on unauthuser, srcname and username
+        # (7.6.7), so the view is not asked for an end-user (#184).
+        warnings.append(
+            "threat dimension unavailable (FortiView top-threats accepts no user "
+            "filter, so threat detections cannot be tied to an end-user); left out "
+            "of the composite"
+        )
+    elif entity_filter is None:
         warnings.append(
             f"threat dimension unavailable ({entity_filter_gap}; nothing to tie "
-            "threat detections to); its subscore is 0"
+            "threat detections to); left out of the composite"
         )
     else:
         threats_res, err = await _call(
@@ -1993,8 +2033,9 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
             fields=["*"],
         )
         if threats_res is None:
-            warnings.append(f"threat dimension unavailable ({err}); its subscore is 0")
+            warnings.append(f"threat dimension unavailable ({err}); left out of the composite")
         else:
+            threat_available = True
             threat_counts = _severity_counts(_records(threats_res.get("data")))
     threat_sub = _severity_points(threat_counts, _THREAT_POINTS)
 
@@ -2003,7 +2044,7 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
     if entity_filter is None:
         warnings.append(
             f"auth-failure dimension unavailable ({entity_filter_gap}; nothing to "
-            "tie event logs to); its subscore is 0"
+            "tie event logs to); left out of the composite"
         )
     else:
         logs_res, err = await _call(
@@ -2018,7 +2059,9 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
             fields=["*"],
         )
         if logs_res is None:
-            warnings.append(f"auth-failure dimension unavailable ({err}); its subscore is 0")
+            warnings.append(
+                f"auth-failure dimension unavailable ({err}); left out of the composite"
+            )
         else:
             auth_available = True
             total = logs_res.get("total")
@@ -2033,7 +2076,26 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
                     )
     auth_sub = min(100, failures * _AUTH_POINTS_PER_FAILURE)
 
-    composite = int(round(_W_VULN * vuln_sub + _W_THREAT * threat_sub + _W_AUTH * auth_sub))
+    # The composite covers the dimensions that ran. One that did not run is
+    # left out, not scored 0, and the weights of the rest are renormalised to
+    # sum to 1 (#184). One that ran and found nothing is a real 0.
+    dimensions = {
+        "vulnerability": (vuln_available, _W_VULN, vuln_sub),
+        "threat": (threat_available, _W_THREAT, threat_sub),
+        "auth_failure": (auth_available, _W_AUTH, auth_sub),
+    }
+    ran = [(weight, sub) for available, weight, sub in dimensions.values() if available]
+    missing = [name for name, (available, _, _) in dimensions.items() if not available]
+    composite: int | None = None
+    if not ran:
+        warnings.append("no dimension ran; there is no composite score and no band")
+    else:
+        composite = int(round(sum(w * s for w, s in ran) / sum(w for w, _ in ran)))
+        if missing:
+            warnings.append(
+                f"composite covers {len(ran)} of 3 dimensions; {', '.join(missing)} "
+                "unavailable, and the weights of the rest are renormalised"
+            )
     return RiskAssessmentResult(
         entity=entity,
         vulnerability=RiskDimension(raw_counts=vuln_counts, subscore=vuln_sub, weight=_W_VULN),
@@ -2044,7 +2106,9 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
             weight=_W_AUTH,
         ),
         composite_score=composite,
-        band=_risk_band(composite),  # type: ignore[arg-type]
+        band=_risk_band(composite) if composite is not None else None,  # type: ignore[arg-type]
+        dimensions_scored=len(ran),
+        dimensions_unavailable=missing,  # type: ignore[arg-type]
         time_range=params.time_range,
         warnings=warnings,
     )
@@ -2180,7 +2244,8 @@ async def run_investigate(params: InvestigateParams) -> Investigation:
 
     # Indicator enrichment: threat_intel on the same subject. Its subject
     # call (linked-indicator resolution) is enrichment from this skill's
-    # point of view, so its hard fail degrades to a gap here.
+    # point of view, so its hard fail degrades to a gap here. The indicator
+    # reads are not given the window (#184); the threat landscape is.
     threat_intel: ThreatIntelResult | FeatureGap
     try:
         threat_intel = await run_threat_intel(
@@ -2189,11 +2254,12 @@ async def run_investigate(params: InvestigateParams) -> Investigation:
                 alert_id=params.alert_id,
                 incident_id=params.incident_id,
                 detail_level=params.detail_level,
-                time_range=params.time_range,
                 include_threat_landscape=params.include_threat_landscape,
-            )
+            ),
+            landscape_time_range=params.time_range,
         )
         warnings.extend(f"threat_intel: {w}" for w in threat_intel.warnings)
+        warnings.append(_indicator_lookup_unbounded(params.time_range))
     except SkillExecutionError as exc:
         warnings.append(f"indicator enrichment unavailable: {exc}")
         threat_intel = FeatureGap(reason=f"indicator enrichment unavailable: {exc}")
@@ -2298,6 +2364,10 @@ _BEHAVIORAL_MARKERS = (
 )
 # Alert fields that may name the handler / detection rule (build-varying).
 _ALERT_HANDLER_KEYS = ("alerttype", "eventtype", "triggername", "name", "logdesc")
+# Alerts read for one entity's behavioural detections: one page, narrowed
+# client-side, so a full page is not the window. The page is requested newest
+# first, but that order is not relied on in what the result says.
+_BEHAVIOR_ALERT_LIMIT = 200
 
 
 def _cap_hunt_window(time_range: str) -> tuple[str, bool]:
@@ -2406,7 +2476,7 @@ async def _entity_behavioral_alerts(
     time_range: str,
     warnings: list[str],
     entity_ref: str,
-) -> list[dict[str, Any]] | FeatureGap:
+) -> tuple[list[dict[str, Any]] | FeatureGap, bool]:
     """The entity's behavioural alert-handler / IOC alerts in the window.
 
     One eventmgmt GET (no logview slot): alerts in the window filtered to
@@ -2415,22 +2485,42 @@ async def _entity_behavioral_alerts(
     anomaly detections — the RFC's "strongest FAZ-provided behavioural
     signal". Degrades to a ``FeatureGap`` when the read fails or the entity
     yields no pivot to tie alerts to.
+
+    Also returns whether the alert page filled. The narrowing is done here,
+    on one page, so a full page leaves the alerts behind it unread: the
+    detections are then a lower bound and none found is not a clean negative.
     """
     from fortianalyzer_mcp.tools.event_tools import get_alerts
 
     if pivot is None:
-        return FeatureGap(
-            reason=f"entity {entity_ref} yields no srcip/user pivot; "
-            "behavioural detections cannot be tied to it"
+        return (
+            FeatureGap(
+                reason=f"entity {entity_ref} yields no srcip/user pivot; "
+                "behavioural detections cannot be tied to it"
+            ),
+            False,
         )
     alerts_res, err = await _call(
-        get_alerts, adom=adom, time_range=time_range, filter=pivot, limit=200, fields=["*"]
+        get_alerts,
+        adom=adom,
+        time_range=time_range,
+        filter=pivot,
+        limit=_BEHAVIOR_ALERT_LIMIT,
+        fields=["*"],
     )
     if alerts_res is None:
         warnings.append(f"behavior[{entity_ref}]: behavioural alert lookup unavailable: {err}")
-        return FeatureGap(reason=f"behavioural alert lookup unavailable: {err}")
-    behavioral = [a for a in alerts_res.get("data") or [] if _is_behavioral_alert(a)]
-    return behavioral
+        return FeatureGap(reason=f"behavioural alert lookup unavailable: {err}"), False
+    alerts = alerts_res.get("data") or []
+    truncated = len(alerts) >= _BEHAVIOR_ALERT_LIMIT
+    if truncated:
+        warnings.append(
+            f"behavior[{entity_ref}]: alert page filled at limit {_BEHAVIOR_ALERT_LIMIT}; "
+            f"only the first {_BEHAVIOR_ALERT_LIMIT} alerts returned for the window were "
+            "examined for behavioural detections"
+        )
+    behavioral = [a for a in alerts if _is_behavioral_alert(a)]
+    return behavioral, truncated
 
 
 async def _hunt_behavior(
@@ -2503,12 +2593,12 @@ async def _hunt_behavior(
                 f"behavior[{entity_id}]: endpoint carries no 'epip'; behavioural "
                 "detections cannot be tied to it"
             )
-        detections = await _entity_behavioral_alerts(
+        detections, alerts_truncated = await _entity_behavioral_alerts(
             adom, pivot, time_range, warnings, str(entity_id)
         )
 
         anomalous, basis = _score_endpoint_anomaly(
-            percentile, ranked_total, vuln_stats, detections, anomaly_percentile
+            percentile, ranked_total, vuln_stats, detections, anomaly_percentile, alerts_truncated
         )
         detection_count = len(detections) if isinstance(detections, list) else 0
         return (
@@ -2522,6 +2612,7 @@ async def _hunt_behavior(
                 vuln_stats=vuln_stats,
                 behavioral_detections=detections,
                 detection_count=detection_count,
+                alerts_truncated=alerts_truncated,
                 anomalous=anomalous,
                 anomaly_basis=basis,
             ),
@@ -2553,9 +2644,11 @@ async def _hunt_behavior(
             f"behavior[{entity_id}]: end-user carries no 'euname'; behavioural "
             "detections cannot be tied to it"
         )
-    detections = await _entity_behavioral_alerts(adom, pivot, time_range, warnings, str(entity_id))
+    detections, alerts_truncated = await _entity_behavioral_alerts(
+        adom, pivot, time_range, warnings, str(entity_id)
+    )
 
-    anomalous, basis = _score_enduser_anomaly(importance, detections)
+    anomalous, basis = _score_enduser_anomaly(importance, detections, alerts_truncated)
     detection_count = len(detections) if isinstance(detections, list) else 0
     return (
         EntityBehavior(
@@ -2568,11 +2661,26 @@ async def _hunt_behavior(
             vuln_stats={},
             behavioral_detections=detections,
             detection_count=detection_count,
+            alerts_truncated=alerts_truncated,
             anomalous=anomalous,
             anomaly_basis=basis,
         ),
         0,
     )
+
+
+def _no_detections_basis(alerts_truncated: bool) -> str:
+    """The basis line for an alert read that held no behavioural detection.
+
+    A full alert page is not the whole window, so it is no clean negative.
+    """
+    if alerts_truncated:
+        return (
+            f"no behavioural/IOC detections among the first {_BEHAVIOR_ALERT_LIMIT} "
+            "alerts returned for the window; the alert page filled and the rest were "
+            "not examined"
+        )
+    return "no behavioural/IOC detections in the window"
 
 
 def _score_endpoint_anomaly(
@@ -2581,6 +2689,7 @@ def _score_endpoint_anomaly(
     vuln_stats: dict[str, int],
     detections: list[dict[str, Any]] | FeatureGap,
     anomaly_percentile: float,
+    alerts_truncated: bool,
 ) -> tuple[bool, list[str]]:
     """Derive an endpoint's anomaly verdict + auditable basis.
 
@@ -2621,7 +2730,7 @@ def _score_endpoint_anomaly(
         flags.append(True)
         basis.append(f"{len(detections)} behavioural/IOC detection(s) in the window -> ANOMALOUS")
     elif isinstance(detections, list):
-        basis.append("no behavioural/IOC detections in the window")
+        basis.append(_no_detections_basis(alerts_truncated))
     else:
         basis.append("behavioural detections unavailable; that flag not applied")
 
@@ -2629,7 +2738,7 @@ def _score_endpoint_anomaly(
 
 
 def _score_enduser_anomaly(
-    importance: Any, detections: list[dict[str, Any]] | FeatureGap
+    importance: Any, detections: list[dict[str, Any]] | FeatureGap, alerts_truncated: bool
 ) -> tuple[bool, list[str]]:
     """Derive an end-user's anomaly verdict + basis (no risk_score exists).
 
@@ -2653,7 +2762,7 @@ def _score_enduser_anomaly(
         flags.append(True)
         basis.append(f"{len(detections)} behavioural/IOC detection(s) in the window -> ANOMALOUS")
     elif isinstance(detections, list):
-        basis.append("no behavioural/IOC detections in the window")
+        basis.append(_no_detections_basis(alerts_truncated))
     else:
         basis.append("behavioural detections unavailable; that flag not applied")
 
@@ -2673,14 +2782,22 @@ def _substring_clause(field: str, value: str, name: str) -> str:
     return f"{field} like {_param_value(value, name, like=True)}"
 
 
-def _sweep_pivot(params: HuntParams) -> str | None:
+def _sweep_pivot(params: HuntParams, logtype: str | None = None) -> str | None:
     """The filter clause the sweep searches run on — auditable, never a guess.
 
-    - indicator: an equality on the field the indicator's type maps to
-      (IP -> srcip, Domain -> hostname, URL -> url, Hash -> a 'checksum'
-      substring). Sanitised.
+    - indicator: a match on the fields that carry the indicator's type
+      (#184). IP -> srcip or dstip, since an address is as often the
+      destination. Domain -> qname in dns logs, whose rows carry no
+      hostname (measured on 7.6.7 and 8.0.2), and hostname in any other
+      ``logtype``. URL -> url. Hash -> a substring of filehash or
+      analyticscksum: virus logs on 7.6.7 carry the SHA-256 in
+      analyticscksum and leave filehash empty, and matching either covers
+      a build that fills filehash. Sanitised.
     - filter: passed through verbatim (the caller owns its correctness).
     - ttp only: folded into an 'attack' substring match.
+
+    Only a Domain indicator's clause depends on ``logtype``, the log type
+    the search is for.
 
     Returns ``None`` when no usable pivot can be derived (the sweep then
     degrades to a gap rather than sweeping on nothing).
@@ -2692,17 +2809,20 @@ def _sweep_pivot(params: HuntParams) -> str | None:
         return params.filter
 
     if params.indicator is not None:
-        field = {
-            "IP": "srcip",
-            "Domain": "hostname",
-            "URL": "url",
-            "Hash": "checksum",
+        on_dns = logtype is not None and logtype.strip().lower() == "dns"
+        fields = {
+            "IP": ("srcip", "dstip"),
+            "Domain": ("qname",) if on_dns else ("hostname",),
+            "URL": ("url",),
+            "Hash": ("filehash", "analyticscksum"),
         }[params.indicator.type]
-        # Hash is matched as a substring (the checksum field name varies by
-        # logtype); IP/Domain/URL as equality.
+        value = params.indicator.value
+        # Hash is matched as a substring; IP/Domain/URL as equality.
         if params.indicator.type == "Hash":
-            return _substring_clause(field, params.indicator.value, "indicator")
-        return f"{field}=={_param_value(params.indicator.value, 'indicator')}"
+            clauses = [_substring_clause(field, value, "indicator") for field in fields]
+        else:
+            clauses = [f"{field}=={_param_value(value, 'indicator')}" for field in fields]
+        return clauses[0] if len(clauses) == 1 else f"({' or '.join(clauses)})"
 
     if params.ttp is not None:
         return _substring_clause("attack", params.ttp, "ttp")
@@ -2717,7 +2837,11 @@ async def _hunt_sweep(
 
     One logview search slot per swept log type (capped by
     ``max_sweep_searches``; excess dropped and named in ``warnings``), plus
-    ``threat_intel`` for an IP/URL/Domain indicator (plain GETs, no slot).
+    ``threat_intel`` for an IP/URL/Domain indicator (plain GETs, no slot;
+    that lookup is not limited to the window, and a warning says so).
+    A Hash indicator also sweeps ``virus``, the log type that carries file
+    hashes. Each search returns one page: a match whose page was truncated
+    has ``has_more`` set and makes ``total_matches`` a lower bound.
     Degrades to a ``FeatureGap`` when no sweep pivot can be derived.
     """
     from fortianalyzer_mcp.tools.log_tools import query_logs
@@ -2728,11 +2852,25 @@ async def _hunt_sweep(
             reason="no sweep pivot could be derived from the subject; nothing to hunt on"
         )
 
+    logtypes = list(params.sweep_logtypes)
+    if (
+        params.indicator is not None
+        and params.indicator.type == "Hash"
+        and "virus" not in {logtype.strip().lower() for logtype in logtypes}
+    ):
+        # First, so the fan-out cap never drops the one log type measured to
+        # carry the hash (#184).
+        logtypes.insert(0, "virus")
+        warnings.append(
+            "sweep: 'virus' added to the swept log types for a Hash indicator "
+            "(virus logs carry the file hash)"
+        )
+
     matches: list[SweepMatch] = []
     consumed = 0
     dropped = 0
     budget = params.max_sweep_searches
-    for logtype in params.sweep_logtypes:
+    for logtype in logtypes:
         if consumed >= budget:
             dropped += 1
             matches.append(
@@ -2748,12 +2886,13 @@ async def _hunt_sweep(
             )
             continue
         consumed += 1
+        clause = _sweep_pivot(params, logtype)
         logs_res, err = await _call(
             query_logs,
             adom=params.adom,
             logtype=logtype,
             time_range=time_range,
-            filter=pivot,
+            filter=clause,
             limit=params.sweep_limit,
             # SweepMatch.rows is documented "Verbatim matched rows", and the
             # sweep fans out over logtypes whose curated sets differ -- a
@@ -2764,13 +2903,23 @@ async def _hunt_sweep(
             matches.append(
                 SweepMatch(
                     logtype=logtype,
+                    pivot_filter=clause,
                     rows=FeatureGap(reason=f"sweep '{logtype}' search unavailable: {err}"),
                 )
             )
             warnings.append(f"sweep[{logtype}]: search unavailable: {err}")
         else:
             rows = logs_res.get("logs") or []
-            matches.append(SweepMatch(logtype=logtype, rows=rows, row_count=len(rows)))
+            matches.append(
+                SweepMatch(
+                    logtype=logtype,
+                    pivot_filter=clause,
+                    rows=rows,
+                    row_count=len(rows),
+                    # A page that filled reports a total that is only a floor.
+                    has_more=bool(logs_res.get("has_more") or logs_res.get("total_is_lower_bound")),
+                )
+            )
             warnings.extend(f"sweep[{logtype}]: {w}" for w in logs_res.get("warnings") or [])
 
     # Threat-intel: reputation for an IP/URL/Domain indicator (a hash is not
@@ -2786,16 +2935,19 @@ async def _hunt_sweep(
             # ti_type is a value of _INDICATOR_TYPE_CANONICAL, i.e. exactly one
             # of "IP"/"URL"/"Domain" — the IndicatorSpec.type Literal.
             spec = IndicatorSpec.model_validate({"value": params.indicator.value, "type": ti_type})
+            # The indicator read is not given the hunt window (#184); the
+            # threat landscape is.
             threat_intel = await run_threat_intel(
                 ThreatIntelParams(
                     adom=params.adom,
                     indicators=[spec],
                     detail_level=params.detail_level,
-                    time_range=time_range,
                     include_threat_landscape=params.include_threat_landscape,
-                )
+                ),
+                landscape_time_range=time_range,
             )
             warnings.extend(f"threat_intel: {w}" for w in threat_intel.warnings)
+            warnings.append(_indicator_lookup_unbounded(time_range))
         except SkillExecutionError as exc:
             warnings.append(f"indicator enrichment unavailable: {exc}")
             threat_intel = FeatureGap(reason=f"indicator enrichment unavailable: {exc}")
@@ -2807,12 +2959,16 @@ async def _hunt_sweep(
         threat_intel = FeatureGap(reason="no single indicator to enrich (filter/ttp hunt)")
 
     total = sum(m.row_count for m in matches)
+    # One clause for the whole sweep only when every search ran on it; a
+    # Domain indicator swept across dns and other log types ran on two.
+    ran_on = {m.pivot_filter for m in matches if m.pivot_filter is not None}
     return HuntSweep(
-        pivot_filter=pivot,
+        pivot_filter=next(iter(ran_on), pivot) if len(ran_on) < 2 else None,
         ttp=params.ttp,
         matches=matches,
         threat_intel=threat_intel,
         total_matches=total,
+        total_matches_is_lower_bound=any(m.has_more for m in matches),
         sweep_searches_run=consumed,
         sweep_searches_dropped=dropped,
     )
@@ -2884,9 +3040,17 @@ def _hunt_headline(
     """Deterministic one-line rollup for the hunt — built only from present values."""
     parts = [f"{subject_type} {subject_id}"]
     if isinstance(sweep, HuntSweep):
-        parts.append(
-            f"sweep: {sweep.total_matches} matches across {sweep.sweep_searches_run} searches"
-        )
+        searches = sweep.sweep_searches_run
+        if searches and all(isinstance(m.rows, FeatureGap) for m in sweep.matches):
+            # No search answered, so there is no match count to report.
+            parts.append(f"sweep: failed (0 of {searches} searches returned)")
+        elif sweep.total_matches_is_lower_bound:
+            parts.append(
+                f"sweep: at least {sweep.total_matches} matches (lower bound, a page "
+                f"filled) across {searches} searches"
+            )
+        else:
+            parts.append(f"sweep: {sweep.total_matches} matches across {searches} searches")
     if isinstance(behavior, EntityBehavior):
         verdict = "ANOMALOUS" if behavior.anomalous else "normal"
         pct = (
@@ -2894,7 +3058,10 @@ def _hunt_headline(
             if behavior.risk_percentile is not None
             else "no percentile"
         )
-        parts.append(f"behavior: {verdict} ({pct}, {behavior.detection_count} detections)")
+        detections = f"{behavior.detection_count} detections"
+        if behavior.alerts_truncated:
+            detections += f" in the first {_BEHAVIOR_ALERT_LIMIT} alerts"
+        parts.append(f"behavior: {verdict} ({pct}, {detections})")
     return "; ".join(parts)
 
 

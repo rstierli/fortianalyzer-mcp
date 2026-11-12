@@ -780,8 +780,9 @@ class RiskDimension(BaseModel):
     ``raw_counts`` holds the exact inputs the subscore was computed from
     (severity counts, or ``{"failures": n}``). It is empty when the
     dimension's read was unavailable — that case is always named in the
-    result's ``warnings``, so an empty read is distinguishable from a
-    genuine zero.
+    result's ``dimensions_unavailable`` and ``warnings``, so an empty read
+    is distinguishable from a genuine zero. An unavailable dimension's
+    ``subscore`` is 0 and is not part of the composite.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -789,8 +790,17 @@ class RiskDimension(BaseModel):
     raw_counts: dict[str, int] = Field(
         description="Raw inputs behind the subscore (empty when the read was unavailable)"
     )
-    subscore: int = Field(ge=0, le=100, description="Normalized 0-100 dimension score")
-    weight: float = Field(description="This dimension's weight in the composite")
+    subscore: int = Field(
+        ge=0,
+        le=100,
+        description="Normalized 0-100 dimension score (0, and left out of the "
+        "composite, when the dimension is unavailable)",
+    )
+    weight: float = Field(
+        description="This dimension's weight in the composite when all three "
+        "dimensions ran; the composite renormalises the weights of the "
+        "dimensions that ran"
+    )
 
 
 class RiskAssessmentResult(BaseModel):
@@ -806,14 +816,22 @@ class RiskAssessmentResult(BaseModel):
     - auth_failure = min(100, failures*5) over event-log auth failures
       (``action==failure``) tied to the entity in the window
     - composite_score = round(0.40*vulnerability + 0.35*threat
-      + 0.25*auth_failure)
+      + 0.25*auth_failure) when all three dimensions ran. A dimension that
+      did not run is left out and the weights of the rest are renormalised
+      to sum to 1: round(sum(weight*subscore) / sum(weight)) over the
+      dimensions that ran. Vulnerability 50 and auth_failure 20 with threat
+      unavailable give (0.40*50 + 0.25*20) / 0.65 = 38.46, so 38.
     - band: 0-24 "low", 25-49 "medium", 50-74 "high", 75-100 "critical"
 
     Severity labels are matched case-insensitively; labels outside the
     scoring table still appear in ``raw_counts`` but contribute 0 points.
-    A dimension whose read failed scores 0 **and is named in warnings** —
-    the composite then covers only the available dimensions and is never
-    silently presented as complete.
+    A dimension that did not run is **named in ``dimensions_unavailable``
+    and in warnings** and is not scored as 0: the composite covers
+    ``dimensions_scored`` of the three dimensions and is never silently
+    presented as complete. A dimension that ran and found nothing is a real
+    0 and stays in. For an end-user the threat dimension never runs:
+    FortiView top-threats accepts no user filter. When no dimension ran
+    there is no score, and ``composite_score`` and ``band`` are null.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -824,8 +842,24 @@ class RiskAssessmentResult(BaseModel):
     vulnerability: RiskDimension
     threat: RiskDimension
     auth_failure: RiskDimension
-    composite_score: int = Field(ge=0, le=100, description="Weighted composite, rounded")
-    band: Literal["low", "medium", "high", "critical"]
+    composite_score: int | None = Field(
+        ge=0,
+        le=100,
+        description="Weighted composite over the dimensions that ran, rounded; "
+        "null when no dimension ran",
+    )
+    band: Literal["low", "medium", "high", "critical"] | None = Field(
+        description="Band of the composite; null when no dimension ran"
+    )
+    dimensions_scored: int = Field(
+        ge=0,
+        le=3,
+        description="How many of the three dimensions the composite covers",
+    )
+    dimensions_unavailable: list[Literal["vulnerability", "threat", "auth_failure"]] = Field(
+        default_factory=list,
+        description="The dimensions that did not run and are left out of the composite",
+    )
     time_range: str
     warnings: list[str] = Field(default_factory=list)
 
@@ -845,8 +879,10 @@ class InvestigateParams(BaseModel):
     incident_id: str | None = None
     time_range: str = Field(
         default="7-day",
-        description="Window for the summary, indicator and threat-landscape "
-        "sections (and the triage surrounding-activity context)",
+        description="Window for the summary and threat-landscape sections (and "
+        "the triage surrounding-activity context). The indicator lookups are "
+        "not limited to it: reputation is a property of the indicator, not of "
+        "the window",
     )
     detail_level: Literal["standard", "extended"] = Field(
         default="standard",
@@ -974,13 +1010,16 @@ class HuntParams(BaseModel):
         description="Window for the sweep, the behavioural detections and the "
         "threat-landscape context. Windows wider than 7 days are capped to "
         "7-day (the sweep consumes logview search slots); the cap is reported "
-        "in warnings.",
+        "in warnings. The indicator's SOAR reputation lookup is not limited "
+        "to it.",
     )
     sweep_logtypes: list[str] = Field(
         default_factory=lambda: ["traffic", "attack", "app-ctrl", "dns"],
         description="Log types swept for the indicator/TTP/filter. Each is one "
         "logview search slot; the total is capped by max_sweep_searches. "
-        "('attack' is FAZ's IPS log type; 'ips' is not a valid FAZ logtype.)",
+        "('attack' is FAZ's IPS log type; 'ips' is not a valid FAZ logtype.) "
+        "A Hash indicator also sweeps 'virus', the log type that carries file "
+        "hashes, when it is not listed.",
     )
     max_sweep_searches: int = Field(
         default=6,
@@ -1042,23 +1081,40 @@ class SweepMatch(BaseModel):
     ``rows`` are verbatim FAZ log rows the sweep filter matched. Degrades to
     a ``FeatureGap`` when that search failed or was dropped by the fan-out
     cap — never silently omitted.
+
+    ``pivot_filter`` is the clause this log type's search ran on. ``rows``
+    is one page: when ``has_more`` is true the page filled, more rows may
+    have matched, and ``row_count`` is a lower bound, not the number of
+    matches.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     logtype: str
+    pivot_filter: str | None = Field(
+        default=None,
+        description="The filter clause this log type's search ran on (None when "
+        "the search was dropped by the fan-out cap and never ran)",
+    )
     rows: list[dict[str, Any]] | FeatureGap = Field(
         description="Verbatim matched rows — or the gap marker for this log type"
     )
     row_count: int = Field(default=0, description="Row count (0 for a gap section)")
+    has_more: bool = Field(
+        default=False,
+        description="True when this page filled, so more rows may have matched "
+        "(the search reported more, or a total that is a lower bound); row_count "
+        "is then a lower bound",
+    )
 
 
 class HuntSweep(BaseModel):
     """The hunt (sweep) half: where the indicator/TTP/filter appears.
 
     ``pivot_filter`` is the exact filter clause every sweep search ran on,
-    so the hunt is auditable and never a guess. ``matches`` is one
-    ``SweepMatch`` per swept log type. ``threat_intel`` enriches an
+    when they all ran on one; each ``SweepMatch`` carries the clause its own
+    search ran on, so the hunt is auditable and never a guess. ``matches``
+    is one ``SweepMatch`` per swept log type. ``threat_intel`` enriches an
     IP/URL/Domain indicator with stored SOAR reputation (a gap for a hash,
     a bare filter, or when SOAR is unavailable).
     """
@@ -1066,8 +1122,10 @@ class HuntSweep(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     pivot_filter: str | None = Field(
-        description="The filter clause the sweep searches ran on (None when no "
-        "usable sweep pivot could be derived)"
+        description="The filter clause the sweep searches ran on. None when they "
+        "did not all run on the same one (a Domain indicator is matched on qname "
+        "in dns logs and on hostname elsewhere): each match's pivot_filter then "
+        "shows its own"
     )
     ttp: str | None = Field(default=None, description="The TTP hint, recorded verbatim")
     matches: list[SweepMatch] = Field(default_factory=list)
@@ -1075,7 +1133,16 @@ class HuntSweep(BaseModel):
         description="Stored SOAR reputation for an IP/URL/Domain indicator, plus "
         "the threat-landscape context — or the gap marker"
     )
-    total_matches: int = Field(description="Sum of row counts across every available match")
+    total_matches: int = Field(
+        description="Sum of row counts across every available match; a lower "
+        "bound when total_matches_is_lower_bound is true"
+    )
+    total_matches_is_lower_bound: bool = Field(
+        default=False,
+        description="True when any sweep search returned a page that filled (its "
+        "match has has_more): total_matches then counts the rows returned, and "
+        "more rows may have matched",
+    )
     sweep_searches_run: int = Field(description="Sweep log_search slots actually consumed")
     sweep_searches_dropped: int = Field(
         description="Log types skipped by the max_sweep_searches cap"
@@ -1128,6 +1195,13 @@ class EntityBehavior(BaseModel):
         "window, verbatim (FAZ's own anomaly detections) — or the gap marker"
     )
     detection_count: int = Field(default=0, description="Behavioural detections (0 for a gap)")
+    alerts_truncated: bool = Field(
+        default=False,
+        description="True when the alert page the detections were narrowed from "
+        "was full (200 alerts): only the first 200 alerts returned for the "
+        "window were examined, so detection_count is a lower bound and zero "
+        "detections is not a clean negative",
+    )
     anomalous: bool = Field(description="Derived anomaly verdict (percentile + vuln + detections)")
     anomaly_basis: list[str] = Field(
         description="Every observation the anomaly verdict was derived from"

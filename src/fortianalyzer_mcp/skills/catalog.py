@@ -167,7 +167,8 @@ SKILLS: dict[str, SkillSpec] = {
             description="Transparent composite 0-100 risk score for one endpoint "
             "or end-user over three dimensions (CVE severity counts, threat "
             "detections, auth failures), exposing every raw input, subscore, "
-            "weight and band. Requires UEBA.",
+            "weight and band. A dimension that cannot be read is left out of "
+            "the composite and named. Requires UEBA.",
             params_model=RiskAssessmentParams,
             output_model=RiskAssessmentResult,
             handler=handlers.run_risk_assessment,
