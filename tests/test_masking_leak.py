@@ -685,6 +685,109 @@ class TestFreeTextSubstitution:
         assert masked["msg"] == f"{longer} is not {masked[field]}"
 
 
+class TestEndpointDetectedByMac:
+    """``detectkey`` on a UEBA endpoint is not always the detecting appliance.
+
+    It is that appliance's serial, except where FortiAnalyzer detected the
+    endpoint by its MAC (``detecttype: by_mac``): there it holds the
+    endpoint's own MAC, measured on 8.0.2. Typed as estate identity it was
+    returned in clear with the device-identity flag off, and it put the MAC
+    into the keep set, which kept ``mac`` and ``macip[].mac`` clear as well.
+    """
+
+    MAC = "00:00:5e:00:53:01"
+
+    def _endpoint(self, detectkey: str = MAC) -> dict[str, Any]:
+        record = {
+            "epid": "2001",
+            "epname": "workstation-14",
+            "epip": "192.0.2.44",
+            "mac": self.MAC,
+            "detecttype": "by_mac",
+            "detectkey": detectkey,
+            "macip": [{"mac": self.MAC, "epip": "192.0.2.44"}],
+            "msg": f"seen {self.MAC} on port1",
+        }
+        if detectkey == DETECT_KEY:
+            # Detected by an appliance: the type that goes with it was not
+            # measured, and the masker does not read it.
+            del record["detecttype"]
+        return record
+
+    def test_the_mac_is_masked_under_every_key(self, masker: OutputMasker, engine: FPEEngine):
+        masked = masker.mask_result(self._endpoint())
+
+        assert self.MAC not in repr(masked)
+        assert engine.is_own_v2_token(masked["mac"])
+        # One identity, one stand-in, wherever the record carries it.
+        assert masked["detectkey"] == masked["mac"] == masked["macip"][0]["mac"]
+        assert masked["msg"] == f"seen {masked['mac']} on port1"
+
+    def test_it_is_the_same_stand_in_with_the_flag_on(
+        self, masker: OutputMasker, full_masker: OutputMasker
+    ):
+        # A MAC under detectkey is the endpoint's, so it is a MAC token in
+        # both flag states, not a serial token beside a MAC token.
+        on = full_masker.mask_result(self._endpoint())
+
+        assert self.MAC not in repr(on)
+        assert on["detectkey"] == on["mac"]
+        assert on["mac"] == masker.mask_result(self._endpoint())["mac"]
+
+    @pytest.mark.parametrize(
+        "written",
+        [MAC.upper(), f" {MAC} ", f"{MAC}\n"],
+        ids=["upper case", "padded", "trailing newline"],
+    )
+    def test_case_and_padding_of_the_mac_do_not_matter(self, masker: OutputMasker, written: str):
+        masked = masker.mask_result(self._endpoint(detectkey=written))
+
+        assert self.MAC.upper() not in repr(masked)
+        assert self.MAC not in repr(masked)
+        assert masked["detectkey"] == masked["mac"]
+
+    def test_a_serial_under_detectkey_still_follows_the_flag(
+        self, masker: OutputMasker, full_masker: OutputMasker
+    ):
+        # The other direction: the appliance's serial is estate identity and
+        # stays readable with the flag off, and the endpoint's MAC beside it
+        # masks all the same.
+        record = self._endpoint(detectkey=DETECT_KEY)
+
+        off = masker.mask_result(record)
+        on = full_masker.mask_result(record)
+
+        assert off["detectkey"] == DETECT_KEY
+        assert self.MAC not in repr(off)
+        assert DETECT_KEY not in repr(on)
+        assert self.MAC not in repr(on)
+
+    def test_a_serial_under_detectkey_is_still_kept_clear_elsewhere(self, masker: OutputMasker):
+        # The serial is estate identity, so with the flag off it stays
+        # readable under the other key that carries it too. Only a MAC is
+        # left out of that.
+        record = self._endpoint(detectkey=DETECT_KEY)
+        record["target"] = [{"name": "device", "value": DETECT_KEY}]
+
+        masked = masker.mask_result(record)
+
+        assert masked["detectkey"] == DETECT_KEY
+        assert masked["target"] == [{"name": "device", "value": DETECT_KEY}]
+
+    def test_only_detectkey_is_read_this_way(self, full_masker: OutputMasker):
+        # Scope: a MAC under detectkey was measured, nothing else was. A
+        # MAC-shaped value under another device-identity key keeps that
+        # key's own type.
+        record = self._endpoint()
+        record["sn"] = self.MAC
+
+        masked = full_masker.mask_result(record)
+
+        assert self.MAC not in repr(masked)
+        assert masked["detectkey"] == masked["mac"]
+        assert masked["sn"] != masked["mac"]
+
+
 class TestFortiViewDeviceVdom:
     """``devvds`` is ``"<devname>[<vdom>]"``: brackets break a plain mask."""
 

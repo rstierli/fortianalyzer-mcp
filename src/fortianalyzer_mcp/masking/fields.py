@@ -33,7 +33,10 @@ FortiView and UEBA use yet another vocabulary: ``fortigate`` and
 and vdom into ``"<devname>[<vdom>]"``. All three are device identity and
 follow the ``FAZ_MASK_DEVICE_IDENTITY`` flag; ``devvds`` needs a composite
 handler because the brackets fall outside the hostname alphabet, so a
-plain hostname mask would burn it to an irreversible placeholder.
+plain hostname mask would burn it to an irreversible placeholder. One
+exception: on an endpoint detected by its MAC, ``detectkey`` holds that
+MAC, which is the endpoint's and is masked in both flag states (see
+``MAC_WHEN_MAC_SHAPED``).
 
 Out of scope here, by design:
 - Device-identity fields (devname, devid, sn, csf, fortigate, devvds,
@@ -582,6 +585,20 @@ COMPOSITE_ID_DEVTYPE: dict[str, str] = {
     "dev_src_agg": HOSTNAME,
 }
 
+#: Device-identity keys that hold an endpoint's MAC on some records.
+#:
+#: ``detectkey`` on a UEBA endpoint is the detecting appliance's serial,
+#: except where FortiAnalyzer detected the endpoint by its MAC
+#: (``detecttype: by_mac``): there it holds the endpoint's own MAC, measured
+#: on 8.0.2 at ``basic`` and ``standard`` detail. That is endpoint identity,
+#: not estate identity, so a value of that shape under one of these keys
+#: masks as a MAC in both flag states and stays out of the keep set.
+#:
+#: Left to ``DEVICE_IDENTITY_TYPES`` alone it was returned in clear with the
+#: flag off, and it entered the keep set, which then kept the same MAC clear
+#: under ``mac`` and ``macip[].mac`` while the prose of the record masked it.
+MAC_WHEN_MAC_SHAPED = ("detectkey",)
+
 #: Estate identity, not personal data. Masked only when the deployment
 #: opts in via ``FAZ_MASK_DEVICE_IDENTITY``; see the module docstring.
 DEVICE_IDENTITY_TYPES: dict[str, str] = {
@@ -637,7 +654,9 @@ DEVICE_IDENTITY_TYPES: dict[str, str] = {
     # a hostname, so it kept the exact round-trip bug the serial type was
     # added to fix. Found by review after the first pass moved only the
     # sn-spelled keys.
-    "detectkey": SERIAL,  # ueba endpoints: serial of the detecting appliance
+    # ueba endpoints: serial of the detecting appliance. A MAC there is the
+    # endpoint's own and never reaches this type: see MAC_WHEN_MAC_SHAPED.
+    "detectkey": SERIAL,
     # eventmgmt alert subject_details: {alertid, devs, epids, euids}. Same
     # class as devname, and until it was listed here it defeated the flag
     # rather than following it: the device stayed clear under "devs" while
