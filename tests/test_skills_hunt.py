@@ -59,6 +59,21 @@ def logs_ok(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {"status": "success", "tid": 1, "logs": rows, "total": len(rows)}
 
 
+def full_page(rows: list[dict[str, Any]], floor: int) -> dict[str, Any]:
+    """A query_logs page that filled, as 2.17.0 reports it: more rows exist
+    and ``total`` is a floor, not the window's count."""
+    return {
+        "status": "success",
+        "tid": 1,
+        "logs": rows,
+        "count": len(rows),
+        "total": floor,
+        "total_is_known": False,
+        "total_is_lower_bound": True,
+        "has_more": True,
+    }
+
+
 def by_logtype(**responses: dict[str, Any]) -> Any:
     """Side effect for ``query_logs``, dispatching on logtype."""
 
@@ -384,6 +399,167 @@ class TestHuntSweep:
         assert any("search unavailable" in w for w in result.warnings)
 
 
+class TestHuntSweepCounts:
+    """#184: a sweep search returns one page. A page that filled is not the
+    number of matches, and a sweep whose searches all failed is not a sweep
+    that matched nothing."""
+
+    ROW = {"logid": "0000000013"}
+
+    async def test_full_pages_make_the_total_a_lower_bound(self, soar):
+        # The live case: a domain hunt reported total_matches=200, the rows
+        # of its full pages, against thousands of matching rows.
+        with t(QUERY_LOGS, return_value=full_page([self.ROW] * 100, floor=6450)):
+            result = await handlers.run_hunt(
+                HuntParams(
+                    indicator=IndicatorSubject(value="bad.example.com", type="Domain"),
+                    sweep_logtypes=["traffic", "dns"],
+                )
+            )
+        assert isinstance(result.sweep, HuntSweep)
+        assert [(m.row_count, m.has_more) for m in result.sweep.matches] == [
+            (100, True),
+            (100, True),
+        ]
+        assert result.sweep.total_matches == 200
+        assert result.sweep.total_matches_is_lower_bound is True
+        assert "sweep: at least 200 matches" in result.headline
+        assert "lower bound" in result.headline
+
+    async def test_one_full_page_is_enough_to_bound_the_total(self, soar):
+        # The other live case: an IP hunt reported 100, one page size.
+        with t(
+            QUERY_LOGS,
+            side_effect=by_logtype(
+                traffic=logs_ok([self.ROW] * 3),
+                dns=full_page([self.ROW] * 100, floor=7364),
+            ),
+        ):
+            result = await handlers.run_hunt(
+                HuntParams(
+                    indicator=IndicatorSubject(value="203.0.113.7", type="IP"),
+                    sweep_logtypes=["traffic", "dns"],
+                )
+            )
+        assert isinstance(result.sweep, HuntSweep)
+        assert [(m.logtype, m.row_count, m.has_more) for m in result.sweep.matches] == [
+            ("traffic", 3, False),
+            ("dns", 100, True),
+        ]
+        assert result.sweep.total_matches == 103
+        assert result.sweep.total_matches_is_lower_bound is True
+        assert "sweep: at least 103 matches" in result.headline
+        assert "lower bound" in result.headline
+
+    @pytest.mark.parametrize(
+        "page_says",
+        [
+            {"has_more": True, "total": None, "total_is_known": False},
+            {"has_more": False, "total": 40, "total_is_lower_bound": True},
+        ],
+        ids=["has_more", "total_is_lower_bound"],
+    )
+    async def test_either_page_signal_marks_the_search_truncated(self, page_says):
+        page = {"status": "success", "tid": 1, "logs": [self.ROW] * 2, **page_says}
+        with t(QUERY_LOGS, return_value=page):
+            result = await handlers.run_hunt(
+                HuntParams(filter="dstport==4444", sweep_logtypes=["traffic"])
+            )
+        assert isinstance(result.sweep, HuntSweep)
+        assert result.sweep.matches[0].has_more is True
+        assert result.sweep.total_matches_is_lower_bound is True
+        assert "at least 2 matches" in result.headline
+
+    async def test_complete_pages_are_still_a_count(self):
+        with t(QUERY_LOGS, return_value=logs_ok([self.ROW] * 3)):
+            result = await handlers.run_hunt(
+                HuntParams(filter="dstport==4444", sweep_logtypes=["traffic", "dns"])
+            )
+        assert isinstance(result.sweep, HuntSweep)
+        assert [m.has_more for m in result.sweep.matches] == [False, False]
+        assert result.sweep.total_matches == 6
+        assert result.sweep.total_matches_is_lower_bound is False
+        assert result.headline == "hypothesis dstport==4444; sweep: 6 matches across 2 searches"
+
+    async def test_headline_says_the_sweep_failed_when_every_search_did(self):
+        with t(QUERY_LOGS, return_value={"status": "error", "message": "logview unavailable"}):
+            result = await handlers.run_hunt(
+                HuntParams(filter="dstport==4444", sweep_logtypes=["traffic", "dns"])
+            )
+        assert isinstance(result.sweep, HuntSweep)
+        assert all(isinstance(m.rows, FeatureGap) for m in result.sweep.matches)
+        assert "sweep: failed" in result.headline
+        assert "0 matches" not in result.headline
+
+    async def test_a_sweep_with_one_answer_is_not_a_failed_sweep(self):
+        with t(
+            QUERY_LOGS,
+            side_effect=by_logtype(
+                traffic={"status": "error", "message": "logview unavailable"},
+                dns=logs_ok([self.ROW]),
+            ),
+        ):
+            result = await handlers.run_hunt(
+                HuntParams(filter="dstport==4444", sweep_logtypes=["traffic", "dns"])
+            )
+        assert result.headline == "hypothesis dstport==4444; sweep: 1 matches across 2 searches"
+
+
+class TestHuntBehaviorAlertPage:
+    """#184: the behavioural detections are narrowed from one page of 200
+    alerts, so a page that filled says nothing about the alerts behind it."""
+
+    QUIET_USER = {"euid": 42, "euname": "jdoe", "importance": "low"}
+
+    @staticmethod
+    def alerts(count: int, *extra: dict[str, Any]) -> list[dict[str, Any]]:
+        """``count`` alerts that are not behavioural, then ``extra``."""
+        return [{**BENIGN_ALERT, "alertid": f"b-{i}"} for i in range(count)] + list(extra)
+
+    async def hunt(self, entity: str, alerts: list[dict[str, Any]]) -> Any:
+        with (
+            t(GET_ENDPOINTS, return_value=ok(data=ESTATE)),
+            t(GET_ENDUSERS, return_value=ok(data=[self.QUIET_USER])),
+            t(GET_ALERTS, return_value=ok(data=alerts)),
+            t(QUERY_LOGS, return_value=logs_ok([])),
+        ):
+            return await handlers.run_hunt(HuntParams(entity=entity, sweep_logtypes=["traffic"]))
+
+    @pytest.mark.parametrize("entity", ["epid:5", "euid:42"])
+    async def test_a_full_alert_page_is_not_a_clean_negative(self, entity):
+        result = await self.hunt(entity, self.alerts(200))
+        b = result.behavior
+        assert isinstance(b, EntityBehavior)
+        assert b.detection_count == 0
+        assert b.alerts_truncated is True
+        assert any(w.startswith("behavior[") and "newest 200 alerts" in w for w in result.warnings)
+        # Neither the basis nor the headline reports none found in the window.
+        assert "no behavioural/IOC detections in the window" not in b.anomaly_basis
+        assert any("newest 200 alerts" in reason for reason in b.anomaly_basis)
+        assert not result.headline.endswith("0 detections)")
+        assert "0 detections in the newest 200 alerts" in result.headline
+
+    @pytest.mark.parametrize("entity", ["epid:5", "euid:42"])
+    async def test_a_page_that_did_not_fill_is_a_clean_negative(self, entity):
+        result = await self.hunt(entity, self.alerts(199))
+        b = result.behavior
+        assert isinstance(b, EntityBehavior)
+        assert b.detection_count == 0
+        assert b.alerts_truncated is False
+        assert not any("200 alerts" in w for w in result.warnings)
+        assert "no behavioural/IOC detections in the window" in b.anomaly_basis
+        assert result.headline.endswith("0 detections)")
+
+    async def test_detections_found_on_a_full_page_still_carry_the_warning(self):
+        result = await self.hunt("epid:5", self.alerts(199, BOTNET_ALERT))
+        b = result.behavior
+        assert isinstance(b, EntityBehavior)
+        assert b.detection_count == 1
+        assert b.anomalous is True
+        assert b.alerts_truncated is True
+        assert any(w.startswith("behavior[") and "newest 200 alerts" in w for w in result.warnings)
+
+
 class TestHuntBehaviorPercentile:
     async def test_high_risk_entity_flagged_among_low_risk_peers(self):
         # THE calibration test: 0.248 among ~40 hosts at 0.10-0.14 must land at
@@ -682,6 +858,20 @@ class TestHuntDispatch:
             ("dns", "qname"),
         ]
         assert sweep["pivot_filter"] is None
+
+    async def test_a_truncated_page_is_a_lower_bound_in_the_envelope(self):
+        page = full_page([{"logid": "0000000013"}], floor=6450)
+        with t(QUERY_LOGS, return_value=page):
+            result = await faz_skill(
+                skill="hunt",
+                params={"filter": "dstport==4444", "sweep_logtypes": ["dns"], "sweep_limit": 1},
+            )
+        assert result["status"] == "success"
+        sweep = result["result"]["sweep"]
+        assert [(m["row_count"], m["has_more"]) for m in sweep["matches"]] == [(1, True)]
+        assert sweep["total_matches"] == 1
+        assert sweep["total_matches_is_lower_bound"] is True
+        assert "at least 1 matches" in result["result"]["headline"]
 
     async def test_missing_subject_rejected(self):
         result = await faz_skill(skill="hunt", params={})

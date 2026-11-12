@@ -882,6 +882,7 @@ faz_skill(skill="hunt", params={"indicator": {"value": "203.0.113.7", "type": "I
       ]
     },
     "total_matches": 12,
+    "total_matches_is_lower_bound": false,
     "sweep_searches_run": 4,
     "sweep_searches_dropped": 0
   },
@@ -893,6 +894,8 @@ faz_skill(skill="hunt", params={"indicator": {"value": "203.0.113.7", "type": "I
 One call fans the pivot `(srcip==203.0.113.7 or dstip==203.0.113.7)` across four log types (verbatim matched rows, capped) and attaches the stored SOAR reputation, here `Malicious`, so the analyst sees both *where* the IOC landed and *what it is*, in a single structured result.
 
 The sweep matches an indicator on the fields the rows carry: an IP as source or destination, a domain on `qname` in dns logs and on `hostname` elsewhere, a file hash on `filehash` or `analyticscksum` (with the `virus` log type added to the sweep). Each match carries the clause its own search ran on in `pivot_filter`, and the sweep-level `pivot_filter` is `null` when the clause differs by log type.
+
+Each sweep search returns one page of at most `sweep_limit` rows. When a page is truncated its match has `has_more: true`, `total_matches_is_lower_bound` is `true` and the headline reads `at least N matches (lower bound, more rows exist)`. When every search failed the headline reads `sweep: failed`, not `0 matches`. The behaviour half narrows its detections from one page of 200 alerts: when that page is full, `behavior.alerts_truncated` is `true`, a warning says only the newest 200 alerts were examined, and finding none is not reported as a clean negative.
 
 **Trace an incident backward and forward** — the full picture of `IN00000001`.
 ```jsonc

@@ -1045,7 +1045,9 @@ class SweepMatch(BaseModel):
     a ``FeatureGap`` when that search failed or was dropped by the fan-out
     cap — never silently omitted.
 
-    ``pivot_filter`` is the clause this log type's search ran on.
+    ``pivot_filter`` is the clause this log type's search ran on. ``rows``
+    is one page: when ``has_more`` is true more rows matched than it holds,
+    and ``row_count`` is a lower bound, not the number of matches.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -1060,6 +1062,12 @@ class SweepMatch(BaseModel):
         description="Verbatim matched rows — or the gap marker for this log type"
     )
     row_count: int = Field(default=0, description="Row count (0 for a gap section)")
+    has_more: bool = Field(
+        default=False,
+        description="True when more rows matched than this page returned (the "
+        "search reported more, or a total that is a lower bound); row_count is "
+        "then a lower bound",
+    )
 
 
 class HuntSweep(BaseModel):
@@ -1087,7 +1095,16 @@ class HuntSweep(BaseModel):
         description="Stored SOAR reputation for an IP/URL/Domain indicator, plus "
         "the threat-landscape context — or the gap marker"
     )
-    total_matches: int = Field(description="Sum of row counts across every available match")
+    total_matches: int = Field(
+        description="Sum of row counts across every available match; a lower "
+        "bound when total_matches_is_lower_bound is true"
+    )
+    total_matches_is_lower_bound: bool = Field(
+        default=False,
+        description="True when any sweep search returned a truncated page (its "
+        "match has has_more): total_matches then counts the rows returned, and "
+        "more rows matched",
+    )
     sweep_searches_run: int = Field(description="Sweep log_search slots actually consumed")
     sweep_searches_dropped: int = Field(
         description="Log types skipped by the max_sweep_searches cap"
@@ -1140,6 +1157,13 @@ class EntityBehavior(BaseModel):
         "window, verbatim (FAZ's own anomaly detections) — or the gap marker"
     )
     detection_count: int = Field(default=0, description="Behavioural detections (0 for a gap)")
+    alerts_truncated: bool = Field(
+        default=False,
+        description="True when the alert page the detections were narrowed from "
+        "was full (200 alerts): only the newest 200 alerts in the window were "
+        "examined, so detection_count is a lower bound and zero detections is "
+        "not a clean negative",
+    )
     anomalous: bool = Field(description="Derived anomaly verdict (percentile + vuln + detections)")
     anomaly_basis: list[str] = Field(
         description="Every observation the anomaly verdict was derived from"

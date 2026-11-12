@@ -2298,6 +2298,9 @@ _BEHAVIORAL_MARKERS = (
 )
 # Alert fields that may name the handler / detection rule (build-varying).
 _ALERT_HANDLER_KEYS = ("alerttype", "eventtype", "triggername", "name", "logdesc")
+# Alerts read for one entity's behavioural detections: one page, requested
+# newest first and narrowed client-side, so a full page is not the window.
+_BEHAVIOR_ALERT_LIMIT = 200
 
 
 def _cap_hunt_window(time_range: str) -> tuple[str, bool]:
@@ -2406,7 +2409,7 @@ async def _entity_behavioral_alerts(
     time_range: str,
     warnings: list[str],
     entity_ref: str,
-) -> list[dict[str, Any]] | FeatureGap:
+) -> tuple[list[dict[str, Any]] | FeatureGap, bool]:
     """The entity's behavioural alert-handler / IOC alerts in the window.
 
     One eventmgmt GET (no logview slot): alerts in the window filtered to
@@ -2415,22 +2418,42 @@ async def _entity_behavioral_alerts(
     anomaly detections — the RFC's "strongest FAZ-provided behavioural
     signal". Degrades to a ``FeatureGap`` when the read fails or the entity
     yields no pivot to tie alerts to.
+
+    Also returns whether the alert page filled. The narrowing is done here,
+    on one page, so a full page leaves the alerts behind it unread: the
+    detections are then a lower bound and none found is not a clean negative.
     """
     from fortianalyzer_mcp.tools.event_tools import get_alerts
 
     if pivot is None:
-        return FeatureGap(
-            reason=f"entity {entity_ref} yields no srcip/user pivot; "
-            "behavioural detections cannot be tied to it"
+        return (
+            FeatureGap(
+                reason=f"entity {entity_ref} yields no srcip/user pivot; "
+                "behavioural detections cannot be tied to it"
+            ),
+            False,
         )
     alerts_res, err = await _call(
-        get_alerts, adom=adom, time_range=time_range, filter=pivot, limit=200, fields=["*"]
+        get_alerts,
+        adom=adom,
+        time_range=time_range,
+        filter=pivot,
+        limit=_BEHAVIOR_ALERT_LIMIT,
+        fields=["*"],
     )
     if alerts_res is None:
         warnings.append(f"behavior[{entity_ref}]: behavioural alert lookup unavailable: {err}")
-        return FeatureGap(reason=f"behavioural alert lookup unavailable: {err}")
-    behavioral = [a for a in alerts_res.get("data") or [] if _is_behavioral_alert(a)]
-    return behavioral
+        return FeatureGap(reason=f"behavioural alert lookup unavailable: {err}"), False
+    alerts = alerts_res.get("data") or []
+    truncated = len(alerts) >= _BEHAVIOR_ALERT_LIMIT
+    if truncated:
+        warnings.append(
+            f"behavior[{entity_ref}]: alert page filled at limit {_BEHAVIOR_ALERT_LIMIT}; "
+            f"only the newest {_BEHAVIOR_ALERT_LIMIT} alerts in the window were examined "
+            "for behavioural detections"
+        )
+    behavioral = [a for a in alerts if _is_behavioral_alert(a)]
+    return behavioral, truncated
 
 
 async def _hunt_behavior(
@@ -2503,12 +2526,12 @@ async def _hunt_behavior(
                 f"behavior[{entity_id}]: endpoint carries no 'epip'; behavioural "
                 "detections cannot be tied to it"
             )
-        detections = await _entity_behavioral_alerts(
+        detections, alerts_truncated = await _entity_behavioral_alerts(
             adom, pivot, time_range, warnings, str(entity_id)
         )
 
         anomalous, basis = _score_endpoint_anomaly(
-            percentile, ranked_total, vuln_stats, detections, anomaly_percentile
+            percentile, ranked_total, vuln_stats, detections, anomaly_percentile, alerts_truncated
         )
         detection_count = len(detections) if isinstance(detections, list) else 0
         return (
@@ -2522,6 +2545,7 @@ async def _hunt_behavior(
                 vuln_stats=vuln_stats,
                 behavioral_detections=detections,
                 detection_count=detection_count,
+                alerts_truncated=alerts_truncated,
                 anomalous=anomalous,
                 anomaly_basis=basis,
             ),
@@ -2553,9 +2577,11 @@ async def _hunt_behavior(
             f"behavior[{entity_id}]: end-user carries no 'euname'; behavioural "
             "detections cannot be tied to it"
         )
-    detections = await _entity_behavioral_alerts(adom, pivot, time_range, warnings, str(entity_id))
+    detections, alerts_truncated = await _entity_behavioral_alerts(
+        adom, pivot, time_range, warnings, str(entity_id)
+    )
 
-    anomalous, basis = _score_enduser_anomaly(importance, detections)
+    anomalous, basis = _score_enduser_anomaly(importance, detections, alerts_truncated)
     detection_count = len(detections) if isinstance(detections, list) else 0
     return (
         EntityBehavior(
@@ -2568,11 +2594,25 @@ async def _hunt_behavior(
             vuln_stats={},
             behavioral_detections=detections,
             detection_count=detection_count,
+            alerts_truncated=alerts_truncated,
             anomalous=anomalous,
             anomaly_basis=basis,
         ),
         0,
     )
+
+
+def _no_detections_basis(alerts_truncated: bool) -> str:
+    """The basis line for an alert read that held no behavioural detection.
+
+    A full alert page is not the whole window, so it is no clean negative.
+    """
+    if alerts_truncated:
+        return (
+            f"no behavioural/IOC detections among the newest {_BEHAVIOR_ALERT_LIMIT} "
+            "alerts in the window; the alert page filled and the rest were not examined"
+        )
+    return "no behavioural/IOC detections in the window"
 
 
 def _score_endpoint_anomaly(
@@ -2581,6 +2621,7 @@ def _score_endpoint_anomaly(
     vuln_stats: dict[str, int],
     detections: list[dict[str, Any]] | FeatureGap,
     anomaly_percentile: float,
+    alerts_truncated: bool,
 ) -> tuple[bool, list[str]]:
     """Derive an endpoint's anomaly verdict + auditable basis.
 
@@ -2621,7 +2662,7 @@ def _score_endpoint_anomaly(
         flags.append(True)
         basis.append(f"{len(detections)} behavioural/IOC detection(s) in the window -> ANOMALOUS")
     elif isinstance(detections, list):
-        basis.append("no behavioural/IOC detections in the window")
+        basis.append(_no_detections_basis(alerts_truncated))
     else:
         basis.append("behavioural detections unavailable; that flag not applied")
 
@@ -2629,7 +2670,7 @@ def _score_endpoint_anomaly(
 
 
 def _score_enduser_anomaly(
-    importance: Any, detections: list[dict[str, Any]] | FeatureGap
+    importance: Any, detections: list[dict[str, Any]] | FeatureGap, alerts_truncated: bool
 ) -> tuple[bool, list[str]]:
     """Derive an end-user's anomaly verdict + basis (no risk_score exists).
 
@@ -2653,7 +2694,7 @@ def _score_enduser_anomaly(
         flags.append(True)
         basis.append(f"{len(detections)} behavioural/IOC detection(s) in the window -> ANOMALOUS")
     elif isinstance(detections, list):
-        basis.append("no behavioural/IOC detections in the window")
+        basis.append(_no_detections_basis(alerts_truncated))
     else:
         basis.append("behavioural detections unavailable; that flag not applied")
 
@@ -2730,7 +2771,8 @@ async def _hunt_sweep(
     ``max_sweep_searches``; excess dropped and named in ``warnings``), plus
     ``threat_intel`` for an IP/URL/Domain indicator (plain GETs, no slot).
     A Hash indicator also sweeps ``virus``, the log type that carries file
-    hashes.
+    hashes. Each search returns one page: a match whose page was truncated
+    has ``has_more`` set and makes ``total_matches`` a lower bound.
     Degrades to a ``FeatureGap`` when no sweep pivot can be derived.
     """
     from fortianalyzer_mcp.tools.log_tools import query_logs
@@ -2800,7 +2842,14 @@ async def _hunt_sweep(
         else:
             rows = logs_res.get("logs") or []
             matches.append(
-                SweepMatch(logtype=logtype, pivot_filter=clause, rows=rows, row_count=len(rows))
+                SweepMatch(
+                    logtype=logtype,
+                    pivot_filter=clause,
+                    rows=rows,
+                    row_count=len(rows),
+                    # A page that filled reports a total that is only a floor.
+                    has_more=bool(logs_res.get("has_more") or logs_res.get("total_is_lower_bound")),
+                )
             )
             warnings.extend(f"sweep[{logtype}]: {w}" for w in logs_res.get("warnings") or [])
 
@@ -2847,6 +2896,7 @@ async def _hunt_sweep(
         matches=matches,
         threat_intel=threat_intel,
         total_matches=total,
+        total_matches_is_lower_bound=any(m.has_more for m in matches),
         sweep_searches_run=consumed,
         sweep_searches_dropped=dropped,
     )
@@ -2918,9 +2968,17 @@ def _hunt_headline(
     """Deterministic one-line rollup for the hunt — built only from present values."""
     parts = [f"{subject_type} {subject_id}"]
     if isinstance(sweep, HuntSweep):
-        parts.append(
-            f"sweep: {sweep.total_matches} matches across {sweep.sweep_searches_run} searches"
-        )
+        searches = sweep.sweep_searches_run
+        if searches and all(isinstance(m.rows, FeatureGap) for m in sweep.matches):
+            # No search answered, so there is no match count to report.
+            parts.append(f"sweep: failed (0 of {searches} searches returned)")
+        elif sweep.total_matches_is_lower_bound:
+            parts.append(
+                f"sweep: at least {sweep.total_matches} matches (lower bound, more rows "
+                f"exist) across {searches} searches"
+            )
+        else:
+            parts.append(f"sweep: {sweep.total_matches} matches across {searches} searches")
     if isinstance(behavior, EntityBehavior):
         verdict = "ANOMALOUS" if behavior.anomalous else "normal"
         pct = (
@@ -2928,7 +2986,10 @@ def _hunt_headline(
             if behavior.risk_percentile is not None
             else "no percentile"
         )
-        parts.append(f"behavior: {verdict} ({pct}, {behavior.detection_count} detections)")
+        detections = f"{behavior.detection_count} detections"
+        if behavior.alerts_truncated:
+            detections += f" in the newest {_BEHAVIOR_ALERT_LIMIT} alerts"
+        parts.append(f"behavior: {verdict} ({pct}, {detections})")
     return "; ".join(parts)
 
 
