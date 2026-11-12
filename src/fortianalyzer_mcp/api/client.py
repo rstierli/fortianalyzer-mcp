@@ -1591,6 +1591,8 @@ class FortiAnalyzerClient:
         device: list[dict[str, str]] | None = None,
         period_start: str | None = None,
         period_end: str | None = None,
+        period_last_n: int | None = None,
+        without_schedule: bool = False,
     ) -> dict[str, Any]:
         """Run a report.
 
@@ -1603,15 +1605,25 @@ class FortiAnalyzerClient:
         Args:
             adom: ADOM name
             layout_id: Report layout ID (from get_report_layouts).
-                       A schedule must exist for this layout before running.
+                       The preset (flat) form names the layout's schedule, so
+                       one must exist; pass without_schedule=True when it
+                       does not.
             time_period: Preset time period for the report, e.g. "last-1-hours",
                 "last-7-days", "last-30-days", "last-4-weeks". Ignored when a
-                custom window (period_start + period_end) is supplied.
+                custom window (period_start + period_end) is supplied. With
+                without_schedule it must be a value of the ``schedule-param``
+                time-period enum (see below).
             device: Device filter list [{"devname": "myfw01"}, ...], or None.
             period_start: Custom window start as a FortiOS ``timedate`` string
                 ("HH:MM yyyy/mm/dd"). When both period_start and period_end are
                 given, the run uses a custom window instead of ``time_period``.
             period_end: Custom window end as a FortiOS ``timedate`` string.
+            period_last_n: The count for the generic ``last-n-hours``,
+                ``last-n-days`` and ``last-n-weeks`` periods. Only sent with
+                without_schedule.
+            without_schedule: Start a preset run through the nested
+                ``schedule-param`` object instead of naming a schedule. For a
+                layout that has no schedule; nothing is created.
 
         A custom window is delivered inside the nested ``schedule-param`` object
         with ``time-period="other"`` (the string form; the numeric schedule-
@@ -1620,6 +1632,13 @@ class FortiAnalyzerClient:
         and 8.0.0: the flat run form and the schedule-config object both fail to
         scope a custom window (ignored / empty report); only nested
         ``schedule-param`` with ``"other"`` produces the requested period.
+
+        The same object starts a preset run on a layout that has no schedule:
+        layout-id, device, filter-logic and time-period are enough, and no
+        schedule is created (measured on 7.6.7, issue #181). Its time-period
+        is the enum of the reference, not the flat form's string:
+        "last-1-hours" is rejected there ("parse object 'time-period' error"),
+        while "last-n-hours" with ``period-last-n`` 1 runs.
         """
         if period_start and period_end:
             # Custom window: nested schedule-param, no top-level "schedule".
@@ -1632,6 +1651,21 @@ class FortiAnalyzerClient:
                 "period-end": period_end,
             }
             params: dict[str, Any] = {
+                "apiver": API_VERSION,
+                "runfrom": "GUI",
+                "schedule-param": schedule_param,
+            }
+        elif without_schedule:
+            # Preset on a layout with no schedule: nested schedule-param too.
+            schedule_param = {
+                "layout-id": layout_id,
+                "device": device if device else "all",
+                "filter-logic": "all",
+                "time-period": time_period,
+            }
+            if period_last_n is not None:
+                schedule_param["period-last-n"] = period_last_n
+            params = {
                 "apiver": API_VERSION,
                 "runfrom": "GUI",
                 "schedule-param": schedule_param,
@@ -1739,7 +1773,8 @@ class FortiAnalyzerClient:
 
         FNDN: GET /config/adom/{adom}/sql-report/schedule
 
-        A schedule must exist for a layout before a report can be run.
+        The flat form of report_run names a layout's schedule. A layout
+        without one runs through schedule-param (without_schedule=True).
         The schedule name matches the layout-id.
 
         Args:
@@ -1807,7 +1842,9 @@ class FortiAnalyzerClient:
 
         FNDN: SET /report/adom/{adom}/config/schedule/{layout_id}
 
-        A schedule must be created before running a report for a layout.
+        For explicit use only. Running a report does not need it:
+        report_run(without_schedule=True) runs a layout that has no schedule,
+        and the report tools never create one (issue #181).
 
         Args:
             adom: ADOM name
