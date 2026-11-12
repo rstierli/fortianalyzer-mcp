@@ -157,7 +157,11 @@ class Settings(BaseSettings):
             "and a v1 token has no tag, so one a model re-cased decrypts to a "
             "different value instead of failing (a username's payload is "
             "case-sensitive). Set true only for a conversation that still "
-            "holds 2.13 tokens; the server logs when it accepts one."
+            "holds 2.13 tokens; the server logs when it accepts one. While "
+            "true, an unmarked address in an IP/MAC argument or filter "
+            "clause is read as a v1 token as well, without a log line, so "
+            "an address typed there is replaced by a different one; while "
+            "false it goes to FortiAnalyzer as typed."
         ),
     )
 
