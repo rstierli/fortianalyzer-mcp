@@ -2152,6 +2152,36 @@ class TestProjectionEchoIsNotAnOracle:
         )
 
 
+class TestNameFilterEchoIsNotAnOracle:
+    """``name_filter`` holds a value in one tool (a device name), so a token
+    there is resolved, and tools echo the argument under its own name. The
+    echo is typed TEXT, as ``fields_returned`` is: pass 2 puts the caller's
+    own text back (the second argument, real value -> the text sent)."""
+
+    def test_the_echo_carries_the_callers_token(self, masker: OutputMasker, engine: FPEEngine):
+        token = engine.mint("hostname", SRC_NAME)
+        reply = {"status": "success", "name_filter": SRC_NAME, "field_count": 0}
+
+        out = masker.mask_result(reply, {SRC_NAME: token})
+
+        assert out == {"status": "success", "name_filter": token, "field_count": 0}
+
+    def test_a_token_inside_a_longer_filter_is_put_back_in_place(
+        self, masker: OutputMasker, engine: FPEEngine
+    ):
+        token = engine.mint("hostname", SRC_NAME)
+        reply = {"name_filter": f"lab {SRC_NAME}"}
+
+        out = masker.mask_result(reply, {f"lab {SRC_NAME}": f"lab {token}", SRC_NAME: token})
+
+        assert out == {"name_filter": f"lab {token}"}
+
+    def test_an_ordinary_filter_is_echoed_as_typed(self, masker: OutputMasker):
+        reply = {"name_filter": "src", "fields": [{"name": "srcip"}]}
+
+        assert masker.mask_result(reply)["name_filter"] == "src"
+
+
 class TestAggregationArgEchoIsNotAnOracle:
     """``group_by``/``sample_by`` are the projection oracle again, worse.
 

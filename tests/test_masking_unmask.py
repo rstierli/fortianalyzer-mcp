@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from fortianalyzer_mcp.masking.fields import IP, TEXT
+from fortianalyzer_mcp.masking.fields import IP, NAMING_ARGS, TEXT
 from fortianalyzer_mcp.masking.fpe_engine import FPEEngine, begin_v2_verification_budget
 from fortianalyzer_mcp.masking.unmask import ArgUnmasker
 from fortianalyzer_mcp.masking.wrapper import OutputMasker, install_masking
@@ -482,6 +482,203 @@ class TestArgumentWalk:
     def test_non_string_values_untouched(self, unmasker: ArgUnmasker):
         args = {"limit": 50, "include_alerts": True, "adom": None}
         assert unmasker.unmask_args(args) == args
+
+
+class TestArgumentsThatNameAThing:
+    """A token under an argument that names a thing stays the caller's text.
+
+    An ADOM, a log type, a report id, a file, a time range: masking never
+    produces a value that belongs in one, so there is nothing to restore
+    there, and a tool echoes these arguments under keys the output side does
+    not scan. Resolved, each echo would hand back the plaintext of whatever
+    token the caller put in.
+    """
+
+    def test_the_list_is_exactly_these_names(self):
+        """``NAMING_ARGS`` is a security boundary in both directions, so a
+        change to it has to be made here as well, on purpose.
+
+        Take a name out and a token under it is resolved again: every tool
+        that echoes that argument under a key the output side does not scan
+        returns the plaintext of whatever token the caller sends. The sweep
+        in tests/test_masking_argument_echo.py does not catch every such
+        removal, because some of those echoes need a found record or a
+        written file that its fake appliance does not produce.
+
+        Put a name in and a token under it stops resolving in every tool
+        that spells an argument that way. If one of them takes a value
+        masking produces there, a search for a masked value comes back empty
+        with a success status.
+        """
+        assert set(NAMING_ARGS) == {
+            "adom",
+            "vdom",
+            "logtype",
+            "devtype",
+            "sweep_logtypes",
+            "impact_logtypes",
+            "time_range",
+            "context_time_range",
+            "vpn_time_range",
+            "timescale",
+            "tid",
+            "incident_id",
+            "alert_id",
+            "alert_ids",
+            "enrichment_uuid",
+            "filename",
+            "filename_prefix",
+            "output_dir",
+            "output_format",
+            "layout",
+            "title",
+            "skill",
+            "operation",
+            "action",
+            "severity",
+            "connection_status",
+            "filter_state",
+            "handler_type",
+            "detail_level",
+            "detectby",
+            "indicator_type",
+            "key_type",
+            "type",
+            "sort_order",
+            "stats_item",
+            "stats_items",
+            "attack_contains",
+            "attack_exact",
+            "cve",
+            "ttp",
+            "platform_filter",
+            "os_version_filter",
+        }
+        assert len(NAMING_ARGS) == len(set(NAMING_ARGS))
+
+    @pytest.mark.parametrize("key", sorted(NAMING_ARGS))
+    def test_a_token_of_any_kind_is_not_resolved(
+        self, unmasker: ArgUnmasker, engine: FPEEngine, key: str
+    ):
+        for vtype, real in [
+            ("hostname", "edge-fw-01"),
+            ("username", "jdoe"),
+            ("ip", "192.0.2.102"),
+            ("ip", "2001:db8::102"),
+            ("mac", "00:00:5e:00:53:01"),
+            ("domain", "portal.example.com"),
+            ("email_local", "alice@example.com"),
+        ]:
+            token = engine.mint(vtype, real)
+            assert token != real
+
+            assert unmasker.unmask_args({key: token}) == {key: token}
+
+    def test_a_token_inside_a_longer_value_is_not_resolved(
+        self, unmasker: ArgUnmasker, engine: FPEEngine
+    ):
+        phrase = f"devices {engine.mint('hostname', 'edge-fw-01')}"
+
+        assert unmasker.unmask_args({"operation": phrase}) == {"operation": phrase}
+
+    def test_the_rule_holds_inside_the_dispatchers_params(
+        self, unmasker: ArgUnmasker, engine: FPEEngine
+    ):
+        """Skill parameters arrive one level down, and nest further."""
+        host = engine.mint("hostname", "edge-fw-01")
+        domain = engine.mint("domain", "portal.example.com")
+        args = {
+            "skill": "hunt",
+            "params": {
+                "adom": host,
+                "time_range": host,
+                "indicator": {"type": host, "value": domain},
+            },
+        }
+
+        out = unmasker.unmask_args(args)
+
+        assert out["params"]["adom"] == host
+        assert out["params"]["time_range"] == host
+        assert out["params"]["indicator"] == {"type": host, "value": "portal.example.com"}
+
+    def test_every_item_of_a_list_stays_as_sent(self, unmasker: ArgUnmasker, engine: FPEEngine):
+        host = engine.mint("hostname", "edge-fw-01")
+        args = {"skill": "hunt", "params": {"sweep_logtypes": ["traffic", host]}}
+
+        assert unmasker.unmask_args(args) == args
+
+    @pytest.mark.parametrize("field", ["action", "filename", "severity"])
+    def test_a_filter_condition_on_a_log_field_of_the_same_name_still_resolves(
+        self, unmasker: ArgUnmasker, engine: FPEEngine, field: str
+    ):
+        """The rule is about argument names. A condition's field is a log
+        field, and its value is a filter value whatever the field is called."""
+        from fortianalyzer_mcp.query.filters import FilterCondition
+
+        host = engine.mint("hostname", "edge-fw-01")
+
+        as_dict = unmasker.unmask_args({"filters": [{"field": field, "op": "eq", "value": host}]})
+        as_model = unmasker.unmask_args(
+            {"filters": [FilterCondition(field=field, op="eq", value=host)]}
+        )
+        as_clause = unmasker.unmask_args({"filter": f'{field}=="{host}"'})
+
+        assert as_dict["filters"][0]["value"] == "edge-fw-01"
+        assert as_model["filters"][0].value == "edge-fw-01"
+        assert as_clause["filter"] == f'{field}=="edge-fw-01"'
+
+    def test_a_name_in_another_letter_case_is_the_same_argument(
+        self, unmasker: ArgUnmasker, engine: FPEEngine
+    ):
+        host = engine.mint("hostname", "edge-fw-01")
+        args = {"ADOM": host, "Time_Range": host}
+
+        assert unmasker.unmask_args(args) == args
+
+    def test_the_rule_holds_for_a_dict_inside_a_list(
+        self, unmasker: ArgUnmasker, engine: FPEEngine
+    ):
+        host = engine.mint("hostname", "edge-fw-01")
+        domain = engine.mint("domain", "portal.example.com")
+        args = {
+            "skill": "threat_intel",
+            "params": {"indicators": [{"type": host, "value": domain}]},
+        }
+
+        out = unmasker.unmask_args(args)
+
+        assert out["params"]["indicators"] == [{"type": host, "value": "portal.example.com"}]
+
+    def test_a_substring_of_a_name_is_a_value_and_resolves(
+        self, unmasker: ArgUnmasker, engine: FPEEngine
+    ):
+        """``name_filter`` narrows a list of field names in one tool and a
+        list of DEVICE names in another, and a device name is a value masking
+        produces. Left unresolved, a device search for a masked name returned
+        nothing with a success status. So it resolves like any value, and the
+        key that echoes it is typed instead (``FIELD_TYPES``)."""
+        host = engine.mint("hostname", "edge-fw-01")
+
+        assert unmasker.unmask_args({"name_filter": host}) == {"name_filter": "edge-fw-01"}
+        assert unmasker.unmask_args({"name_filter": f"lab {host}"}) == {
+            "name_filter": "lab edge-fw-01"
+        }
+
+    def test_no_argument_both_names_a_thing_and_holds_a_typed_value(self):
+        """A key the masker types holds a value by definition; listing it as
+        a name would stop its tokens resolving."""
+        from fortianalyzer_mcp.masking import fields
+
+        typed = (
+            set(fields.FIELD_TYPES)
+            | set(fields.DEVICE_IDENTITY_TYPES)
+            | set(fields.COMPOSITE_URL_FULL)
+            | set(fields.COMPOSITE_PREFIXED)
+        )
+
+        assert not typed & set(fields.NAMING_ARGS)
+        assert not set(fields.FIELD_NAME_ARGS) & set(fields.NAMING_ARGS)
 
 
 class TestRoundTrip:

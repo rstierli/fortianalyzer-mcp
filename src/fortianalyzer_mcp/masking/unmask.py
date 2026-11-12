@@ -23,6 +23,11 @@ Three resolution paths, in order of confidence:
    ``FAZ_MASKING_ACCEPT_V1_TOKENS`` set (see the first ambiguity below).
 3. **Everything else passes through untouched.**
 
+These paths are for an argument that holds a value, and "anywhere" means
+anywhere in one. An argument that names a field or a thing instead
+(``FIELD_NAME_ARGS`` and ``NAMING_ARGS`` in ``fields.py``) is left as the
+caller sent it, token or not.
+
 Failure policy mirrors the output side but inverts the default: if a
 value carries a marker and does not decrypt, that is an error worth
 surfacing (the caller sent a corrupted or foreign token) and the argument
@@ -83,6 +88,7 @@ from fortianalyzer_mcp.masking.fields import (
     IP,
     IP_OR_HOST,
     MAC,
+    NAMING_ARGS,
     SKIP_VALUES,
     TEXT,
 )
@@ -623,8 +629,19 @@ class ArgUnmasker:
     # -- recursive argument walk ------------------------------------------- #
 
     def unmask_args(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Resolve tokens across a tool's keyword arguments, at any depth."""
-        return {key: self._unmask_entry(key, value) for key, value in args.items()}
+        """Resolve tokens across a tool's keyword arguments, at any depth.
+
+        An argument that names a thing (``NAMING_ARGS``) is returned as sent,
+        whatever it holds. Every nested mapping comes back through here, so
+        that holds for the dispatcher's ``params`` as well. It is decided here
+        and not in ``_unmask_entry`` because that method also types a
+        structured filter condition's value by its FIELD name, and a log field
+        can share a name with one of these arguments.
+        """
+        return {
+            key: value if key.lower() in NAMING_ARGS else self._unmask_entry(key, value)
+            for key, value in args.items()
+        }
 
     def _unmask_entry(self, key: str, value: Any) -> Any:
         lowered = key.lower()
