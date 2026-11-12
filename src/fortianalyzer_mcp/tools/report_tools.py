@@ -9,6 +9,7 @@ import base64
 import io
 import logging
 import os
+import re
 import zipfile
 import zlib
 from datetime import datetime
@@ -126,6 +127,49 @@ def _custom_window_timedate(time_range: str) -> tuple[str, str]:
     return _format_period_timedate(tr["start"]), _format_period_timedate(tr["end"])
 
 
+# A layout that has no schedule runs through the run's nested ``schedule-param``
+# as well, and that object takes the time-period ENUM of the FNDN reference, not
+# the "last-<count>-<unit>" strings of the flat run form. Measured by the
+# maintainer on 7.6.7 (issue #181): "last-1-hours" is rejected there ("parse
+# object 'time-period' error"), "last-n-hours" plus "period-last-n": 1 runs.
+# "last-7-days" and "last-30-days" are enum members as they are; any other
+# count of hours, days or weeks goes in the generic form with period-last-n.
+_SCHEDULE_PARAM_ENUM_PERIODS = frozenset({"last-7-days", "last-30-days"})
+_COUNTED_PERIOD_RE = re.compile(r"last-([0-9]+)-(hours|days|weeks)")
+
+
+def _schedule_param_time_period(time_period: str) -> tuple[str, int | None]:
+    """(time-period, period-last-n) for a run through ``schedule-param``.
+
+    ``time_period`` is the API string from _convert_to_api_time_period.
+    """
+    if time_period in _SCHEDULE_PARAM_ENUM_PERIODS:
+        return time_period, None
+    counted = _COUNTED_PERIOD_RE.fullmatch(time_period)
+    if counted:
+        return f"last-n-{counted.group(2)}", int(counted.group(1))
+    # "other" (custom window) needs no mapping. A month count, or a period
+    # without a count, has no measured spelling here: it is sent unchanged so
+    # the appliance answers for it rather than this code guessing a window.
+    return time_period, None
+
+
+def _run_period_args(has_schedule: bool, time_period: str) -> dict[str, Any]:
+    """client.report_run arguments for the period, by the form the run takes.
+
+    A layout with a schedule runs as it always did: the flat form, which
+    names the schedule. A layout without one runs through ``schedule-param``.
+    """
+    if has_schedule:
+        return {"time_period": time_period}
+    sp_time_period, period_last_n = _schedule_param_time_period(time_period)
+    return {
+        "time_period": sp_time_period,
+        "period_last_n": period_last_n,
+        "without_schedule": True,
+    }
+
+
 async def _get_layout_id_by_title(client: Any, adom: str, title: str) -> int | None:
     """Look up layout-id by report title.
 
@@ -169,19 +213,21 @@ async def _get_layout_id_by_title(client: Any, adom: str, title: str) -> int | N
         return None
 
 
-async def _ensure_schedule_exists(client: Any, adom: str, layout_id: int) -> dict[str, Any]:
-    """Ensure a schedule exists for the given layout.
+async def _check_schedule_exists(client: Any, adom: str, layout_id: int) -> dict[str, Any]:
+    """Report whether a schedule exists for the given layout.
 
-    FortiAnalyzer requires a schedule to exist before running a report.
-    If no schedule exists, one is created automatically.
+    Read only: a missing schedule is never created (issue #181). The layout
+    runs either way, see _run_period_args.
 
     Args:
         client: FortiAnalyzer client
         adom: ADOM name
-        layout_id: Layout ID to check/create schedule for
+        layout_id: Layout ID to look the schedule up for
 
     Returns:
-        dict with schedule info or creation result
+        {"exists": True, "schedule": ...} or {"exists": False}. When the lookup
+        itself failed the dict carries an "error" key, and "exists" then says
+        nothing about the layout.
     """
     try:
         # Check if schedule already exists
@@ -194,14 +240,12 @@ async def _ensure_schedule_exists(client: Any, adom: str, layout_id: int) -> dic
             logger.info(f"Schedule exists for layout-id {layout_id}")
             return {"exists": True, "schedule": schedules[0]}
 
-        # Create schedule if it doesn't exist
-        logger.info(f"Creating schedule for layout-id {layout_id}")
-        create_result = await client.create_report_schedule(adom=adom, layout_id=layout_id)
-        return {"exists": False, "created": True, "result": create_result}
+        logger.info(f"No schedule for layout-id {layout_id}")
+        return {"exists": False}
 
     except Exception as e:
-        logger.warning(f"Failed to ensure schedule exists: {e}")
-        return {"exists": False, "created": False, "error": str(e)}
+        logger.warning(f"Failed to look up the schedule: {e}")
+        return {"exists": False, "error": str(e)}
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -212,7 +256,7 @@ async def list_report_layouts(adom: str | None = None) -> dict[str, Any]:
     When a user asks to "run a report", you need to search layouts, not templates.
 
     Each layout has a layout-id which is required to run reports.
-    A schedule must exist for the layout before it can be run (created automatically).
+    A layout runs whether or not it has a schedule; running one never creates a schedule.
 
     Args:
         adom: ADOM name (default: from config DEFAULT_ADOM)
@@ -345,7 +389,9 @@ async def run_report(
 
     This function:
     1. Looks up the layout-id by title (or uses directly if numeric)
-    2. Ensures a schedule exists for the layout (creates one if needed)
+    2. Checks whether the layout has a schedule. Nothing is created: a layout
+       with a schedule runs through it, a layout without one runs through the
+       run request's own schedule-param (all devices unless ``device`` is given)
     3. Runs the report and returns the TID for tracking
 
     Reports run asynchronously. Use get_running_reports() to check progress
@@ -366,7 +412,8 @@ async def run_report(
               "2026-06-27 00:00:00|2026-06-28 00:00:00".
 
     Returns:
-        dict with TID for tracking report progress
+        dict with TID for tracking report progress. ``schedule_created`` is
+        always False: this tool never creates a schedule.
 
     Example:
         >>> # Run by layout title
@@ -394,21 +441,18 @@ async def run_report(
                 }
             logger.info(f"Found layout-id {layout_id} for '{layout}'")
 
-        # Step 2: Ensure schedule exists for this layout
-        schedule_result = await _ensure_schedule_exists(client, adom, layout_id)
+        # Step 2: Look the layout's schedule up; it decides the form of the run.
+        schedule_result = await _check_schedule_exists(client, adom, layout_id)
         if schedule_result.get("error"):
             return {
                 "status": "error",
-                "message": f"Failed to ensure schedule exists: {schedule_result['error']}",
+                "message": f"Failed to look up the schedule: {schedule_result['error']}",
             }
-
-        schedule_created = not schedule_result.get("exists", False)
-        if schedule_created:
-            logger.info(f"Created new schedule for layout-id {layout_id}")
 
         # Step 3: Resolve the time range. A custom "start|end" range is passed
         # to the run's nested schedule-param as period-start/period-end; a
-        # preset uses the flat time-period string (see client.report_run).
+        # preset uses the flat time-period string when the layout has a
+        # schedule (see _run_period_args and client.report_run).
         time_period = _convert_to_api_time_period(time_range)
         period_start = period_end = None
         if time_period == "other":
@@ -422,10 +466,10 @@ async def run_report(
         result = await client.report_run(
             adom=adom,
             layout_id=layout_id,
-            time_period=time_period,
             device=device_filter,
             period_start=period_start,
             period_end=period_end,
+            **_run_period_args(schedule_result["exists"], time_period),
         )
 
         tid = result.get("tid") if isinstance(result, dict) else None
@@ -444,7 +488,7 @@ async def run_report(
             "layout_id": layout_id,
             "adom": adom,
             "time_period": time_period,
-            "schedule_created": schedule_created,
+            "schedule_created": False,
             "message": f"Report started. Use get_running_reports() to check progress, then get_report_data(tid='{tid}') to download.",
         }
     except Exception as e:
@@ -670,7 +714,9 @@ async def run_and_wait_report(
 
     Convenience function that:
     1. Looks up the layout-id by title
-    2. Ensures a schedule exists
+    2. Checks whether the layout has a schedule. Nothing is created: a layout
+       with a schedule runs through it, a layout without one runs through the
+       run request's own schedule-param (all devices unless ``device`` is given)
     3. Runs the report
     4. Polls until completion or timeout
 
@@ -685,13 +731,10 @@ async def run_and_wait_report(
             - Short format: "1-hour", "6-hour", "12-hour", "24-hour",
               "1-day", "7-day", "30-day", "90-day"
             - API format: "last-7-days", "last-30-days", "last-4-weeks"
-            - Custom: "2024-01-01 00:00:00|2024-01-02 00:00:00" — applied via
-              the layout's SHARED schedule config object, held in place until
-              generation completes, then restored. Concurrent custom-window
-              runs of the same layout race on that object. The result carries
-              requested_window plus a warning: verify the produced report
-              actually covers the window (generator consumption is still
-              being validated live).
+            - Custom "start|end" range, e.g.
+              "2026-06-27 00:00:00|2026-06-28 00:00:00". The window travels in
+              the run request itself; no schedule config is written. The
+              result carries requested_window.
         timeout: Maximum wait time in seconds (default: 300)
 
     Returns:
@@ -725,12 +768,12 @@ async def run_and_wait_report(
                 }
             logger.info(f"Found layout-id {layout_id} for '{layout}'")
 
-        # Step 2: Ensure schedule exists
-        schedule_result = await _ensure_schedule_exists(client, adom, layout_id)
+        # Step 2: Look the layout's schedule up; it decides the form of the run.
+        schedule_result = await _check_schedule_exists(client, adom, layout_id)
         if schedule_result.get("error"):
             return {
                 "status": "error",
-                "message": f"Failed to ensure schedule exists: {schedule_result['error']}",
+                "message": f"Failed to look up the schedule: {schedule_result['error']}",
             }
 
         # Step 3: Resolve the time range and device filter. A custom "start|end"
@@ -750,10 +793,10 @@ async def run_and_wait_report(
         run_result = await client.report_run(
             adom=adom,
             layout_id=layout_id,
-            time_period=time_period,
             device=device_filter,
             period_start=period_start,
             period_end=period_end,
+            **_run_period_args(schedule_result["exists"], time_period),
         )
 
         tid = run_result.get("tid") if isinstance(run_result, dict) else None
