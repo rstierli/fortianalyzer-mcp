@@ -8,7 +8,7 @@ import pytest
 
 from fortianalyzer_mcp.masking.fields import IP, NAMING_ARGS, TEXT
 from fortianalyzer_mcp.masking.fpe_engine import FPEEngine, begin_v2_verification_budget
-from fortianalyzer_mcp.masking.unmask import ArgUnmasker
+from fortianalyzer_mcp.masking.unmask import ArgUnmasker, recording_resolved_values
 from fortianalyzer_mcp.masking.wrapper import OutputMasker, install_masking
 from fortianalyzer_mcp.query.filters import FilterCondition
 from fortianalyzer_mcp.utils.errors import ValidationError
@@ -1449,6 +1449,80 @@ class TestLiteralsReadByTheMeasuredRule:
         )
 
 
+class TestWhatIsRecordedForACall:
+    """The record the output side works from: real value -> the text sent."""
+
+    def test_a_whole_token_is_one_entry(self, unmasker: ArgUnmasker, engine: FPEEngine) -> None:
+        token = engine.mint("hostname", "edge-fw-01")
+
+        with recording_resolved_values() as record:
+            unmasker.unmask_args({"device": token})
+
+        assert record == {"edge-fw-01": token}
+
+    def test_each_token_inside_a_longer_value_has_its_own_entry(
+        self, unmasker: ArgUnmasker, engine: FPEEngine
+    ) -> None:
+        """Beside the whole value, so that an echo of one part of it can be
+        put back as the token that part came from."""
+        host = engine.mint("hostname", "edge-fw-01")
+        user = engine.mint("username", "jsmith")
+
+        with recording_resolved_values() as record:
+            out = unmasker.unmask_args({"device": f"core[{host}] for {user}"})
+
+        assert out == {"device": "core[edge-fw-01] for jsmith"}
+        assert record == {
+            "core[edge-fw-01] for jsmith": f"core[{host}] for {user}",
+            "edge-fw-01": host,
+            "jsmith": user,
+        }
+
+    def test_a_token_inside_a_filter_literal_has_its_own_entry(
+        self, unmasker: ArgUnmasker, engine: FPEEngine
+    ) -> None:
+        host = engine.mint("hostname", "edge-fw-01")
+
+        with recording_resolved_values() as record:
+            unmasker.unmask_args({"filter": f'msg like "%link down on {host} port1%"'})
+
+        assert record["edge-fw-01"] == host
+
+    def test_the_host_and_the_tail_of_a_url_have_their_own_entries(
+        self, unmasker: ArgUnmasker, masker: OutputMasker
+    ) -> None:
+        real = "https://portal.example.com/login/step2"
+        token = masker.mask_result({"url": real})["url"]
+        host_token, _, tail_token = token.removeprefix("https://").partition("/")
+
+        with recording_resolved_values() as record:
+            unmasker.unmask_args({"url": token})
+
+        assert record == {
+            real: token,
+            "portal.example.com": host_token,
+            "/login/step2": f"/{tail_token}",
+        }
+
+    def test_a_value_is_recorded_without_its_outer_whitespace(
+        self, unmasker: ArgUnmasker, engine: FPEEngine
+    ) -> None:
+        """A tool strips an argument before it quotes it, and the output side
+        looks for the recorded value as it stands."""
+        host = engine.mint("hostname", "edge-fw-01")
+
+        with recording_resolved_values() as record:
+            unmasker.unmask_args({"device": f"  core.{host}  "})
+
+        assert record == {"core.edge-fw-01": f"core.{host}", "edge-fw-01": host}
+
+    def test_a_value_without_a_token_records_nothing(self, unmasker: ArgUnmasker) -> None:
+        with recording_resolved_values() as record:
+            unmasker.unmask_args({"device": "core[edge-fw-01]", "url": "https://example.com/a"})
+
+        assert record == {}
+
+
 class TestValueResolvedForACallIsMaskedOnTheWayOut:
     """What the wrapper resolved for a call goes back out as the caller's token.
 
@@ -1493,11 +1567,32 @@ class TestValueResolvedForACallIsMaskedOnTheWayOut:
             return {"status": "success", "pivot": filter.split(" and ")[0]}
 
         @mcp.tool(annotations=READ_ONLY)
+        async def check_queue(queue: str) -> dict:
+            """A validator that takes its argument apart and quotes each part."""
+            import re
+
+            parts = [f"'{part}'" for part in re.split(r"[\[\]\s]+", queue) if part]
+            return {"status": "error", "message": f"Invalid queue, read as {', '.join(parts)}"}
+
+        @mcp.tool(annotations=READ_ONLY)
+        async def check_site(url: str) -> dict:
+            """A refusal that names the host of a URL and its path, apart."""
+            from urllib.parse import urlsplit
+
+            parts = urlsplit(url)
+            return {
+                "status": "error",
+                "message": f"no route to host '{parts.hostname}' for path '{parts.path}'",
+            }
+
+        @mcp.tool(annotations=READ_ONLY)
         def count_rows_sync(filter: str) -> dict:
             """The same count as a plain function: the wrapper has two paths."""
             return {"status": "success", "total": 4, "filter": filter}
 
         return {
+            "check_queue": check_queue,
+            "check_site": check_site,
             "count_rows": count_rows,
             "count_rows_sync": count_rows_sync,
             "first_clause": first_clause,
@@ -1567,6 +1662,40 @@ class TestValueResolvedForACallIsMaskedOnTheWayOut:
         assert tools["seen"]["user"] == "jsmith"
         assert "jsmith" not in result["message"]
         assert token in result["message"]
+
+    @pytest.mark.parametrize(
+        ("vtype", "real"),
+        [
+            ("hostname", "edge-fw-01.example.net"),
+            ("username", "jsmith"),
+            ("ip", "192.0.2.102"),
+            ("ip", "2001:db8::102"),
+            ("mac", "00:00:5e:00:53:01"),
+        ],
+    )
+    @pytest.mark.parametrize("shape", ["core[{}]", "{}[core", "core {} east"])
+    async def test_one_part_of_a_longer_value_quoted_back_carries_the_token(
+        self, tools: dict, engine: FPEEngine, vtype: str, real: str, shape: str
+    ) -> None:
+        """A token inside a longer value was recorded only with the whole
+        value, so an error that quoted one part of it held the plaintext."""
+        token = engine.mint(vtype, real)
+
+        result = await tools["check_queue"](queue=shape.format(token))
+
+        assert real not in result["message"]
+        assert token in result["message"]
+
+    async def test_the_host_and_the_path_of_a_url_quoted_apart_carry_their_tokens(
+        self, tools: dict, masker: OutputMasker
+    ) -> None:
+        real = "https://portal.example.com/login/step2"
+        token = masker.mask_result({"logs": [{"url": real}]})["logs"][0]["url"]
+
+        result = await tools["check_site"](url=token)
+
+        assert "portal.example.com" not in result["message"]
+        assert "step2" not in result["message"]
 
     async def test_one_call_does_not_mask_for_the_next(
         self, tools: dict, engine: FPEEngine

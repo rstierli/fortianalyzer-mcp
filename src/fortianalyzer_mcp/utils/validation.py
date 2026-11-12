@@ -313,10 +313,14 @@ def validate_device_name(device: str) -> str:
     if "[" in device:
         base_name = device.split("[")[0]
         vdom_part = device.split("[")[1].rstrip("]")
+        # Both refusals quote the argument whole, not the half that failed.
+        # With masking on, the output side puts the caller's token back where
+        # it finds the value the token resolved to, and it finds a value as
+        # it was sent: one half of the argument is not always that.
         if not DEVICE_NAME_PATTERN.match(base_name):
-            raise ValidationError(f"Invalid device name '{base_name}'")
+            raise ValidationError(f"Invalid device name in '{device}'")
         if not ADOM_PATTERN.match(vdom_part):
-            raise ValidationError(f"Invalid VDOM name '{vdom_part}'")
+            raise ValidationError(f"Invalid VDOM name in '{device}'")
         return device
 
     if not DEVICE_NAME_PATTERN.match(device):

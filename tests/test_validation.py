@@ -320,6 +320,16 @@ class TestValidateDeviceName:
         with pytest.raises(ValidationError, match="Invalid VDOM name"):
             validate_device_name("firewall[root/bad]")
 
+    @pytest.mark.parametrize("name", ["fire/wall[root]", "firewall[root/bad]"])
+    def test_a_refused_name_with_a_vdom_suffix_is_quoted_whole(self, name: str):
+        """Not the half that failed. Output masking recognises a value it has
+        to mask as the argument that was sent, and one half of the argument
+        is not that."""
+        with pytest.raises(ValidationError) as refusal:
+            validate_device_name(name)
+
+        assert f"'{name}'" in str(refusal.value)
+
 
 # =============================================================================
 # Device Serial Validation Tests

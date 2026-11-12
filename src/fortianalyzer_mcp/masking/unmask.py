@@ -207,6 +207,12 @@ def filter_fields(expression: str) -> list[str]:
 #: the values the RESULT carries under a typed key. Without this record a
 #: count, an empty page or a projection that leaves the field out hands the
 #: caller the plaintext of the token it has just sent.
+#:
+#: A value is recorded whole, and so is each token found inside a longer
+#: value (``_resolve_embedded``, and the host and tail of a URL). An echo is
+#: not always the whole argument: a validator takes ``name[part]`` apart and
+#: quotes one half. The output side looks for a recorded value as it stands,
+#: so with the whole value alone that half came back as plaintext.
 _RESOLVED_FOR_CALL: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
     "faz_masking_resolved_for_call", default=None
 )
@@ -229,10 +235,14 @@ def recording_resolved_values() -> Iterator[dict[str, str]]:
 
 
 def _note_resolved(sent: str, resolved: str) -> None:
-    """Remember that ``sent`` was resolved to ``resolved`` for this call."""
+    """Remember that ``sent`` was resolved to ``resolved`` for this call.
+
+    Both without their outer whitespace: a tool strips an argument before it
+    quotes it, and the output side looks for the value as it is recorded.
+    """
     record = _RESOLVED_FOR_CALL.get()
     if record is not None and resolved != sent:
-        record.setdefault(resolved, sent.strip())
+        record.setdefault(resolved.strip(), sent.strip())
 
 
 class ArgUnmasker:
@@ -277,6 +287,10 @@ class ArgUnmasker:
             return value
         return value
 
+    def _resolve_embedded(self, text: str) -> str:
+        """Resolve the tokens inside ``text``, recording each beside the whole."""
+        return self._engine.unmask_embedded(text, _note_resolved)
+
     def resolve_scalar(self, value: str, vtype: str | None = None) -> str:
         """Resolve one argument value. ``vtype`` comes from the field name."""
         resolved = self._resolve_scalar(value, vtype)
@@ -295,7 +309,7 @@ class ArgUnmasker:
             # opens here exactly as it would there. The scan runs on the
             # stripped value because a token resolved as a whole string has
             # always come back stripped.
-            resolved = self._engine.unmask_embedded(candidate)
+            resolved = self._resolve_embedded(candidate)
             return resolved if resolved != candidate else value
         try:
             marked = self._unmask_marked(candidate)
@@ -312,7 +326,7 @@ class ArgUnmasker:
                 # specifically -- a bare scalar or a HOSTNAME-typed field
                 # (devvds) gets none of this and keeps failing closed below,
                 # since there the whole value is supposed to BE the token.
-                return self._engine.unmask_embedded(value)
+                return self._resolve_embedded(value)
             # Marker present but payload will not decrypt: leave it alone so
             # the downstream validator rejects it instead of us guessing.
             logger.warning("argument carries a masking marker but does not decrypt; passed through")
@@ -344,7 +358,7 @@ class ArgUnmasker:
         # same in-place treatment inbound. Reuses the whole-string token's
         # own shape/tag verification (``FPEEngine.unmask_embedded``); a
         # value with nothing embedded comes back unchanged.
-        return self._engine.unmask_embedded(value)
+        return self._resolve_embedded(value)
 
     # -- masked URLs (#40 url/referralurl) ---------------------------------- #
 
@@ -427,6 +441,10 @@ class ArgUnmasker:
                 return value
         if resolved_host == host and resolved_tail == tail:
             return value
+        # Each part beside the whole URL, which the callers record: a reply
+        # can name the host or the path alone.
+        _note_resolved(host, resolved_host)
+        _note_resolved(tail, resolved_tail)
         if ":" in resolved_host:  # IPv6 literal: re-bracket
             resolved_host = f"[{resolved_host}]"
         netloc = f"{resolved_host}:{port}" if port is not None else resolved_host
