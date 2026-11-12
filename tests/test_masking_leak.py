@@ -1174,6 +1174,190 @@ class TestDocumentedGaps:
         masked = masker.mask_result({"socialid": {"data": [{"srcip": ENDPOINT_IP}]}})
         assert masked["socialid"]["data"][0]["srcip"] != ENDPOINT_IP
 
+    def test_a_short_value_resolved_from_an_argument_is_not_masked_in_prose(
+        self, masker: OutputMasker, engine: FPEEngine
+    ):
+        """Pass 2 does not look for a value under four characters inside free
+        text, whether a row carried it or the caller's token resolved to it
+        (the second argument, real value -> the text that was sent): a name
+        that short would match inside unrelated words."""
+        token = engine.mint("username", "bob")
+        reply = {"status": "error", "message": "nothing is named 'bob'"}
+
+        assert masker.mask_result(reply, {"bob": token}) == reply
+
+
+class TestAResolvedValueIsNotKeptReadable:
+    """What the caller's token resolved to never leaves as a kept device name.
+
+    With ``FAZ_MASK_DEVICE_IDENTITY`` off, device identity stays readable:
+    every value under a device-identity key joins the keep set and is spared
+    under every other key and in prose. A reply that named what the caller
+    asked for under such a key therefore handed back the plaintext of the
+    token the caller had sent, whatever kind of token it was. The record of
+    what the call resolved (the second argument, real value -> the text that
+    was sent) now wins: such a value goes back out as the caller's own text,
+    under the device-identity key as well.
+    """
+
+    @pytest.mark.parametrize(
+        ("vtype", "real"),
+        [
+            ("hostname", "fw-core.example.net"),
+            ("hostname", "fgt-branch-01"),
+            ("username", "jdoe-probe"),
+            ("domain", "portal.example.com"),
+            ("ip", "192.0.2.77"),
+            ("ip", "2001:db8::77"),
+        ],
+    )
+    def test_it_is_the_callers_token_under_devname_and_in_the_message(
+        self, masker: OutputMasker, engine: FPEEngine, vtype: str, real: str
+    ):
+        token = engine.mint(vtype, real)
+        reply = {
+            "status": "error",
+            "devname": real,
+            "message": f"Device '{real}' has no logs in ADOM 'root'.",
+        }
+
+        out = masker.mask_result(reply, {real: token})
+
+        assert survivors(out, [real]) == {}
+        assert out["devname"] == token
+        assert out["message"] == f"Device '{token}' has no logs in ADOM 'root'."
+
+    @pytest.mark.parametrize(
+        ("reply", "expected"),
+        [
+            ({"devname": "{real}"}, {"devname": "{token}"}),
+            ({"devname": "{real},fgt-branch-02"}, {"devname": "{token},fgt-branch-02"}),
+            ({"devs": ["{real}", "fgt-branch-02"]}, {"devs": ["{token}", "fgt-branch-02"]}),
+            ({"devvds": "{real}[root]"}, {"devvds": "{token}[root]"}),
+            (
+                {"devvds": "fgt-branch-02[root],{real}[dmz]"},
+                {"devvds": "fgt-branch-02[root],{token}[dmz]"},
+            ),
+            (
+                {"name": "{real}", "sn": "FGT60F0000000001"},
+                {"name": "{token}", "sn": "FGT60F0000000001"},
+            ),
+            (
+                {"candidates": [{"devid": "FGT60F0000000001", "devname": "{real}"}]},
+                {"candidates": [{"devid": "FGT60F0000000001", "devname": "{token}"}]},
+            ),
+            ({"devid": {"devname": "{real}"}}, {"devid": {"devname": "{token}"}}),
+            ({"csf": "{real}"}, {"csf": "{token}"}),
+            (
+                {"breakdowns": {"devname": [{"value": "{real}", "hits": 3}]}},
+                {"breakdowns": {"devname": [{"value": "{token}", "hits": 3}]}},
+            ),
+            (
+                {"breakdowns": {"devvds": [{"value": "{real}[root]", "hits": 3}]}},
+                {"breakdowns": {"devvds": [{"value": "{token}[root]", "hits": 3}]}},
+            ),
+        ],
+        ids=[
+            "whole",
+            "comma-joined",
+            "list",
+            "device[vdom]",
+            "device[vdom] joined",
+            "device record name",
+            "nested",
+            "under another identity key",
+            "csf",
+            "breakdown bucket",
+            "breakdown bucket device[vdom]",
+        ],
+    )
+    def test_every_form_a_device_identity_value_takes_is_covered(
+        self, masker: OutputMasker, engine: FPEEngine, reply: Any, expected: Any
+    ):
+        """One case per unit ``_device_identity_values`` reads a kept value
+        from, and the buckets of a breakdown by a device-identity field,
+        which the flag leaves readable without the keep set. A unit left out
+        here would hold the resolved value in clear."""
+        real = "fgt-branch-01"
+        token = engine.mint("hostname", real)
+
+        def fill(node: Any) -> Any:
+            if isinstance(node, dict):
+                return {key: fill(value) for key, value in node.items()}
+            if isinstance(node, list):
+                return [fill(item) for item in node]
+            return node.format(real=real, token=token) if isinstance(node, str) else node
+
+        assert masker.mask_result(fill(reply), {real: token}) == fill(expected)
+
+    def test_it_is_not_spared_where_the_keep_set_is_consulted(
+        self, masker: OutputMasker, engine: FPEEngine
+    ):
+        """A kept value is spared under typed keys, in ``target`` and in
+        prose. A resolved one is masked in each of them."""
+        real = "fgt-branch-01"
+        token = engine.mint("hostname", real)
+        reply = {
+            "devname": real,
+            "srcname": real,
+            "target": [{"name": "device", "value": real}],
+            "msg": f"logs received from {real}",
+        }
+
+        out = masker.mask_result(reply, {real: token})
+
+        assert survivors(out, [real]) == {}
+        assert out["srcname"] == token
+        assert out["msg"] == f"logs received from {token}"
+
+    def test_a_device_listed_in_another_letter_case_is_the_same_device(
+        self, masker: OutputMasker, engine: FPEEngine
+    ):
+        """The engine lowercases a hostname before it encrypts, so what a
+        device token resolves to is never the spelling an uppercase device is
+        listed under."""
+        token = engine.mint("hostname", "FGT-BRANCH-01")
+        reply = {
+            "device": "fgt-branch-01",
+            "logs": [{"devname": "FGT-BRANCH-01", "msg": "link up on FGT-BRANCH-01"}],
+        }
+
+        out = masker.mask_result(reply, {"fgt-branch-01": token})
+
+        assert survivors(out, ["FGT-BRANCH-01", "fgt-branch-01"]) == {}
+        assert out["device"] == token
+        assert out["logs"][0]["devname"] == token
+
+    def test_a_device_name_no_token_resolved_to_stays_readable(
+        self, masker: OutputMasker, engine: FPEEngine
+    ):
+        """The control: device identity is left readable by default, in a
+        call that resolved nothing and in one that resolved something else."""
+        reply = {
+            "status": "error",
+            "devname": DEV_NAME,
+            "srcname": DEV_NAME,
+            "devvds": f"{DEV_NAME}[{VDOM}]",
+            "breakdowns": {"devname": [{"value": DEV_NAME, "hits": 3}]},
+            "message": f"Device '{DEV_NAME}' has no logs in ADOM 'root'.",
+        }
+        other = engine.mint("hostname", SRC_NAME)
+
+        assert masker.mask_result(reply) == reply
+        assert masker.mask_result(reply, {}) == reply
+        assert masker.mask_result(reply, {SRC_NAME: other}) == reply
+
+    def test_with_device_identity_masked_nothing_changes(
+        self, full_masker: OutputMasker, engine: FPEEngine
+    ):
+        token = engine.mint("hostname", DEV_NAME)
+        reply = {"devname": DEV_NAME, "message": f"Device '{DEV_NAME}' has no logs."}
+
+        assert full_masker.mask_result(reply, {DEV_NAME: token}) == {
+            "devname": token,
+            "message": f"Device '{token}' has no logs.",
+        }
+
 
 class TestHandlerDescription:
     def test_embedded_ip_and_email_are_masked_in_the_description(self, masker: OutputMasker):

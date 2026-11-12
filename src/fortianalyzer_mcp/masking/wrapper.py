@@ -1543,14 +1543,113 @@ class OutputMasker:
         ``resolved`` is what the argument side resolved for this call, real
         value -> the text the caller sent. It seeds the map pass 2 works
         from, so an echo of such a value goes back out as the caller's own
-        token even when no row of the result carries it.
+        token even when no row of the result carries it. It also wins over
+        the device-identity keep set (:meth:`_resolved_leaves_keep_set`).
         """
         mapping: dict[str, str] = _TrackedMapping()
         for real, sent in (resolved or {}).items():
             mapping[real] = sent
         keep = frozenset() if self._mask_device_identity else self._device_identity_values(obj)
+        if resolved and not self._mask_device_identity:
+            obj, keep = self._resolved_leaves_keep_set(obj, keep, resolved)
         staged = self._mask_structured(obj, mapping, keep)
         return self._mask_free_text(staged, mapping, keep)
+
+    def _resolved_leaves_keep_set(
+        self, obj: Any, keep: frozenset[str], resolved: dict[str, str]
+    ) -> tuple[Any, frozenset[str]]:
+        """Take what this call resolved out of the keep set and its keys.
+
+        The keep set leaves a device-identity value readable under every
+        key. A tool that names what it was asked for under such a key (a
+        lookup that finds no such device answers with ``devname``) thereby
+        put the value the caller's token resolved to into that set, and the
+        reply held the plaintext of the token, under ``devname`` and in the
+        message, for a token of any kind. A value this call resolved is the
+        caller's token wherever it goes back out. So it leaves the set, which
+        lets every route that consults the set mask it as it masks anything
+        else, and the device-identity keys themselves, which nothing masks
+        with the flag off, are rewritten to the text the caller sent.
+
+        Compared without case, as :meth:`_is_kept` compares every type but a
+        username: the engine lowercases a hostname before it encrypts, so
+        what a device token resolves to is never the spelling an uppercase
+        device is listed under. The record carries no type, so a username is
+        folded here too, which can only mask more.
+
+        The rewrite reads the same units, under the same keys, as
+        :meth:`_device_identity_values` collects from, and has to keep doing
+        so: a unit that walk learns and this one does not would leave a
+        resolved value readable there. Two differences. ``csf`` needs no
+        rewrite: it is typed whatever the flag says, so pass 1 masks it once
+        the value is out of the set. And the buckets of a breakdown by a
+        device-identity field are rewritten although that walk does not
+        collect them: the flag leaves them readable just the same.
+        """
+        sent_for = {real.lower(): sent for real, sent in resolved.items()}
+
+        def swap(text: str) -> str:
+            return sent_for.get(text.strip().lower(), text)
+
+        def swap_device(part: str) -> str:
+            """``device[vdom]``: the device half, which is the half collected."""
+            match = _DEVVDS_RE.match(part.strip())
+            if match is None or match.group("dev").lower() not in sent_for:
+                return swap(part)
+            return f"{swap(match.group('dev'))}[{match.group('vdom')}]"
+
+        def swap_joined(key: str, text: str) -> str:
+            unit = swap_device if key in COMPOSITE_DEVICE_VDOM else swap
+            return ",".join(unit(part) for part in text.split(","))
+
+        def swap_buckets(dimension: Any, buckets: Any) -> Any:
+            """``breakdowns``: each bucket's ``value`` under an identity dimension."""
+            name = dimension.strip().lower() if isinstance(dimension, str) else ""
+            if name not in DEVICE_IDENTITY_TYPES and name not in COMPOSITE_DEVICE_VDOM:
+                return walk(buckets)
+            if not isinstance(buckets, list):
+                return buckets
+            return [
+                {
+                    bkey: swap_joined(name, bvalue)
+                    if bkey.lower() == "value" and isinstance(bvalue, str)
+                    else bvalue
+                    for bkey, bvalue in bucket.items()
+                }
+                if isinstance(bucket, dict)
+                else bucket
+                for bucket in buckets
+            ]
+
+        def walk(node: Any) -> Any:
+            if isinstance(node, dict):
+                shaped = _device_name_in(node)
+                out: dict[str, Any] = {}
+                for key, value in node.items():
+                    lowered = key.lower()
+                    if key == shaped:
+                        out[key] = swap(value)
+                    elif lowered in DEVICE_IDENTITY_TYPES and isinstance(value, str):
+                        out[key] = swap_joined(lowered, value)
+                    elif lowered in DEVICE_IDENTITY_TYPES and isinstance(value, list | tuple):
+                        out[key] = [
+                            swap(item) if isinstance(item, str) else walk(item) for item in value
+                        ]
+                    elif lowered in COMPOSITE_DEVICE_VDOM and isinstance(value, str):
+                        out[key] = swap_joined(lowered, value)
+                    elif lowered in COMPOSITE_BREAKDOWNS and isinstance(value, dict):
+                        out[key] = {
+                            dimension: swap_buckets(dimension, buckets)
+                            for dimension, buckets in value.items()
+                        }
+                    else:
+                        out[key] = walk(value)
+                return out
+            if isinstance(node, list):
+                return [walk(item) for item in node]
+            return node
+
+        return walk(obj), frozenset(value for value in keep if value.lower() not in sent_for)
 
     def _device_identity_values(self, obj: Any) -> frozenset[str]:
         """Device-identity values present in this response, pre-collected.
