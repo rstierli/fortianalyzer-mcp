@@ -23,8 +23,9 @@ is nowhere in the reply, keys included.
 No appliance: the client is a fake that answers every call with an empty
 success. The sweep therefore cannot see an echo that only a found record or a
 written file produces, nor one that depends on the value of a second
-parameter. It looks for the plaintext whole, so a reply that holds only a cut
-of it passes.
+parameter. It looks for the plaintext whole, as it stands or with a backslash
+before some of its characters, which is how a substring filter writes it. A
+reply that holds only a cut of it passes.
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ import os
 import re
 import types
 import typing
+import urllib.parse
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -46,7 +48,7 @@ from pydantic import BaseModel
 import fortianalyzer_mcp.server as server_module
 import fortianalyzer_mcp.utils.config as config_module
 from fortianalyzer_mcp.masking.fpe_engine import FPEEngine
-from fortianalyzer_mcp.masking.wrapper import install_masking
+from fortianalyzer_mcp.masking.wrapper import OutputMasker, install_masking
 from fortianalyzer_mcp.query.filters import FilterCondition
 from fortianalyzer_mcp.skills.catalog import SKILLS
 from fortianalyzer_mcp.tool_annotations import READ_ONLY
@@ -62,14 +64,20 @@ CUSTOM_RANGE = "2024-01-01 00:00:00|2024-01-02 00:00:00"
 #: and the addresses and accepts the plain name, and an address validator
 #: accepts only an address. Between them a parameter is swept on its refusal
 #: and past it. All are longer than the four characters pass 2 needs before it
-#: looks for a value in prose.
+#: looks for a value in prose. One holds an underscore, which a substring
+#: filter does not write as it stands.
 PLAINTEXTS = {
     "fw-core.example.net": "hostname",
     "fw-core-01": "hostname",
     "192.0.2.77": "ip",
     "2001:db8::77": "ip",
     "jdoe-probe": "username",
+    "svc_bak_probe": "username",
 }
+
+#: Every operator of a structured filter condition. Each is compiled into the
+#: filter its own way, and a tool echoes the filter it built.
+FILTER_OPS = typing.get_args(FilterCondition.model_fields["op"].annotation)
 
 #: How the token sits in the argument: alone, inside a phrase, and inside a
 #: bracketed value, which is the shape a validator takes apart before it
@@ -221,7 +229,9 @@ def _slots(annotation: Any, text: str) -> Iterator[Any]:
         yield {"probe": text}
     elif annotation is FilterCondition:
         # Tools take conditions as models; the protocol layer builds them.
-        yield FilterCondition(field="srcname", op="eq", value=text)
+        for op in FILTER_OPS:
+            value = [text] if op in ("in", "not_in") else text
+            yield FilterCondition(field="srcname", op=op, value=value)
     elif isinstance(annotation, type) and issubclass(annotation, BaseModel):
         for name, field in annotation.model_fields.items():
             for inner in _slots(field.annotation, text):
@@ -258,11 +268,19 @@ def _strings(node: Any, path: str = "$") -> Iterator[tuple[str, str]]:
 def _paths_holding(reply: Any, plaintext: str) -> list[str]:
     """Where ``plaintext`` sits in ``reply``, as key paths without indexes.
 
-    As a substring of any string leaf and of any dict key, whatever case.
+    As a substring of any string leaf and of any dict key, whatever case, and
+    also where the reply spells it another way and it is as readable: with a
+    backslash before some of its characters, which is how a substring filter
+    writes ``_`` and ``%``, or with its percent escapes decoded.
     """
-    needle = plaintext.lower()
+    needles = {plaintext.lower(), urllib.parse.unquote(plaintext).lower()}
     return sorted(
-        {re.sub(r"\[\d+\]", "[]", path) for path, text in _strings(reply) if needle in text.lower()}
+        {
+            re.sub(r"\[\d+\]", "[]", path)
+            for path, text in _strings(reply)
+            for needle in needles
+            if needle in text.lower() or needle in text.lower().replace("\\", "")
+        }
     )
 
 
@@ -572,6 +590,131 @@ class TestAnEchoOfOnePartOfAValue:
                 assert [piece for piece in pieces if piece in text] == [], pad
 
 
+def _token_under(key: str, value: str) -> str:
+    """The token a caller holds for ``value``: what a row shows under ``key``."""
+    token = OutputMasker(FPEEngine(KEY), mask_device_identity=True).mask_result({key: value})[key]
+    assert isinstance(token, str) and value not in token
+    return token
+
+
+#: Values a ``like`` clause does not hold as they stand, with a log field
+#: that carries each: ``like`` reads ``_`` and ``%`` as wildcards.
+RESPELLED = {
+    "svc_bak_probe": "user",
+    "fw_core_01": "srcname",
+    "my_dom.example.net": "hostname",
+    "https://www.example.net/a_b/c%20d?x=1": "url",
+}
+
+
+@skip_if_dynamic_mode
+class TestAValueWrittenForASubstringMatch:
+    """A substring condition is compiled to ``like``, whose writer puts a
+    backslash before each ``_`` and ``%`` of the value, and the tool echoes
+    the filter it built. The output side looked for the value as the token
+    had resolved to it, did not find the respelled one, and the reply held
+    the plaintext beside the token."""
+
+    @pytest.mark.parametrize("flag", ["masked", "masked_with_device_identity"])
+    @pytest.mark.parametrize("tool", ["query_logs", "search_log_file"])
+    @pytest.mark.parametrize("op", ["contains", "not_contains"])
+    @pytest.mark.parametrize("plaintext", sorted(RESPELLED))
+    async def test_the_echoed_filter_holds_the_token_not_the_value(
+        self, flag: str, tool: str, op: str, plaintext: str, request: pytest.FixtureRequest
+    ) -> None:
+        _, sweep = request.getfixturevalue(flag)
+        field = RESPELLED[plaintext]
+        token = _token_under(field, plaintext)
+        subject = {"device": "probe1"} if tool == "search_log_file" else {}
+
+        reply = await sweep.tools[tool](
+            **subject, filters=[FilterCondition(field=field, op=op, value=token)]
+        )
+
+        # The appliance was asked for the value, so the search is the one
+        # the caller meant, and the caller reads its own token back.
+        assert reply["status"] == "success", reply
+        sent = " ".join(sweep.client.seen).replace("\\", "")
+        assert plaintext in sent
+        assert token not in sent
+        assert token in reply["filter"]
+        assert _paths_holding(reply, plaintext) == []
+
+    @pytest.mark.parametrize("flag", ["masked", "masked_with_device_identity"])
+    @pytest.mark.parametrize("op", FILTER_OPS)
+    @pytest.mark.parametrize("plaintext", sorted(RESPELLED))
+    async def test_no_operator_returns_the_value(
+        self, flag: str, op: str, plaintext: str, request: pytest.FixtureRequest
+    ) -> None:
+        _, sweep = request.getfixturevalue(flag)
+        field = RESPELLED[plaintext]
+        token = _token_under(field, plaintext)
+        value: Any = [token] if op in ("in", "not_in") else token
+
+        for tool, subject in (("query_logs", {}), ("search_log_file", {"device": "probe1"})):
+            reply = await sweep.tools[tool](
+                **subject, filters=[FilterCondition(field=field, op=op, value=value)]
+            )
+
+            assert _paths_holding(reply, plaintext) == [], (tool, reply)
+
+    @pytest.mark.parametrize("flag", ["masked", "masked_with_device_identity"])
+    @pytest.mark.parametrize("plaintext", sorted(RESPELLED))
+    async def test_a_raw_substring_clause_returns_the_token(
+        self, flag: str, plaintext: str, request: pytest.FixtureRequest
+    ) -> None:
+        """The caller's own ``like`` clause is rewritten around the resolved
+        value the same way before the tool sees it."""
+        _, sweep = request.getfixturevalue(flag)
+        field = RESPELLED[plaintext]
+        token = _token_under(field, plaintext)
+
+        for clause in (f'{field} like "%{token}%"', f'{field} like "%x {token} y%"'):
+            for tool, subject in (("query_logs", {}), ("search_log_file", {"device": "probe1"})):
+                reply = await sweep.tools[tool](**subject, filter=clause)
+
+                assert _paths_holding(reply, plaintext) == [], (tool, reply)
+
+    @pytest.mark.parametrize("flag", ["masked", "masked_with_device_identity"])
+    @pytest.mark.parametrize("plaintext", sorted(RESPELLED))
+    async def test_the_pivot_a_hunt_reports_holds_the_token_not_the_value(
+        self, flag: str, plaintext: str, request: pytest.FixtureRequest
+    ) -> None:
+        """A hash indicator is searched for as a substring, and the hunt
+        reports the clause it searched with."""
+        _, sweep = request.getfixturevalue(flag)
+        token = _token_under(RESPELLED[plaintext], plaintext)
+
+        reply = await sweep.tools["faz_skill"](
+            skill="hunt", params={"indicator": {"type": "Hash", "value": token}}
+        )
+
+        assert token in reply["result"]["sweep"]["pivot_filter"], reply
+        assert _paths_holding(reply, plaintext) == []
+
+    @pytest.mark.parametrize("flag", ["masked", "masked_with_device_identity"])
+    @pytest.mark.parametrize("kind", ["URL", "Hash"])
+    async def test_a_url_with_a_percent_escape_comes_back_whole_as_its_token(
+        self, flag: str, kind: str, request: pytest.FixtureRequest
+    ) -> None:
+        """Prose is read percent-decoded first. The URL the token had
+        resolved to was not found there as it was recorded, its host was
+        found alone, and the path and query stayed readable behind the
+        host's token."""
+        _, sweep = request.getfixturevalue(flag)
+        token = _token_under("url", "https://www.example.net/a_b/c%20d?x=1")
+
+        reply = await sweep.tools["faz_skill"](
+            skill="hunt", params={"indicator": {"type": kind, "value": token}}
+        )
+
+        assert token in reply["result"]["headline"], reply
+        said = " ".join(text for _, text in _strings(reply)).replace("\\", "")
+        assert [
+            piece for piece in ("example.net", "a_b", "c d", "c%20d", "x=1") if piece in said
+        ] == []
+
+
 @skip_if_dynamic_mode
 class TestNameFilter:
     """``name_filter`` is resolved, because one tool takes a device name
@@ -675,6 +818,62 @@ class TestTheSweepSeesWhatItShould:
             "by_rows(rows) -> $.seen[][]",
             "by_unannotated(ticket) -> $.seen",
         ]
+
+    async def test_it_reaches_an_optional_parameter_and_one_with_a_fixed_vocabulary(
+        self, masked: tuple[MCPServer, Sweep]
+    ) -> None:
+        """Most parameters a string can arrive in are optional, and a
+        ``Literal`` takes any string on the wire."""
+        mcp, sweep = masked
+
+        async def lookup_case(
+            case: str | None = None, mode: typing.Literal["fast", "full"] = "fast"
+        ) -> dict[str, Any]:
+            return {"status": "success", "case": case, "mode": mode}
+
+        name = _register(mcp, sweep, lookup_case)
+
+        assert sorted(sweep.never_sent(name)) == ["lookup_case(case)", "lookup_case(mode)"]
+        await sweep.tool(name)
+        assert sweep.never_sent(name) == {}
+        assert sweep.leaks == ["lookup_case(case) -> $.case", "lookup_case(mode) -> $.mode"]
+
+    async def test_it_flags_a_value_a_substring_filter_respelled(
+        self, masked: tuple[MCPServer, Sweep]
+    ) -> None:
+        """A tool that hands back only a value it had to write for ``like``,
+        under a key the output side does not read. One of the values the
+        sweep sends has to be such a value, and the comparison has to see it
+        behind its backslashes."""
+        mcp, sweep = masked
+
+        async def lookup_pattern(ticket: str) -> dict[str, Any]:
+            return {"status": "success", "pattern": ticket.replace("_", "\\_") * ("_" in ticket)}
+
+        await sweep.tool(_register(mcp, sweep, lookup_pattern))
+
+        assert sweep.leaks == ["lookup_pattern(ticket) -> $.pattern"]
+
+    async def test_it_sends_every_operator_of_a_filter_condition(
+        self, masked: tuple[MCPServer, Sweep]
+    ) -> None:
+        mcp, sweep = masked
+        sent: set[str] = set()
+
+        async def lookup_rows(filters: list[FilterCondition]) -> dict[str, Any]:
+            sent.update(condition.op for condition in filters)
+            return {"status": "success"}
+
+        await sweep.tool(_register(mcp, sweep, lookup_rows))
+
+        assert sent == set(FILTER_OPS)
+
+    def test_the_comparison_sees_a_value_in_any_spelling_it_is_readable_in(self) -> None:
+        assert _paths_holding({"a": "from FW-CORE-01 today"}, "fw-core-01") == ["$.a"]
+        assert _paths_holding({"FW-CORE-01": 1}, "fw-core-01") == ["$.<key>"]
+        assert _paths_holding({"a": 'user like "%svc\\_bak\\_probe%"'}, "svc_bak_probe") == ["$.a"]
+        assert _paths_holding({"a": ["see /a_b/c d?x=1"]}, "/a_b/c%20d?x=1") == ["$.a[]"]
+        assert _paths_holding({"a": "svc-bak-probe"}, "svc_bak_probe") == []
 
     async def test_it_flags_an_echo_of_one_part_of_a_value(
         self, masked: tuple[MCPServer, Sweep]

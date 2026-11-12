@@ -111,6 +111,7 @@ from fortianalyzer_mcp.masking.fpe_engine import (
 )
 from fortianalyzer_mcp.masking.unmask import ArgUnmasker, recording_resolved_values
 from fortianalyzer_mcp.utils.responses import TRUNCATION_MARK
+from fortianalyzer_mcp.utils.validation import like_spelling
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +228,21 @@ _PERCENT_RUN_RE = re.compile(r"(?:%[0-9A-Fa-f]{2})+")
 #: not start inside a longer name (see ``_build_substitution_plan``), and
 #: neither does the rule for a value a cut message kept only the head of.
 _NAME_CHAR_RE = re.compile(r"[A-Za-z0-9._-]")
+
+
+def _echo_spellings(value: str) -> set[str]:
+    """The other ways a tool hands back a value the caller's token resolved to.
+
+    Pass 2 looks for a known value as it stands, and an echo is not always
+    that. A substring search is written for ``like``, whose writers put a
+    backslash before each ``_`` and ``%`` of the value (and double one that
+    is there), and the tool echoes the filter it built. And prose is read
+    percent-decoded first, where a URL's ``%20`` is a space. Either way the
+    value was not found and stayed readable beside the token, whole or from
+    the first character the echo spelled differently.
+    """
+    written = {value, like_spelling(value)}
+    return (written | {_unquote_utf8(text) for text in written}) - {value}
 
 
 def _unquote_utf8(text: str) -> str:
@@ -1585,6 +1601,8 @@ class OutputMasker:
         mapping: dict[str, str] = _TrackedMapping()
         for real, sent in (resolved or {}).items():
             mapping[real] = sent
+            for spelled in _echo_spellings(real):
+                mapping.setdefault(spelled, sent)
         keep = frozenset() if self._mask_device_identity else self._device_identity_values(obj)
         if resolved and not self._mask_device_identity:
             obj, keep = self._resolved_leaves_keep_set(obj, keep, resolved)

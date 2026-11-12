@@ -98,7 +98,11 @@ from fortianalyzer_mcp.masking.fpe_engine import (
     VerificationBudgetExhausted,
 )
 from fortianalyzer_mcp.query.fields import canonical_log_field
-from fortianalyzer_mcp.utils.validation import ValidationError, sanitize_filter_value
+from fortianalyzer_mcp.utils.validation import (
+    ValidationError,
+    like_spelling,
+    sanitize_filter_value,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -530,14 +534,15 @@ class ArgUnmasker:
             # doubled backslash as one literal backslash; ``==`` reads every
             # character as written.
             is_like = match.group("op").strip().lower() == "like"
-            escaped = resolved.replace("\\", "\\\\") if is_like else resolved
-            if is_like and _WHOLE_TOKEN_RE.fullmatch(core):
+            escaped = resolved
+            if is_like:
                 # The whole value was one token, so every ``%`` and ``_`` in the
                 # plaintext is the plaintext's own: write them as the characters
                 # (``\%`` and ``\_``, measured). Around an embedded token the
                 # caller's own wildcards sit in the same text and cannot be told
                 # apart, so there they stay as written.
-                escaped = escaped.replace("%", "\\%").replace("_", "\\_")
+                whole = _WHOLE_TOKEN_RE.fullmatch(core) is not None
+                escaped = like_spelling(resolved, escape_wildcards=whole)
             if is_like and not quote:
                 # An unquoted pattern is quoted on the way out, as a bare
                 # comparison value is below, and keeps the ``like`` writing.

@@ -1187,6 +1187,66 @@ class TestDocumentedGaps:
         assert masker.mask_result(reply, {"bob": token}) == reply
 
 
+class TestAResolvedValueEchoedInAnotherSpelling:
+    """A tool does not always hand a value back as the token resolved to it.
+
+    A substring search is written for ``like``, with a backslash before each
+    ``_`` and ``%`` of the value, and the tool echoes the filter it built.
+    Prose is read percent-decoded first, where a URL's ``%20`` is a space.
+    Either way the value the caller's token had resolved to was not found as
+    it was recorded, and it stayed readable where the token belonged.
+    """
+
+    @pytest.mark.parametrize("key", ["filter", "message"])
+    def test_a_value_written_for_like_is_the_callers_token(
+        self, masker: OutputMasker, engine: FPEEngine, key: str
+    ):
+        real = "svc_bak_probe"
+        token = engine.mint("username", real)
+        reply = {key: 'user like "%svc\\_bak\\_probe%"'}
+
+        out = masker.mask_result(reply, {real: token})
+
+        assert out == {key: f'user like "%{token}%"'}
+
+    def test_a_url_read_percent_decoded_is_the_callers_token(self, masker: OutputMasker):
+        real = "https://www.example.net/a_b/c%20d?x=1"
+        token = masker.mask_result({"url": real})["url"]
+        reply = {"message": f"no stored enrichment for URL '{real}'"}
+
+        out = masker.mask_result(reply, {real: token})
+
+        assert out == {"message": f"no stored enrichment for URL '{token}'"}
+
+    def test_a_url_written_for_like_and_read_percent_decoded_is_the_callers_token(
+        self, masker: OutputMasker
+    ):
+        """With the host recorded beside the whole URL, as the argument side
+        records it: the host alone is found in the decoded text, so the
+        whole URL has to be found there too, or its path stays behind."""
+        real = "https://www.example.net/a_b/c%20d?x=1"
+        token = masker.mask_result({"url": real})["url"]
+        host = masker.mask_result({"hostname": "www.example.net"})["hostname"]
+        reply = {"message": 'searched url like "%https://www.example.net/a\\_b/c\\%20d?x=1%"'}
+
+        out = masker.mask_result(reply, {"www.example.net": host, real: token})
+
+        assert out == {"message": f'searched url like "%{token}%"'}
+
+    def test_a_value_no_token_resolved_to_is_not_looked_for_respelled(
+        self, masker: OutputMasker, engine: FPEEngine
+    ):
+        """Only what the call resolved is looked for this way. A name a row
+        carries is masked where it stands, and a text that merely resembles
+        it with backslashes is not it."""
+        token = engine.mint("username", "svc_bak_probe")
+        reply = {"user": "svc_bak_probe", "message": "pattern svc\\_bak\\_probe not found"}
+
+        out = masker.mask_result(reply)
+
+        assert out == {"user": token, "message": "pattern svc\\_bak\\_probe not found"}
+
+
 class TestAResolvedValueIsNotKeptReadable:
     """What the caller's token resolved to never leaves as a kept device name.
 
