@@ -420,6 +420,17 @@ class FPEEngine:
         """4-hex-char one-way fingerprint of the key, embedded in marked tokens."""
         return self._key_id
 
+    @property
+    def accept_v1_tokens(self) -> bool:
+        """Whether the v1 deprecation window is open.
+
+        The engine enforces the window itself for the marked v1 forms. The
+        unmarked ones (a v1 IP or MAC token is a bare address) cannot be
+        told from an address the caller typed, so the caller that resolves
+        by field context, ``ArgUnmasker``, reads this to decide.
+        """
+        return self._accept_v1_tokens
+
     # ------------------------------------------------------------------ #
     # v2 envelope authentication tag (#40)                                #
     # ------------------------------------------------------------------ #
@@ -1165,9 +1176,13 @@ class FPEEngine:
         marked v1 token has to pass through one of the splits, so this is
         the choke point that cannot be routed around.
 
-        The unmarked IP and MAC forms deliberately do not reach here. They
-        carry no key id and are not v1 *tokens*, they are masked values
-        resolved by field context, so there is nothing to refuse.
+        The unmarked IP and MAC forms do not reach here: they carry no key
+        id, so there is no split to pass through, and ``unmask_ip`` and
+        ``unmask_mac`` stay ungated because a v2 token opens through them.
+        The window covers them all the same, one level up (#180):
+        ``ArgUnmasker`` reads :attr:`accept_v1_tokens` and resolves an
+        unmarked address by field context only while the window is open.
+        Closed, the address goes to FortiAnalyzer as the caller typed it.
 
         While the window is open this logs, because the point of the flag
         is that a deployment can tell when closing it is safe. The form and

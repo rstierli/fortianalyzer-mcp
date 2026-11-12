@@ -1,6 +1,8 @@
 """Tests for Phase 2 tool-argument unmasking (RFC #40)."""
 
 import logging
+from collections.abc import Callable, Iterator
+from typing import Any
 
 import pytest
 
@@ -8,6 +10,7 @@ from fortianalyzer_mcp.masking.fields import IP, TEXT
 from fortianalyzer_mcp.masking.fpe_engine import FPEEngine, begin_v2_verification_budget
 from fortianalyzer_mcp.masking.unmask import ArgUnmasker
 from fortianalyzer_mcp.masking.wrapper import OutputMasker, install_masking
+from fortianalyzer_mcp.query.filters import FilterCondition
 from fortianalyzer_mcp.utils.errors import ValidationError
 
 KEY = "2DE79D232DF5585D68CE47882AE256D6"
@@ -41,12 +44,26 @@ class TestScalarResolution:
         ]:
             assert unmasker.resolve_scalar(token) == real
 
-    def test_unmarked_ip_resolves_only_with_field_type(
-        self, unmasker: ArgUnmasker, engine: FPEEngine
-    ):
+    def test_unmarked_ip_resolves_only_with_field_type(self):
+        # Only while the v1 window is open (#180): an unmarked address is
+        # what a v1 IP token looked like, so that is the one state that
+        # still reads it as a token.
+        engine = FPEEngine(KEY, accept_v1_tokens=True)
+        unmasker = ArgUnmasker(engine)
         token = engine.mask_ip("192.0.2.102")
         assert unmasker.resolve_scalar(token) == token  # no context: untouched
         assert unmasker.resolve_scalar(token, "ip") == "192.0.2.102"
+
+    def test_unmarked_address_passes_through_with_the_window_closed(self):
+        # The other side of the test above (#180): with the window closed an
+        # unmarked value in an address field is the caller's own address.
+        engine = FPEEngine(KEY, accept_v1_tokens=False)
+        unmasker = ArgUnmasker(engine)
+        token = engine.mask_ip("192.0.2.102")
+        assert unmasker.resolve_scalar(token) == token  # no context: untouched
+        assert unmasker.resolve_scalar(token, "ip") == token
+        assert unmasker.resolve_scalar("198.51.100.7", "ip") == "198.51.100.7"
+        assert unmasker.resolve_scalar("00:00:5e:00:53:07", "mac") == "00:00:5e:00:53:07"
 
     def test_unmarked_mac_resolves_with_field_type(self, unmasker: ArgUnmasker, engine: FPEEngine):
         token = engine.mask_mac("00:1a:2b:3c:4d:5e")
@@ -1416,3 +1433,329 @@ class TestValueResolvedForACallIsMaskedOnTheWayOut:
         result = await tools["count_rows"](filter='action=="deny" and dstport==443')
 
         assert result["filter"] == 'action=="deny" and dstport==443'
+
+
+#: Issue #180. One address per family, documentation ranges only.
+TYPED_ADDRESS = {
+    "ipv4": "198.51.100.7",
+    "ipv6": "2001:db8::7",
+    "mac": "00:00:5e:00:53:07",
+}
+
+#: Every way an unmarked address reaches ``ArgUnmasker._unmask_by_type``,
+#: written as the keyword arguments of the tool call that takes it there:
+#: the address family, then the call built around one address.
+UNMARKED_ROUTES = [
+    pytest.param("ipv4", lambda a: {"srcip": a}, id="scalar argument"),
+    pytest.param("ipv6", lambda a: {"srcip": a}, id="IPv6 scalar argument"),
+    pytest.param("mac", lambda a: {"srcmac": a}, id="MAC scalar argument"),
+    pytest.param("ipv4", lambda a: {"endpoint": a}, id="address-or-name argument"),
+    pytest.param("ipv4", lambda a: {"ipaddr": f"{a},{a}"}, id="comma-joined argument"),
+    pytest.param("ipv4", lambda a: {"dstip": [a]}, id="list argument"),
+    pytest.param("ipv4", lambda a: {"filter": f"srcip=={a}"}, id="raw filter clause"),
+    pytest.param(
+        "ipv4", lambda a: {"filter": f'srcip=="{a}" and action==deny'}, id="quoted filter clause"
+    ),
+    pytest.param("ipv4", lambda a: {"filter": f"srcip!={a}"}, id="!= filter clause"),
+    pytest.param("ipv4", lambda a: {"filter": f'srcip like "%{a}%"'}, id="like filter clause"),
+    pytest.param("ipv6", lambda a: {"filter": f"srcip=={a}"}, id="IPv6 filter clause"),
+    pytest.param("mac", lambda a: {"filter": f"srcmac=={a}"}, id="MAC filter clause"),
+    pytest.param(
+        "ipv4",
+        lambda a: {"filters": [{"field": "srcip", "op": "eq", "value": a}]},
+        id="structured condition",
+    ),
+    pytest.param(
+        "ipv4",
+        lambda a: {"filters": [{"field": "source_ip", "op": "ne", "value": a}]},
+        id="structured condition under an alias",
+    ),
+    pytest.param(
+        "ipv4",
+        lambda a: {"filters": [{"field": "srcip", "op": "in", "value": [a]}]},
+        id="structured condition with a list",
+    ),
+    pytest.param(
+        "mac",
+        lambda a: {"filters": [{"field": "srcmac", "op": "eq", "value": a}]},
+        id="MAC structured condition",
+    ),
+    pytest.param(
+        "ipv4",
+        lambda a: {"filters": [FilterCondition(field="srcip", op="eq", value=a)]},
+        id="structured condition as the model a tool declares",
+    ),
+    pytest.param("ipv4", lambda a: {"groupby1": f"srcip:{a}"}, id="group-by argument"),
+    pytest.param(
+        "ipv4", lambda a: {"filter": f'groupby1=="srcip:{a}"'}, id="group-by filter clause"
+    ),
+    pytest.param("ipv4", lambda a: {"url": f"http://{a}:8080/admin?x=1"}, id="url argument"),
+    pytest.param("ipv4", lambda a: {"filter": f'url=="http://{a}/admin"'}, id="url filter clause"),
+    pytest.param("ipv6", lambda a: {"url": f"http://[{a}]/admin"}, id="IPv6 url argument"),
+    pytest.param(
+        "ipv4",
+        lambda a: {"params": {"srcip": a, "filter": f"dstip=={a}"}},
+        id="nested params",
+    ),
+]
+
+#: A marked token of each kind, on a route of each kind: the minting type,
+#: the real value, then the call built around the token.
+MARKED_ROUTES = [
+    pytest.param("ip", "198.51.100.7", lambda t: {"srcip": t}, id="ip4 scalar argument"),
+    pytest.param("ip", "2001:db8::7", lambda t: {"filter": f"srcip=={t}"}, id="ip6 filter clause"),
+    pytest.param(
+        "mac",
+        "00:00:5e:00:53:07",
+        lambda t: {"filters": [{"field": "srcmac", "op": "eq", "value": t}]},
+        id="mac structured condition",
+    ),
+    pytest.param(
+        "ip", "198.51.100.7", lambda t: {"url": f"http://{t}:8080/admin?x=1"}, id="ip4 url host"
+    ),
+    pytest.param("hostname", "workstation-14", lambda t: {"srcname": t}, id="host argument"),
+    pytest.param(
+        "domain",
+        "portal.example.com",
+        lambda t: {"filter": f'qname=="{t}"'},
+        id="domain filter clause",
+    ),
+    pytest.param(
+        "username",
+        "jsmith",
+        lambda t: {"filters": [{"field": "user", "op": "eq", "value": t}]},
+        id="user structured condition",
+    ),
+]
+
+
+def _as_v1_token(engine: FPEEngine, family: str) -> str:
+    """The family's address as 2.13 masked it: another bare address, no marker."""
+    address = TYPED_ADDRESS[family]
+    return engine.mask_mac(address) if family == "mac" else engine.mask_ip(address)
+
+
+class TestTypedAddressAndTheV1Window:
+    """An address the caller types is a token only while the v1 window is open.
+
+    Issue #180. A v1 IP or MAC token was a bare address with no marker, so
+    an unmarked value in an IP/MAC field was decrypted as one whatever the
+    window said: a caller who typed ``srcip==198.51.100.7`` had the query run
+    for a different address, with ``status: success`` and the filter echoed
+    as typed. Measured live on 7.6.7 with the window closed: three addresses
+    gave 8018, 5967 and 735 rows by token and 0 rows each when typed.
+
+    Decided on the issue: with ``FAZ_MASKING_ACCEPT_V1_TOKENS`` false, the
+    default, an unmarked address goes to FortiAnalyzer as typed, and the old
+    resolution is kept only while the window is open. A marked token
+    resolves in both states.
+    """
+
+    @pytest.fixture
+    def window(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> Iterator[Callable[..., tuple[Any, dict[str, Any]]]]:
+        """Build a read-only tool behind ``install_masking``, window as asked.
+
+        The window is set the way a deployment sets it, through the
+        environment. ``get_settings`` is cached, so the cache is dropped
+        before each build and again once the test is over.
+        """
+        from mcp.server.mcpserver import MCPServer
+
+        import fortianalyzer_mcp.utils.config as config
+        from fortianalyzer_mcp.tool_annotations import READ_ONLY
+
+        def build(*, accept_v1: bool) -> tuple[Any, dict[str, Any]]:
+            monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
+            monkeypatch.setenv("FAZ_MASKING_ACCEPT_V1_TOKENS", "true" if accept_v1 else "false")
+            config.get_settings.cache_clear()
+            mcp = MCPServer("test")
+            install_masking(mcp)
+            seen: dict[str, Any] = {}
+
+            @mcp.tool(annotations=READ_ONLY)
+            async def search(
+                srcip: str | None = None,
+                srcmac: str | None = None,
+                srcname: str | None = None,
+                endpoint: str | None = None,
+                ipaddr: str | None = None,
+                dstip: list | None = None,
+                groupby1: str | None = None,
+                url: str | None = None,
+                filter: str | None = None,
+                filters: list | None = None,
+                params: dict | None = None,
+            ) -> dict:
+                """A reader: keeps what its body was handed and echoes the filter."""
+                handed = {
+                    "srcip": srcip,
+                    "srcmac": srcmac,
+                    "srcname": srcname,
+                    "endpoint": endpoint,
+                    "ipaddr": ipaddr,
+                    "dstip": dstip,
+                    "groupby1": groupby1,
+                    "url": url,
+                    "filter": filter,
+                    "filters": filters,
+                    "params": params,
+                }
+                # What the tool body observes is what FortiAnalyzer is asked for.
+                seen.update({name: value for name, value in handed.items() if value is not None})
+                return {
+                    "status": "success",
+                    "filter": filter,
+                    "logs": [{"srcip": srcip}] if srcip else [],
+                }
+
+            return search, seen
+
+        yield build
+        config.get_settings.cache_clear()
+
+    @pytest.mark.parametrize(("family", "call"), UNMARKED_ROUTES)
+    async def test_window_closed_a_typed_address_reaches_the_tool_as_typed(
+        self,
+        window: Callable[..., tuple[Any, dict[str, Any]]],
+        family: str,
+        call: Callable[[str], dict[str, Any]],
+    ) -> None:
+        search, seen = window(accept_v1=False)
+        sent = call(TYPED_ADDRESS[family])
+
+        await search(**sent)
+
+        assert seen == sent
+
+    @pytest.mark.parametrize(("family", "call"), UNMARKED_ROUTES)
+    async def test_window_closed_a_v1_token_is_an_address_like_any_other(
+        self,
+        window: Callable[..., tuple[Any, dict[str, Any]]],
+        engine: FPEEngine,
+        family: str,
+        call: Callable[[str], dict[str, Any]],
+    ) -> None:
+        """The input the open-window test resolves, sent with the window closed."""
+        search, seen = window(accept_v1=False)
+        sent = call(_as_v1_token(engine, family))
+
+        await search(**sent)
+
+        assert seen == sent
+
+    @pytest.mark.parametrize(("family", "call"), UNMARKED_ROUTES)
+    async def test_window_open_an_unmarked_value_resolves_as_a_v1_token(
+        self,
+        window: Callable[..., tuple[Any, dict[str, Any]]],
+        engine: FPEEngine,
+        family: str,
+        call: Callable[[str], dict[str, Any]],
+    ) -> None:
+        search, seen = window(accept_v1=True)
+
+        await search(**call(_as_v1_token(engine, family)))
+
+        assert seen == call(TYPED_ADDRESS[family])
+
+    @pytest.mark.parametrize("family", sorted(TYPED_ADDRESS))
+    async def test_window_open_a_typed_address_is_still_read_as_a_token(
+        self,
+        window: Callable[..., tuple[Any, dict[str, Any]]],
+        engine: FPEEngine,
+        family: str,
+    ) -> None:
+        """The hazard an open window keeps, pinned so it stays visible: the
+        query runs for the address whose v1 token is the text that was typed."""
+        search, seen = window(accept_v1=True)
+        name = "srcmac" if family == "mac" else "srcip"
+        mask = engine.mask_mac if family == "mac" else engine.mask_ip
+
+        await search(**{name: TYPED_ADDRESS[family]})
+
+        assert seen[name] != TYPED_ADDRESS[family]
+        assert mask(seen[name]) == TYPED_ADDRESS[family]
+
+    @pytest.mark.parametrize("accept_v1", [False, True], ids=["window closed", "window open"])
+    @pytest.mark.parametrize(("vtype", "real", "call"), MARKED_ROUTES)
+    async def test_a_marked_token_resolves_in_both_states(
+        self,
+        window: Callable[..., tuple[Any, dict[str, Any]]],
+        engine: FPEEngine,
+        accept_v1: bool,
+        vtype: str,
+        real: str,
+        call: Callable[[str], dict[str, Any]],
+    ) -> None:
+        search, seen = window(accept_v1=accept_v1)
+
+        await search(**call(engine.mint(vtype, real)))
+
+        assert seen == call(real)
+
+    async def test_window_closed_the_rows_of_a_typed_address_come_back_masked(
+        self, window: Callable[..., tuple[Any, dict[str, Any]]], engine: FPEEngine
+    ) -> None:
+        """What the decision rests on: the query runs for the typed address
+        and the rows that come back are masked like any others."""
+        search, seen = window(accept_v1=False)
+
+        result = await search(srcip="198.51.100.7")
+
+        assert seen["srcip"] == "198.51.100.7"
+        assert result["logs"] == [{"srcip": engine.mint("ip", "198.51.100.7")}]
+
+    @pytest.mark.parametrize(
+        "sent",
+        [
+            pytest.param({"srcip": "2001:DB8::7"}, id="upper-case IPv6"),
+            pytest.param(
+                {"srcip": "2001:0db8:0000:0000:0000:0000:0000:0007"}, id="uncompressed IPv6"
+            ),
+            pytest.param({"srcmac": "00-00-5E-00-53-07"}, id="hyphenated MAC"),
+            pytest.param({"srcmac": "0000.5e00.5307"}, id="dotted MAC"),
+            pytest.param({"filter": "srcip==2001:DB8::7"}, id="upper-case IPv6 in a clause"),
+            pytest.param({"filter": "srcmac==00-00-5E-00-53-07"}, id="hyphenated MAC in a clause"),
+        ],
+    )
+    async def test_window_closed_the_spelling_the_caller_typed_is_kept(
+        self, window: Callable[..., tuple[Any, dict[str, Any]]], sent: dict[str, Any]
+    ) -> None:
+        """As typed means as typed: the address is not rewritten to a
+        canonical form on its way to FortiAnalyzer."""
+        search, seen = window(accept_v1=False)
+
+        await search(**sent)
+
+        assert seen == sent
+
+    @pytest.mark.parametrize(
+        ("typed", "masked"),
+        [
+            pytest.param("srcip==198.51.100.7", "srcip=={ip}", id="IPv4"),
+            pytest.param('srcip=="198.51.100.7"', 'srcip=="{ip}"', id="quoted IPv4"),
+            pytest.param("srcip==198.51.100.0/24", "srcip=={net}/24", id="IPv4 network"),
+            pytest.param("srcmac==00:00:5e:00:53:07", "srcmac=={mac}", id="MAC"),
+        ],
+    )
+    async def test_window_closed_the_echo_of_a_typed_address_is_masked(
+        self,
+        window: Callable[..., tuple[Any, dict[str, Any]]],
+        engine: FPEEngine,
+        typed: str,
+        masked: str,
+    ) -> None:
+        """The address went out as typed; the filter the tool echoes is
+        output like any other, so the address in it leaves as its token.
+        Passing an address through must not exempt it from that."""
+        search, seen = window(accept_v1=False)
+
+        result = await search(filter=typed)
+
+        assert seen["filter"] == typed
+        assert result["filter"] == masked.format(
+            ip=engine.mint("ip", "198.51.100.7"),
+            net=engine.mint("ip", "198.51.100.0"),
+            mac=engine.mint("mac", "00:00:5e:00:53:07"),
+        )

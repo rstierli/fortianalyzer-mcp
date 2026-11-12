@@ -206,9 +206,17 @@ class ArgUnmasker:
     def _unmask_by_type(self, vtype: str, value: str) -> str:
         """Resolve an unmarked IP/MAC token; pass through on failure.
 
+        Only while the v1 window is open (#180). An unmarked address is
+        what a v1 IP or MAC token looked like, and it is also what an
+        address the caller typed looks like. With the window closed nothing
+        can be a v1 token, so the value is the caller's own address and is
+        returned as it came.
+
         ``IP_OR_HOST`` fields only reach here when the value carries no
         ``host-`` marker, so whatever is left must be an address.
         """
+        if not self._engine.accept_v1_tokens:
+            return value
         try:
             if vtype in (IP, IP_OR_HOST):
                 return self._engine.unmask_ip(value)
