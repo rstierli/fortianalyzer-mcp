@@ -60,8 +60,8 @@ def logs_ok(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def full_page(rows: list[dict[str, Any]], floor: int) -> dict[str, Any]:
-    """A query_logs page that filled, as 2.17.0 reports it: more rows exist
-    and ``total`` is a floor, not the window's count."""
+    """A query_logs page that filled, as 2.17.0 reports it: more rows may
+    exist and ``total`` is a floor, not the window's count."""
     return {
         "status": "success",
         "tid": 1,
@@ -592,12 +592,12 @@ class TestHuntBehaviorAlertPage:
         assert isinstance(b, EntityBehavior)
         assert b.detection_count == 0
         assert b.alerts_truncated is True
-        assert any(w.startswith("behavior[") and "newest 200 alerts" in w for w in result.warnings)
+        assert any(w.startswith("behavior[") and "first 200 alerts" in w for w in result.warnings)
         # Neither the basis nor the headline reports none found in the window.
         assert "no behavioural/IOC detections in the window" not in b.anomaly_basis
-        assert any("newest 200 alerts" in reason for reason in b.anomaly_basis)
+        assert any("first 200 alerts" in reason for reason in b.anomaly_basis)
         assert not result.headline.endswith("0 detections)")
-        assert "0 detections in the newest 200 alerts" in result.headline
+        assert "0 detections in the first 200 alerts" in result.headline
 
     @pytest.mark.parametrize("entity", ["epid:5", "euid:42"])
     async def test_a_page_that_did_not_fill_is_a_clean_negative(self, entity):
@@ -617,7 +617,29 @@ class TestHuntBehaviorAlertPage:
         assert b.detection_count == 1
         assert b.anomalous is True
         assert b.alerts_truncated is True
-        assert any(w.startswith("behavior[") and "newest 200 alerts" in w for w in result.warnings)
+        assert any(w.startswith("behavior[") and "first 200 alerts" in w for w in result.warnings)
+
+    async def test_the_page_is_full_at_the_limit_the_hunt_asked_for(self):
+        """The threshold is the limit of the request: an appliance that returns
+        as many alerts as it was asked for has filled the page."""
+        asked: dict[str, Any] = {}
+
+        def get_alerts(**kwargs: Any) -> dict[str, Any]:
+            asked.update(kwargs)
+            return ok(data=self.alerts(kwargs["limit"]))
+
+        with (
+            t(GET_ENDPOINTS, return_value=ok(data=ESTATE)),
+            t(GET_ALERTS, side_effect=get_alerts),
+            t(QUERY_LOGS, return_value=logs_ok([])),
+        ):
+            result = await handlers.run_hunt(
+                HuntParams(entity="epid:5", sweep_logtypes=["traffic"])
+            )
+
+        assert asked["limit"] == 200
+        assert isinstance(result.behavior, EntityBehavior)
+        assert result.behavior.alerts_truncated is True
 
 
 class TestHuntBehaviorPercentile:

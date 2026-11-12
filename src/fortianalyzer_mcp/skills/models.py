@@ -1083,8 +1083,9 @@ class SweepMatch(BaseModel):
     cap — never silently omitted.
 
     ``pivot_filter`` is the clause this log type's search ran on. ``rows``
-    is one page: when ``has_more`` is true more rows matched than it holds,
-    and ``row_count`` is a lower bound, not the number of matches.
+    is one page: when ``has_more`` is true the page filled, more rows may
+    have matched, and ``row_count`` is a lower bound, not the number of
+    matches.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -1101,9 +1102,9 @@ class SweepMatch(BaseModel):
     row_count: int = Field(default=0, description="Row count (0 for a gap section)")
     has_more: bool = Field(
         default=False,
-        description="True when more rows matched than this page returned (the "
-        "search reported more, or a total that is a lower bound); row_count is "
-        "then a lower bound",
+        description="True when this page filled, so more rows may have matched "
+        "(the search reported more, or a total that is a lower bound); row_count "
+        "is then a lower bound",
     )
 
 
@@ -1138,9 +1139,9 @@ class HuntSweep(BaseModel):
     )
     total_matches_is_lower_bound: bool = Field(
         default=False,
-        description="True when any sweep search returned a truncated page (its "
+        description="True when any sweep search returned a page that filled (its "
         "match has has_more): total_matches then counts the rows returned, and "
-        "more rows matched",
+        "more rows may have matched",
     )
     sweep_searches_run: int = Field(description="Sweep log_search slots actually consumed")
     sweep_searches_dropped: int = Field(
@@ -1197,9 +1198,9 @@ class EntityBehavior(BaseModel):
     alerts_truncated: bool = Field(
         default=False,
         description="True when the alert page the detections were narrowed from "
-        "was full (200 alerts): only the newest 200 alerts in the window were "
-        "examined, so detection_count is a lower bound and zero detections is "
-        "not a clean negative",
+        "was full (200 alerts): only the first 200 alerts returned for the "
+        "window were examined, so detection_count is a lower bound and zero "
+        "detections is not a clean negative",
     )
     anomalous: bool = Field(description="Derived anomaly verdict (percentile + vuln + detections)")
     anomaly_basis: list[str] = Field(

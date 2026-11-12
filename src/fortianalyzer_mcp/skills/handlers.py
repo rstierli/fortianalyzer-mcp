@@ -2364,8 +2364,9 @@ _BEHAVIORAL_MARKERS = (
 )
 # Alert fields that may name the handler / detection rule (build-varying).
 _ALERT_HANDLER_KEYS = ("alerttype", "eventtype", "triggername", "name", "logdesc")
-# Alerts read for one entity's behavioural detections: one page, requested
-# newest first and narrowed client-side, so a full page is not the window.
+# Alerts read for one entity's behavioural detections: one page, narrowed
+# client-side, so a full page is not the window. The page is requested newest
+# first, but that order is not relied on in what the result says.
 _BEHAVIOR_ALERT_LIMIT = 200
 
 
@@ -2515,8 +2516,8 @@ async def _entity_behavioral_alerts(
     if truncated:
         warnings.append(
             f"behavior[{entity_ref}]: alert page filled at limit {_BEHAVIOR_ALERT_LIMIT}; "
-            f"only the newest {_BEHAVIOR_ALERT_LIMIT} alerts in the window were examined "
-            "for behavioural detections"
+            f"only the first {_BEHAVIOR_ALERT_LIMIT} alerts returned for the window were "
+            "examined for behavioural detections"
         )
     behavioral = [a for a in alerts if _is_behavioral_alert(a)]
     return behavioral, truncated
@@ -2675,8 +2676,9 @@ def _no_detections_basis(alerts_truncated: bool) -> str:
     """
     if alerts_truncated:
         return (
-            f"no behavioural/IOC detections among the newest {_BEHAVIOR_ALERT_LIMIT} "
-            "alerts in the window; the alert page filled and the rest were not examined"
+            f"no behavioural/IOC detections among the first {_BEHAVIOR_ALERT_LIMIT} "
+            "alerts returned for the window; the alert page filled and the rest were "
+            "not examined"
         )
     return "no behavioural/IOC detections in the window"
 
@@ -3044,8 +3046,8 @@ def _hunt_headline(
             parts.append(f"sweep: failed (0 of {searches} searches returned)")
         elif sweep.total_matches_is_lower_bound:
             parts.append(
-                f"sweep: at least {sweep.total_matches} matches (lower bound, more rows "
-                f"exist) across {searches} searches"
+                f"sweep: at least {sweep.total_matches} matches (lower bound, a page "
+                f"filled) across {searches} searches"
             )
         else:
             parts.append(f"sweep: {sweep.total_matches} matches across {searches} searches")
@@ -3058,7 +3060,7 @@ def _hunt_headline(
         )
         detections = f"{behavior.detection_count} detections"
         if behavior.alerts_truncated:
-            detections += f" in the newest {_BEHAVIOR_ALERT_LIMIT} alerts"
+            detections += f" in the first {_BEHAVIOR_ALERT_LIMIT} alerts"
         parts.append(f"behavior: {verdict} ({pct}, {detections})")
     return "; ".join(parts)
 
