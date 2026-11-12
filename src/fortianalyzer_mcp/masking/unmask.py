@@ -7,34 +7,54 @@ or would query FAZ for a value that does not exist there.
 
 Three resolution paths, in order of confidence:
 
-1. **Marked tokens, anywhere.** ``host-``/``user-`` prefixes and the
+1. **Marked tokens, anywhere.** ``host-``/``user-`` prefixes, the
+   ``ip4-``/``ip6-``/``mac-`` forms minted since 2.14.0 and the
    ``.<mask_suffix>`` domain/email forms are self-identifying, so they are
    resolved wherever they appear: a bare string argument, an item in a
    list, a value nested in a dict, or a substring inside a filter
    expression.
-2. **Unmarked tokens by argument name.** Masked IPs and MACs look like
-   ordinary IPs and MACs (the "IP wrinkle"), so they can only be resolved
-   where the *name* says what the value is: an argument called ``srcip``
-   or a filter clause ``srcip=="..."``. The name table is the same
-   allowlist used for output masking.
+2. **Unmarked tokens by argument name, while the v1 window is open.** A v1
+   masked IP or MAC looks like an ordinary IP or MAC (the "IP wrinkle"),
+   so it can only be resolved where the *name* says what the value is: an
+   argument called ``srcip`` or a filter clause ``srcip=="..."``. The name
+   table is the same allowlist used for output masking. Since 2.14.0 the
+   server mints marked IP and MAC tokens, which resolve by path 1; this
+   path is for the older ones and runs only with
+   ``FAZ_MASKING_ACCEPT_V1_TOKENS`` set (see the first ambiguity below).
 3. **Everything else passes through untouched.**
 
 Failure policy mirrors the output side but inverts the default: if a
 value carries a marker and does not decrypt, that is an error worth
 surfacing (the caller sent a corrupted or foreign token) and the argument
-is left as-is so the validator downstream rejects it loudly. If an
-unmarked value in an IP/MAC-named field does not decrypt to anything
-sensible, it is passed through unchanged: it is far more likely to be a
-real address the user typed than a corrupted token, and passing a real
-address through is correct behavior.
+is left as-is so the validator downstream rejects it loudly. If, with the
+v1 window open, an unmarked value in an IP/MAC-named field does not
+decrypt to anything sensible, it is passed through unchanged: it is far
+more likely to be a real address the user typed than a corrupted token,
+and passing a real address through is correct behavior.
 
 Known ambiguities, documented rather than papered over:
 
-- With masking on, a user who types a *real* IP into ``srcip`` gets it
-  unmasked as if it were a token, producing a different real IP.
-  Deterministic FPE has no way to distinguish the two. Deployments that
-  expect operators to paste raw IPs should keep masking off, or the prose
-  companion should mask what the operator types on the way in.
+- An unmarked address in an IP/MAC-named argument or filter clause
+  (``srcip==198.51.100.7``) is either an address the caller typed or a v1
+  token, which was a bare address too. Deterministic FPE has no way to
+  distinguish the two, so the v1 window decides (#180):
+
+  - Closed (``FAZ_MASKING_ACCEPT_V1_TOKENS=false``, the default): it is the
+    caller's address and goes to FortiAnalyzer as typed. The rows that come
+    back are masked as always, and the filter a tool echoes is output like
+    any other: an IPv4 address or a colon-separated MAC in it leaves as its
+    token (an IPv6 address, or a MAC in another spelling, leaves as typed
+    unless a returned row carried it). So the caller can learn the token of
+    an address it supplied, and can test a guessed address against a token
+    it holds. That is accepted: the address was in the conversation before
+    the tool ran, and masking is there for what comes *from* FortiAnalyzer.
+    A v1 IP or MAC token is not resolved in this state; it is queried as
+    the address it looks like.
+  - Open (``true``): it is decrypted as a v1 token. A *real* address typed
+    by the caller is then replaced by a different real address and the
+    query runs for that one, with nothing in the answer to say so. Open
+    the window only for a conversation that still holds v1 tokens, and do
+    not type raw addresses into it.
 - Hostname case is lost at *mask* time, because the hostname alphabet is
   lowercase. ``FGT-BRANCH-01`` round trips to ``fgt-branch-01``. Harmless
   for DNS names, which are case insensitive; it matters for device names
@@ -206,9 +226,17 @@ class ArgUnmasker:
     def _unmask_by_type(self, vtype: str, value: str) -> str:
         """Resolve an unmarked IP/MAC token; pass through on failure.
 
+        Only while the v1 window is open (#180). An unmarked address is
+        what a v1 IP or MAC token looked like, and it is also what an
+        address the caller typed looks like. With the window closed nothing
+        can be a v1 token, so the value is the caller's own address and is
+        returned as it came.
+
         ``IP_OR_HOST`` fields only reach here when the value carries no
         ``host-`` marker, so whatever is left must be an address.
         """
+        if not self._engine.accept_v1_tokens:
+            return value
         try:
             if vtype in (IP, IP_OR_HOST):
                 return self._engine.unmask_ip(value)
@@ -297,8 +325,10 @@ class ArgUnmasker:
 
         Decompose, resolve, reassemble: the host resolves through the same
         field-context route as any ``IP_OR_HOST`` argument (marked-token
-        check first, then the ``unmask_ip`` fallback, so an IP-literal
-        host round-trips too), and a ``/url-<kid>-<ct>`` tail segment
+        check first, then, while the v1 window is open, the ``unmask_ip``
+        fallback for an unmarked IP-literal host; with the window closed
+        such a host is the caller's own and stays as typed), and a
+        ``/url-<kid>-<ct>`` tail segment
         decodes back to the exact original path+query+fragment. A URL
         that carries neither passes through untouched. A host or tail token
         that carries a marker but will not decrypt fails the whole value
@@ -406,7 +436,8 @@ class ArgUnmasker:
         """Resolve tokens inside a FAZ filter expression.
 
         ``srcip=="93.209.148.131" and user=="user-3f2a-k9x2q4"`` becomes the
-        expression over real values. Field names drive IP/MAC resolution;
+        expression over real values. Field names drive the resolution of an
+        unmarked IP/MAC, which happens only while the v1 window is open;
         marked tokens resolve regardless of the field they sit in.
 
         Raises:
