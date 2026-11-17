@@ -591,10 +591,13 @@ class ArgUnmasker:
         ``unmask_args`` types a value by its own key, and ``unmask_filter`` types
         it by the field name preceding it in the expression. A condition object
         does neither: the value sits under the literal key ``value`` while its
-        field name is a sibling. A masked IP is format-preserving and unmarked,
-        so without consulting that sibling the token is indistinguishable from a
-        real address and would be sent to the appliance as-is -- returning real
-        logs for a different host.
+        field name is a sibling. That matters for a v1 IP or MAC token, which is
+        a bare address with no marker and resolves only where the field says the
+        value is an address. While the v1 window is open, a token that was not
+        typed by its sibling would go to the appliance as the address it looks
+        like and return real logs for a different host. With the window closed,
+        which is the default, an unmarked address is the caller's own and going
+        out as typed is the intended behaviour (#180).
 
         Models are returned as models (re-validated from the resolved dump) so
         the tool still receives the type its signature declares.
