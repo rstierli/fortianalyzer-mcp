@@ -2362,6 +2362,18 @@ def install_masking(mcp: Any) -> tuple[OutputMasker, ArgUnmasker]:
         os.environ[MASKING_KEY_ENV] = settings.FAZ_MASKING_KEY
 
     engine = FPEEngine.from_env(accept_v1_tokens=settings.FAZ_MASKING_ACCEPT_V1_TOKENS)
+    if settings.FAZ_MASKING_ACCEPT_V1_TOKENS:
+        # Said once, here, and not per call (#180). An unmarked address
+        # always decrypts to some valid address, so the server cannot tell a
+        # v1 token from an address the caller typed: a line per accepted value
+        # would fire on every typed address and never go quiet, which makes it
+        # useless as a sign that the window can be closed. No value is logged.
+        logger.warning(
+            "FAZ_MASKING_ACCEPT_V1_TOKENS is true: an unmarked IP or MAC address in a tool "
+            "argument is read as a v1 token wherever an address is expected (an IP or MAC "
+            "argument, a filter value), so a query for an address typed there runs for a "
+            "different address. Set it to false once no conversation holds v1 tokens."
+        )
     masker = OutputMasker(engine, mask_device_identity=settings.FAZ_MASK_DEVICE_IDENTITY)
     unmasker = ArgUnmasker(engine)
     original_tool = mcp.tool
