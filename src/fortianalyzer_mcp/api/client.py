@@ -349,15 +349,28 @@ class FortiAnalyzerClient:
             return
 
         logger.info("Disconnecting from FortiAnalyzer")
-        # pyfmg hands its own timeout to requests, so this bounds the logout
-        # request itself; asyncio.wait_for would only stop waiting for it.
-        # fmg is dropped below, so nothing needs restoring.
-        fmg.timeout = min(self.timeout, self._LOGOUT_TIMEOUT)
         try:
             # A cancelled call can still be inside pyFMG and holds the I/O
             # lock until its worker returns. Shutdown does not wait that out,
             # and a logout beside it would be two threads on one session.
-            async with self._io_section(wait=fmg.timeout):
+            await self._logout(fmg, wait=min(self.timeout, self._LOGOUT_TIMEOUT))
+        finally:
+            self._fmg = None
+            self._connected = False
+            logger.info("Disconnected from FortiAnalyzer")
+
+    async def _logout(self, fmg: FortiManager, *, wait: float | None) -> None:
+        """End the session of ``fmg`` on FortiAnalyzer. Never raises.
+
+        ``wait`` bounds the wait for the I/O lock; when it runs out the logout
+        is skipped and the session is left to idle out.
+        """
+        # pyfmg hands its own timeout to requests, so this bounds the logout
+        # request itself; asyncio.wait_for would only stop waiting for it.
+        # The caller drops fmg, so nothing needs restoring.
+        fmg.timeout = min(self.timeout, self._LOGOUT_TIMEOUT)
+        try:
+            async with self._io_section(wait=wait):
                 await self._run_io(fmg.logout)
         except _IoBusy:
             logger.warning(
@@ -366,10 +379,6 @@ class FortiAnalyzerClient:
             )
         except Exception as e:
             logger.warning(f"Logout failed: {e}")
-        finally:
-            self._fmg = None
-            self._connected = False
-            logger.info("Disconnected from FortiAnalyzer")
 
     @contextlib.asynccontextmanager
     async def _io_section(self, wait: float | None = None) -> AsyncIterator[None]:
@@ -643,14 +652,28 @@ class FortiAnalyzerClient:
         (A stale session still reports ``is_connected`` locally, so the
         generation counter -- not ``is_connected`` -- is what detects a peer's
         reconnect.)
+
+        With username and password the old session is logged out before the
+        new login, so a re-login never leaves two sessions behind.
         """
         observed = self._reconnect_generation
         async with self._reconnect_lock:
             if self._reconnect_generation != observed:
                 # A concurrent caller already reconnected while we waited.
                 return
+            old = self._fmg
+            # Cleared before the logout: a call that arrives from here on finds
+            # no handle and waits for this re-login, so nothing is sent on a
+            # session that is being ended.
             self._connected = False
             self._fmg = None
+            if old is not None and not self.api_token:
+                # -11 is also what a permission denial returns, and then the
+                # old session is alive: a login beside it left one more
+                # session on FortiAnalyzer for every denied call (#187). A
+                # session that is already gone answers the logout with an
+                # error, which is ignored.
+                await self._logout(old, wait=None)
             await self.connect()
             self._reconnect_generation += 1
 
