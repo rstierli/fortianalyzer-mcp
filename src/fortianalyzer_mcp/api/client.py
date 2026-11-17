@@ -710,6 +710,17 @@ class FortiAnalyzerClient:
                 headers=headers,
             )
 
+        # The status is read before the body. FortiAnalyzer answers JSON-RPC
+        # with 200 and puts its errors in the body, so anything else comes
+        # from the web server or from a gateway in front of it. Such a reply
+        # can still be JSON with neither "error" nor "result", which the
+        # empty-reply rule below would turn into a success with no rows.
+        if response.status_code >= 400:
+            raise APIError(
+                f"HTTP {response.status_code} from FortiAnalyzer for {method.upper()} {url}; "
+                "the reply was not read"
+            )
+
         try:
             result = response.json()
         except json.JSONDecodeError as e:

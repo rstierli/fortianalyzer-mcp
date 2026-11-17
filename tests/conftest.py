@@ -507,6 +507,8 @@ def configure_logview_responses(mock_fmg_instance: MagicMock) -> None:
     """Configure mock responses for LogView API (uses _raw_request)."""
     # LogView API uses raw requests, so we need to mock the session
     mock_response = MagicMock()
+    # A real reply always has a status, and the raw path reads it first.
+    mock_response.status_code = 200
     mock_fmg_instance.sess = MagicMock()
 
     def mock_post(url: str, **kwargs: Any) -> MagicMock:
