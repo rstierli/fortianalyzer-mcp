@@ -55,7 +55,9 @@ This module is the OUTPUT side. Argument unmasking (Phase 2) lives in
 IPv6-in-text scanning is not yet handled. Device identity
 (``devname``, ``devid``, ``sn``, ``csf``, ``fortigate``, ``devvds``,
 ``detectkey``) is masked only when ``FAZ_MASK_DEVICE_IDENTITY`` is set, so
-by default a masked record still fingerprints the reporting device.
+by default a masked record still fingerprints the reporting device. A MAC
+under ``detectkey`` is an endpoint's own, not the device's, and is masked
+either way.
 """
 
 import contextvars
@@ -92,6 +94,7 @@ from fortianalyzer_mcp.masking.fields import (
     IP_HOST_OR_SERIAL,
     IP_OR_HOST,
     MAC,
+    MAC_WHEN_MAC_SHAPED,
     OBF_URL_KEY,
     SERIAL,
     SKIP_VALUES,
@@ -198,6 +201,17 @@ def _v2_envelope_around(engine: Any, text: str, start: int, end: int) -> bool:
 
 
 _MAC_RE = re.compile(r"\b[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}\b")
+
+
+def _is_endpoint_mac(lowered_key: str, value: Any) -> bool:
+    """True for a MAC under a device-identity key that can hold an endpoint's."""
+    return (
+        lowered_key in MAC_WHEN_MAC_SHAPED
+        and isinstance(value, str)
+        and _MAC_RE.fullmatch(value.strip()) is not None
+    )
+
+
 _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _DEVVDS_RE = re.compile(r"^(?P<dev>[^\[\]]+)\[(?P<vdom>[^\[\]]*)\]$")
 
@@ -1573,6 +1587,10 @@ class OutputMasker:
         it too, so a masked key can still land in the keep set: the
         exemption follows the VALUE's estate-identity status, not whether
         the key that carries it happens to mask unconditionally.
+
+        A MAC under ``detectkey`` is left out (``MAC_WHEN_MAC_SHAPED``): it
+        is the MAC of an endpoint that was detected by it, not estate
+        identity, and in this set it would stay clear under ``mac`` too.
         """
         out: set[str] = set()
 
@@ -1587,6 +1605,10 @@ class OutputMasker:
                     ):
                         out.update(part.strip() for part in value.split(","))
                     elif key.lower() in DEVICE_IDENTITY_TYPES:
+                        if _is_endpoint_mac(key.lower(), value):
+                            # An endpoint's own MAC, not estate identity:
+                            # keeping it would keep it clear under ``mac``.
+                            continue
                         if isinstance(value, str):
                             out.update(part.strip() for part in value.split(","))
                         elif isinstance(value, list | tuple):
@@ -2026,6 +2048,11 @@ class OutputMasker:
             return self._mask_composite_container(lowered, value, mapping, keep)
         if lowered in COMPOSITE_BREAKDOWNS and isinstance(value, dict):
             return self._mask_breakdowns(value, mapping, keep)
+
+        if _is_endpoint_mac(lowered, value):
+            # Not the appliance's serial this key usually holds: see
+            # MAC_WHEN_MAC_SHAPED. Masked as the MAC it is, flag or no flag.
+            return self._mask_scalar(MAC, value, mapping, keep=keep)
 
         vtype = self._field_types.get(lowered)
         if vtype is not None and vtype != TEXT:
