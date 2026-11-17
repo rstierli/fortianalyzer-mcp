@@ -8,7 +8,7 @@ import contextlib
 import json
 import logging
 import threading
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -31,10 +31,13 @@ logger = logging.getLogger(__name__)
 API_VERSION = 3
 
 
-async def _in_daemon_thread[**P, T](
-    func: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs
-) -> T:
-    """Run blocking pyfmg I/O on a daemon thread and await the result.
+def _start_daemon_call[T](
+    func: Callable[..., T],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    on_return: Callable[[], None] | None = None,
+) -> asyncio.Future[T]:
+    """Start blocking pyfmg I/O on a daemon thread; the future carries its outcome.
 
     ``asyncio.to_thread`` runs on the loop's default executor, and its workers
     are joined on the way out: ``asyncio.run()`` waits for them when it closes
@@ -44,7 +47,12 @@ async def _in_daemon_thread[**P, T](
     cancelled, then held a stdio server open for up to
     ``FORTIANALYZER_TIMEOUT`` after stdin closed. A daemon thread is not
     joined: cancelling the await abandons the request, and the thread ends
-    with the process. Callers still serialize on ``_io_lock``, as before.
+    with the process. Callers serialize on ``_io_lock`` through
+    ``FortiAnalyzerClient._io_section``.
+
+    ``on_return`` runs on the event loop once ``func`` has returned or raised,
+    before the future resolves and whether or not anyone still awaits it. That
+    is how the client learns that an abandoned request has left pyFMG.
     """
     loop = asyncio.get_running_loop()
     future: asyncio.Future[T] = loop.create_future()
@@ -57,10 +65,15 @@ async def _in_daemon_thread[**P, T](
         if not future.done():
             future.set_exception(exc)
 
+    def _finish(setter: Callable[[Any], None], value: Any) -> None:
+        if on_return is not None:
+            on_return()
+        setter(value)
+
     def _deliver(setter: Callable[[Any], None], value: Any) -> None:
         # The loop is closed if the server stopped while this request ran.
         with contextlib.suppress(RuntimeError):
-            loop.call_soon_threadsafe(setter, value)
+            loop.call_soon_threadsafe(_finish, setter, value)
 
     def _run() -> None:
         try:
@@ -71,7 +84,11 @@ async def _in_daemon_thread[**P, T](
             _deliver(_set_result, result)
 
     threading.Thread(target=_run, name="faz-io", daemon=True).start()
-    return await future
+    return future
+
+
+class _IoBusy(Exception):
+    """The I/O lock was not free within the time a caller was willing to wait."""
 
 
 class FortiAnalyzerClient:
@@ -166,6 +183,12 @@ class FortiAnalyzerClient:
         # threads. One in-flight FAZ request at a time matches the previous
         # (loop-blocking) behavior while keeping the event loop responsive.
         self._io_lock = asyncio.Lock()
+        # True from the start of a worker thread until it has returned. A
+        # cancelled call stops awaiting its worker, and the worker is still
+        # inside pyFMG: the lock then stays held and is released by the
+        # worker's return (see _io_section).
+        self._io_worker_running = False
+        self._io_release_pending = False
 
         logger.info(f"Initialized FortiAnalyzer client for {self.host}")
 
@@ -229,7 +252,7 @@ class FortiAnalyzerClient:
         # Hold the I/O lock across the connected-check and login so two
         # concurrent connect() calls (now possible since login runs off-loop)
         # cannot both log in and leak a session.
-        async with self._io_lock:
+        async with self._io_section():
             if self._connected:
                 return
             try:
@@ -258,7 +281,7 @@ class FortiAnalyzerClient:
                         "No authentication provided. Set API token or username/password."
                     )
 
-                code, response = await _in_daemon_thread(self._fmg.login)
+                code, response = await self._run_io(self._fmg.login)
 
                 if code != 0:
                     error_msg = response.get("status", {}).get("message", "Login failed")
@@ -278,7 +301,7 @@ class FortiAnalyzerClient:
                     # get_system_timezone), so a token that cannot read it is
                     # not a working configuration either. Twin of
                     # fortimanager-mcp#31.
-                    probe_code, probe = await _in_daemon_thread(self._fmg.get, "/sys/status")
+                    probe_code, probe = await self._run_io(self._fmg.get, "/sys/status")
                     if probe_code != 0:
                         if not isinstance(probe, dict):
                             # pyfmg returns (100, <Response>) for a non-JSON body.
@@ -331,14 +354,70 @@ class FortiAnalyzerClient:
         # fmg is dropped below, so nothing needs restoring.
         fmg.timeout = min(self.timeout, self._LOGOUT_TIMEOUT)
         try:
-            async with self._io_lock:
-                await _in_daemon_thread(fmg.logout)
+            # A cancelled call can still be inside pyFMG and holds the I/O
+            # lock until its worker returns. Shutdown does not wait that out,
+            # and a logout beside it would be two threads on one session.
+            async with self._io_section(wait=fmg.timeout):
+                await self._run_io(fmg.logout)
+        except _IoBusy:
+            logger.warning(
+                "A request is still in flight; the logout is skipped and the "
+                "session is left to idle out on FortiAnalyzer"
+            )
         except Exception as e:
             logger.warning(f"Logout failed: {e}")
         finally:
             self._fmg = None
             self._connected = False
             logger.info("Disconnected from FortiAnalyzer")
+
+    @contextlib.asynccontextmanager
+    async def _io_section(self, wait: float | None = None) -> AsyncIterator[None]:
+        """Hold the I/O lock for one or more pyFMG calls made with ``_run_io``.
+
+        The lock is released on the way out, unless a worker thread started
+        inside the section is still running. That happens when the call was
+        cancelled: the await is over and the request is not. Releasing then
+        let the next call run beside it, two threads on one requests.Session
+        (#187). The lock is kept instead and the worker's return releases it,
+        so a cancelled call can delay the next one by up to the request
+        timeout.
+
+        ``wait`` bounds the wait for the lock and raises ``_IoBusy`` when it
+        runs out. Without it the wait is unbounded, as before.
+        """
+        if wait is None:
+            await self._io_lock.acquire()
+        else:
+            try:
+                await asyncio.wait_for(self._io_lock.acquire(), wait)
+            except TimeoutError:
+                raise _IoBusy() from None
+        try:
+            yield
+        finally:
+            if self._io_worker_running:
+                self._io_release_pending = True
+            else:
+                self._io_lock.release()
+
+    async def _run_io[**P, T](
+        self, func: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs
+    ) -> T:
+        """Run one blocking pyFMG call on a daemon thread, inside ``_io_section``."""
+        future = _start_daemon_call(func, args, kwargs, on_return=self._io_worker_returned)
+        # Set after the thread has started, so a thread that could not start
+        # does not leave the lock held. The worker's return is delivered
+        # through the event loop, so it cannot run before this line.
+        self._io_worker_running = True
+        return await future
+
+    def _io_worker_returned(self) -> None:
+        """The worker thread has left pyFMG. Runs on the event loop."""
+        self._io_worker_running = False
+        if self._io_release_pending:
+            self._io_release_pending = False
+            self._io_lock.release()
 
     async def __aenter__(self) -> "FortiAnalyzerClient":
         """Async context manager entry."""
@@ -700,8 +779,8 @@ class FortiAnalyzerClient:
 
         # Make request off the event loop; serialized via the I/O lock so the
         # shared requests.Session is never used from two threads at once.
-        async with self._io_lock:
-            response = await _in_daemon_thread(
+        async with self._io_section():
+            response = await self._run_io(
                 fmg.sess.post,
                 fmg._url,
                 data=json.dumps(json_request),
@@ -792,8 +871,8 @@ class FortiAnalyzerClient:
             method = getattr(fmg, verb)
             # Run the blocking pyfmg verb off the event loop; serialized via
             # the I/O lock (shared requests.Session is not thread-safe).
-            async with self._io_lock:
-                code, response = await _in_daemon_thread(method, url, **kwargs)
+            async with self._io_section():
+                code, response = await self._run_io(method, url, **kwargs)
             return self._handle_response(code, response, f"{verb.upper()} {url}")
 
         return await self._execute_resilient(_factory, idempotent=verb.lower() == "get")
