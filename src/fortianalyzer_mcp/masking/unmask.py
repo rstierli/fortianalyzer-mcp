@@ -153,6 +153,28 @@ def _literal_spans(expression: str) -> list[tuple[int, int]]:
     return spans
 
 
+def filter_fields(expression: str) -> list[str]:
+    """The field name of each clause in a raw filter expression, in order.
+
+    Read by the clause and literal rules ``ArgUnmasker.unmask_filter``
+    resolves tokens by, so clause-shaped text inside a quoted literal is the
+    caller's value and names no field. For a tool that checks the names a
+    raw filter uses (``get_alerts``, issue #184), so that this server keeps
+    one reader of filter syntax.
+    """
+    spans = _literal_spans(expression)
+    fields: list[str] = []
+    pos = 0
+    while (match := _FILTER_CLAUSE_RE.search(expression, pos)) is not None:
+        literal = next((s for s in spans if s[0] < match.start() < s[1]), None)
+        if literal is not None:
+            pos = literal[1]
+            continue
+        fields.append(match.group("field"))
+        pos = match.end()
+    return fields
+
+
 #: What was resolved for the tool call in progress: real value -> the text
 #: the caller sent for it. A tool echoes what it was called with (the filter
 #: it sent, an error that names the value), and the output side only knows

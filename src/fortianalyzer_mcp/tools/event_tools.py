@@ -8,6 +8,7 @@ import logging
 from typing import Any
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
+from fortianalyzer_mcp.query.fields import get_vocabulary
 from fortianalyzer_mcp.query.shape import project_payload
 from fortianalyzer_mcp.server import get_faz_client, mcp
 from fortianalyzer_mcp.tool_annotations import CREATES, READ_ONLY, UPDATES
@@ -21,6 +22,21 @@ logger = logging.getLogger(__name__)
 # Bucket widths for the alert-incident stats endpoint, from its `timescale`
 # enum. Identical on 7.6.6 and 8.0.0.
 _VALID_TIMESCALES = {"month", "hour"}
+
+# Names a get_alerts filter may use that are not keys of an alert row, so the
+# alert vocabulary in query/fields.py does not carry them. The endpoint's
+# reference lists event_value, trigger_name, count, comment and flags as
+# filter fields. srcip is in no reference and works: measured, it returns the
+# same alerts as epip (#184). user is the field the hunt skill ties an
+# end-user's alerts to, and it is listed so that the server does not warn
+# about a filter it wrote itself. Measured over one 7-day window: on 8.0.2
+# user=="N/A" returned all 610 alerts and user!="N/A" none, where a field
+# alerts do not have returns none for either operator; on 7.6.8 both returned
+# none of 791, as for such a field. The names are compared as written:
+# Severity==... returned no alert on either build where severity==... did.
+_ALERT_FILTER_ONLY_FIELDS = frozenset(
+    {"event_value", "trigger_name", "count", "comment", "flags", "srcip", "user"}
+)
 
 
 def _get_client() -> FortiAnalyzerClient:
@@ -46,6 +62,33 @@ async def _parse_time_range(time_range: str) -> dict[str, str]:
     return parse_time_range(time_range, faz_tz=faz_tz)
 
 
+def _unknown_filter_field_warnings(filter: str | None) -> list[str]:
+    """One warning per field of a raw alert filter that this server does not know.
+
+    FortiAnalyzer answers a filter on a field alerts do not have with status
+    success and 0 rows (measured on 7.6.7, #184), so a mistyped name reads as
+    "no alerts". A warning and not a refusal, for the reason
+    ``query.fields.resolve_field`` warns on an unrecognised log field: the
+    known names are this server's knowledge, not the appliance's. The names
+    are read by the masking layer's clause reader, the one reader of raw
+    filter syntax in this server.
+    """
+    if not filter:
+        return []
+    # Imported here, so that a server with masking off loads the masking
+    # package only when a filter has to be read.
+    from fortianalyzer_mcp.masking.unmask import filter_fields
+
+    known = get_vocabulary("alert").canonical | _ALERT_FILTER_ONLY_FIELDS
+    unknown = dict.fromkeys(name for name in filter_fields(filter) if name not in known)
+    return [
+        f"filter field '{name}' is not in the known alert field set; passing it "
+        "through to FortiAnalyzer, which answers a filter on a field alerts do not "
+        "have with 0 rows and no error, so an empty result may mean the name is wrong."
+        for name in unknown
+    ]
+
+
 @mcp.tool(annotations=READ_ONLY)
 async def get_alerts(
     adom: str | None = None,
@@ -65,7 +108,10 @@ async def get_alerts(
             - "1-hour", "6-hour", "12-hour", "24-hour"
             - "1-day", "7-day", "30-day"
             - Custom: "2024-01-01 00:00:00|2024-01-02 00:00:00"
-        filter: Filter expression (e.g., "severity==critical")
+        filter: Filter expression (e.g., "severity==critical"). A field
+            outside the known alert field set is passed through and named in
+            `warnings`: FortiAnalyzer answers a filter on a field alerts do
+            not have with 0 rows and no error.
         limit: Maximum number of alerts to return (1-2000)
         offset: Record offset for pagination
         fields: Which keys each alert carries. Omit for a curated default
@@ -114,7 +160,7 @@ async def get_alerts(
             "count": len(data),
             "data": data,
             "fields_returned": returned,
-            "warnings": projection_warnings,
+            "warnings": _unknown_filter_field_warnings(filter) + projection_warnings,
         }
     except ValidationError as e:
         return error_response(
