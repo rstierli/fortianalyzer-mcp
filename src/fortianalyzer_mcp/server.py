@@ -42,12 +42,46 @@ def get_faz_client() -> FortiAnalyzerClient | None:
     return faz_client
 
 
-# Configure transport security for reverse proxy deployments
-_transport_security = None
-if settings.MCP_ALLOWED_HOSTS:
-    _transport_security = TransportSecuritySettings(
-        allowed_hosts=settings.MCP_ALLOWED_HOSTS,
+#: What the SDK allows by itself when it is handed no settings and binds to
+#: loopback (``MCPServer.streamable_http_app``). Handing it settings of our own
+#: replaces that list, so the loopback entries have to be put back by hand.
+_LOOPBACK_HOSTS = ("127.0.0.1:*", "localhost:*", "[::1]:*")
+_LOOPBACK_ORIGINS = ("http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*")
+
+
+def transport_security_for(
+    allowed_hosts: list[str], allowed_origins: list[str]
+) -> TransportSecuritySettings | None:
+    """Transport security for ``MCP_ALLOWED_HOSTS``, or None to let the SDK choose.
+
+    The configured hosts are added to the loopback entries, not put in their
+    place (#187): a health probe or a local client on 127.0.0.1 keeps working
+    once a proxy hostname is configured. ``MCP_ALLOWED_ORIGINS`` is added to
+    the loopback origins the same way, for a browser client that reaches the
+    public hostname; every other ``Origin`` gets 403.
+
+    Without ``MCP_ALLOWED_HOSTS`` nothing is passed. The SDK then protects the
+    server by itself only when it binds to loopback, so a server bound to
+    0.0.0.0 has no host check, and a list of origins is read by nobody.
+    """
+    if not allowed_hosts:
+        if allowed_origins:
+            logger.warning(
+                "MCP_ALLOWED_ORIGINS is set and MCP_ALLOWED_HOSTS is not: the origins "
+                "are not applied. Set MCP_ALLOWED_HOSTS to turn the host and origin "
+                "checks on."
+            )
+        return None
+    return TransportSecuritySettings(
+        allowed_hosts=[*_LOOPBACK_HOSTS, *allowed_hosts],
+        allowed_origins=[*_LOOPBACK_ORIGINS, *allowed_origins],
     )
+
+
+# Configure transport security for reverse proxy deployments
+_transport_security = transport_security_for(
+    settings.MCP_ALLOWED_HOSTS, settings.MCP_ALLOWED_ORIGINS
+)
 
 # Create the MCP server.
 #

@@ -126,9 +126,20 @@ class Settings(BaseSettings):
     # SettingsError at startup before the validator below ever runs.
     MCP_ALLOWED_HOSTS: Annotated[list[str], NoDecode] = Field(
         default_factory=list,
-        description="Additional allowed Host header values for DNS rebinding protection. "
-        "Comma-separated in env var (a JSON array is also accepted). "
-        "localhost/127.0.0.1 always allowed by SDK.",
+        description="Allowed Host header values for DNS rebinding protection. "
+        "Comma-separated in env var (a JSON array is also accepted). When set, the server "
+        "checks the Host and Origin headers and adds the loopback hosts and origins "
+        "(127.0.0.1, localhost, [::1], any port) itself, because the SDK drops its own "
+        "once a list is passed. When unset, this server passes no transport security: "
+        "the SDK then protects the server by itself only when it binds to loopback, so "
+        "a server bound to 0.0.0.0 has no host check.",
+    )
+    MCP_ALLOWED_ORIGINS: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        description="Additional allowed Origin header values, for a browser-based client "
+        "that reaches the public hostname (for example https://app.example.com). Same "
+        "format as MCP_ALLOWED_HOSTS. Added to the loopback origins; every other Origin "
+        "gets 403. Applied only when MCP_ALLOWED_HOSTS is set.",
     )
 
     # Tool Loading Mode
@@ -219,10 +230,11 @@ class Settings(BaseSettings):
         description="Skip write operations in tests",
     )
 
-    @field_validator("MCP_ALLOWED_HOSTS", mode="before")
+    @field_validator("MCP_ALLOWED_HOSTS", "MCP_ALLOWED_ORIGINS", mode="before")
     @classmethod
     def parse_allowed_hosts(cls, v: object) -> object:
-        """Parse MCP_ALLOWED_HOSTS from a comma-separated string or JSON array."""
+        """Parse an allowed-hosts or allowed-origins list from a comma-separated
+        string or JSON array."""
         if isinstance(v, str):
             s = v.strip()
             if not s:
