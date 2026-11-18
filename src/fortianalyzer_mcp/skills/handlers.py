@@ -1200,11 +1200,33 @@ async def run_alert_rules(params: AlertRulesParams) -> AlertRulesResult:
 # linked-indicator rows normalize regardless of the appliance's casing.
 _INDICATOR_TYPE_CANONICAL = {"ip": "IP", "url": "URL", "domain": "Domain"}
 
-# Event-log clause for identity_profile's recent-activity search:
-# authentication failures plus VPN activity. Follows the FortiGate
-# event-log schema (action/subtype); the exact field values vary by build
-# and this clause is the single place to adjust once live-verified.
-_IDENTITY_ACTIVITY_CLAUSE = "(action==failure or subtype==vpn)"
+# What counts as a failed login in the event log (#187). Measured on
+# FortiAnalyzer 7.6.7 and on 8.0.2 with a FortiOS 7.6.6 FortiGate, and on a
+# replayed FortiGate event log:
+#
+# - ``action==failure``, the clause used before, matched no row at all.
+# - ``status`` by itself counts tunnel noise: IPsec phase 1 ``negotiate`` and
+#   FortiAnalyzer ``connect`` failures carry ``status==failure`` too.
+# - An admin login that fails is ``action==login`` with ``status==failed``,
+#   and the lockout that follows has the same pair. The user-subtype events
+#   (``authentication``, ``FSS0-auth``, ``NTLM-auth``) spell it ``failure``,
+#   and a lockout there is ``locked_out``. ``FSS0`` is FortiOS's own spelling,
+#   with a zero.
+# - An SSL-VPN login failure is ``action==ssl-login-fail`` and carries no
+#   ``status`` field (1081 of 1081 measured), so the action stands by itself.
+#
+# The outer parentheses are part of the clause: it is always joined to an
+# entity with ``and``, and without them an SSL-VPN failure of any user would
+# count for every entity.
+_FAILED_LOGIN_CLAUSE = (
+    "(action==ssl-login-fail or ((action==login or action==authentication "
+    "or action==FSS0-auth or action==NTLM-auth) "
+    "and (status==failed or status==failure or status==locked_out)))"
+)
+
+# Event-log clause for identity_profile's recent-activity search: failed
+# logins plus VPN activity.
+_IDENTITY_ACTIVITY_CLAUSE = f"({_FAILED_LOGIN_CLAUSE} or subtype==vpn)"
 
 # risk_assessment weights and per-severity points (one-line adjustable).
 # Composite = round(_W_VULN*vuln + _W_THREAT*threat + _W_AUTH*auth) when all
@@ -1607,6 +1629,7 @@ async def run_identity_profile(params: IdentityProfileParams) -> IdentityProfile
         user=user,
         endpoints=endpoints,
         recent_activity=recent_activity,
+        activity_clause=_IDENTITY_ACTIVITY_CLAUSE,
         counts={"endpoints": len(endpoints), "activity_rows": len(activity_rows)},
         time_range=params.time_range,
         warnings=warnings,
@@ -2052,7 +2075,7 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
             adom=params.adom,
             logtype="event",
             time_range=params.time_range,
-            filter=f"action==failure and {entity_filter}",
+            filter=f"{_FAILED_LOGIN_CLAUSE} and {entity_filter}",
             limit=1000,
             # Counts rows and reads `total`; keeps the row shape the skill's
             # other log reads use rather than a silently different one.
@@ -2105,6 +2128,7 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
             subscore=auth_sub,
             weight=_W_AUTH,
         ),
+        failed_login_clause=_FAILED_LOGIN_CLAUSE,
         composite_score=composite,
         band=_risk_band(composite) if composite is not None else None,  # type: ignore[arg-type]
         dimensions_scored=len(ran),
