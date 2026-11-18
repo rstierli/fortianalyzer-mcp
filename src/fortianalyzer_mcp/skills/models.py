@@ -634,6 +634,10 @@ class IdentityProfileResult(BaseModel):
         description="Auth-failure / VPN event-log rows for the user in the "
         "window, verbatim — or the gap marker"
     )
+    activity_clause: str = Field(
+        description="The event-log clause the activity search joined to the "
+        "user: failed logins or VPN activity"
+    )
     counts: dict[str, int] = Field(description="endpoints / activity_rows totals")
     time_range: str
     warnings: list[str] = Field(default_factory=list)
@@ -813,8 +817,9 @@ class RiskAssessmentResult(BaseModel):
       over CVE severity counts for the entity's endpoint(s)
     - threat = min(100, critical*25 + high*10 + medium*3) over threat
       detections tied to the entity in the window
-    - auth_failure = min(100, failures*5) over event-log auth failures
-      (``action==failure``) tied to the entity in the window
+    - auth_failure = min(100, failures*5) over the failed logins in the event
+      log tied to the entity in the window. ``failed_login_clause`` is the
+      clause that decides what a failed login is
     - composite_score = round(0.40*vulnerability + 0.35*threat
       + 0.25*auth_failure) when all three dimensions ran. A dimension that
       did not run is left out and the weights of the rest are renormalised
@@ -842,6 +847,10 @@ class RiskAssessmentResult(BaseModel):
     vulnerability: RiskDimension
     threat: RiskDimension
     auth_failure: RiskDimension
+    failed_login_clause: str = Field(
+        description="The event-log clause the auth_failure dimension counted: "
+        "what was taken for a failed login"
+    )
     composite_score: int | None = Field(
         ge=0,
         le=100,

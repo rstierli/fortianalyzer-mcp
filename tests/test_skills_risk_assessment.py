@@ -108,7 +108,10 @@ class TestEndpointScoring:
         assert fortiview.call_args.kwargs["view_name"] == "top-threats"
         assert fortiview.call_args.kwargs["filter"] == "srcip==192.0.2.10"
         assert logs.call_args.kwargs["logtype"] == "event"
-        assert logs.call_args.kwargs["filter"] == "action==failure and srcip==192.0.2.10"
+        assert (
+            logs.call_args.kwargs["filter"]
+            == f"{handlers._FAILED_LOGIN_CLAUSE} and srcip==192.0.2.10"
+        )
 
         assert result.entity == {"type": "endpoint", "epid": 1025, "record": ENDPOINT}
         assert result.vulnerability.raw_counts == {
@@ -197,7 +200,7 @@ class TestEnduserScoring:
         vulns.assert_not_called()
         # #184: top-threats takes no user filter, so the view is not asked.
         fortiview.assert_not_called()
-        assert logs.call_args.kwargs["filter"] == "action==failure and user==alice"
+        assert logs.call_args.kwargs["filter"] == f"{handlers._FAILED_LOGIN_CLAUSE} and user==alice"
         assert result.entity == {"type": "enduser", "euid": 7, "record": ENDUSER}
         assert result.vulnerability.subscore == 0
         assert result.vulnerability.raw_counts == {}
