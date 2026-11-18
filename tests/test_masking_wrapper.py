@@ -615,6 +615,109 @@ class TestInstallMasking:
 
         assert os.environ.get("FAZ_MASKING_KEY") == KEY
 
+    def test_an_open_v1_window_is_warned_about_once_at_install(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        """An unmarked address cannot be told from a v1 token, so accepting
+        one cannot be logged per call (#180). The deployment is told once,
+        at startup, that the window is open and what that does."""
+        import logging
+
+        from mcp.server.mcpserver import MCPServer
+
+        import fortianalyzer_mcp.utils.config as config_mod
+
+        monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
+        monkeypatch.setattr(
+            config_mod, "get_settings", lambda: _settings_with(FAZ_MASKING_ACCEPT_V1_TOKENS=True)
+        )
+        with caplog.at_level(logging.DEBUG, logger="fortianalyzer_mcp.masking"):
+            install_masking(MCPServer("test"))
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        message = warnings[0].getMessage()
+        assert "FAZ_MASKING_ACCEPT_V1_TOKENS" in message
+        assert "v1 token" in message
+
+    def test_a_closed_v1_window_is_not_warned_about(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        import logging
+
+        from mcp.server.mcpserver import MCPServer
+
+        import fortianalyzer_mcp.utils.config as config_mod
+
+        monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
+        monkeypatch.setattr(
+            config_mod, "get_settings", lambda: _settings_with(FAZ_MASKING_ACCEPT_V1_TOKENS=False)
+        )
+        with caplog.at_level(logging.DEBUG, logger="fortianalyzer_mcp.masking"):
+            install_masking(MCPServer("test"))
+
+        assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+    async def test_an_accepted_unmarked_address_adds_no_log_line_and_no_value(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        """The startup warning is the whole signal. Resolving an unmarked
+        address logs nothing, at any level, and no record holds the address
+        that was sent or the one it resolved to."""
+        import logging
+
+        from mcp.server.mcpserver import MCPServer
+
+        import fortianalyzer_mcp.utils.config as config_mod
+        from fortianalyzer_mcp.tool_annotations import READ_ONLY
+
+        monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
+        monkeypatch.setattr(
+            config_mod, "get_settings", lambda: _settings_with(FAZ_MASKING_ACCEPT_V1_TOKENS=True)
+        )
+        sent = FPEEngine(KEY).mask_ip("192.0.2.102")
+        calls: list[str] = []
+        with caplog.at_level(logging.DEBUG, logger="fortianalyzer_mcp.masking"):
+            mcp = MCPServer("test")
+            install_masking(mcp)
+            at_startup = len(caplog.records)
+
+            @mcp.tool(annotations=READ_ONLY)
+            async def fake_query(srcip: str) -> dict:
+                calls.append(srcip)
+                return {"count": 0}
+
+            await fake_query(srcip=sent)
+            await fake_query(srcip=sent)
+
+        assert calls == ["192.0.2.102", "192.0.2.102"]  # the window is open
+        assert len(caplog.records) == at_startup
+        logged = " ".join(r.getMessage() for r in caplog.records)
+        assert sent not in logged
+        assert "192.0.2.102" not in logged
+        assert all(not r.args for r in caplog.records if r.levelno == logging.WARNING)
+
+    def test_the_v1_window_warning_comes_from_install_only(self, caplog: pytest.LogCaptureFixture):
+        """With masking off the server never calls install_masking. Reading
+        the flag and building an engine with the window open warn about
+        nothing, so a deployment without masking is not told about a path it
+        does not have."""
+        import logging
+
+        from fortianalyzer_mcp.masking.unmask import ArgUnmasker
+        from fortianalyzer_mcp.utils.config import Settings
+
+        with caplog.at_level(logging.DEBUG):
+            settings = Settings(
+                FORTIANALYZER_HOST="faz.example.com",
+                MASKING_ENABLED=False,
+                FAZ_MASKING_ACCEPT_V1_TOKENS=True,
+                _env_file=None,
+            )
+            ArgUnmasker(FPEEngine(KEY, accept_v1_tokens=settings.FAZ_MASKING_ACCEPT_V1_TOKENS))
+
+        assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
 
 class TestCompositeListShapes:
     """#73 item 1: composite keys arriving as lists must not fall through
@@ -871,8 +974,14 @@ class TestMutatingToolGate:
         assert calls == [ip_token]  # NOT decrypted
 
     async def test_read_only_tool_still_restores(self, monkeypatch: pytest.MonkeyPatch):
+        import fortianalyzer_mcp.utils.config as config_mod
         from fortianalyzer_mcp.tool_annotations import READ_ONLY
 
+        # The token below is the v1 form, a bare address, and that is read
+        # as a token only while the v1 window is open (#180).
+        monkeypatch.setattr(
+            config_mod, "get_settings", lambda: _settings_with(FAZ_MASKING_ACCEPT_V1_TOKENS=True)
+        )
         mcp = self._install(monkeypatch)
         engine = FPEEngine(KEY)
         token = engine.mask_ip("192.0.2.102")
