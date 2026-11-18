@@ -81,6 +81,8 @@ class _Appliance:
         params = request["params"][0]
         self.posts.append((method, params, body))
         response = MagicMock()
+        # A real reply has a status, and the raw request path reads it first.
+        response.status_code = 200
         response.json.return_value = {"result": self._answer(method, params["url"])}
         return response
 
@@ -267,13 +269,14 @@ class TestLayoutWithoutSchedule:
         assert result["time_period"] == "last-1-hours"
 
     @BOTH_TOOLS
-    async def test_device_filter_is_kept(
+    async def test_a_device_goes_into_schedule_param_as_its_name(
         self, tool: Any, appliance: Callable[..., _Appliance]
     ) -> None:
-        """A device filter is not widened to "all" because the form changed.
+        """``device`` inside ``schedule-param`` is a string.
 
-        Not measured: issue #181 ran device "all" only. The filter goes where
-        the custom-window form already puts it.
+        Measured on 7.6.7 (#189): the list form the flat run takes,
+        ``[{"devname": ...}]``, is rejected there with "parse object 'device'
+        error" and no run starts. A plain device name is accepted.
         """
         faz = appliance(NO_SCHEDULE)
 
@@ -282,24 +285,53 @@ class TestLayoutWithoutSchedule:
         )
 
         assert result["status"] == "success"
-        assert faz.run_params()["schedule-param"]["device"] == [{"devname": "fw-branch-01"}]
+        assert faz.run_params()["schedule-param"]["device"] == "fw-branch-01"
 
     @BOTH_TOOLS
-    async def test_month_period_is_sent_as_it_is(
+    async def test_a_custom_window_with_a_device_sends_the_name_too(
         self, tool: Any, appliance: Callable[..., _Appliance]
     ) -> None:
-        """A month count has no schedule-param spelling in issue #181.
+        faz = appliance(NO_SCHEDULE)
 
-        Not measured. It is sent unchanged, so the appliance answers for it
-        instead of this code guessing a window.
+        result = await tool(
+            layout=str(LAYOUT_ID), adom="root", device="fw-branch-01", time_range=CUSTOM_RANGE
+        )
+
+        assert result["status"] == "success"
+        assert faz.run_params()["schedule-param"]["device"] == "fw-branch-01"
+
+    @BOTH_TOOLS
+    @pytest.mark.parametrize("time_range", ["last-1-months", "last-12-months"])
+    async def test_a_month_period_is_refused_and_no_run_is_sent(
+        self, tool: Any, time_range: str, appliance: Callable[..., _Appliance]
+    ) -> None:
+        """``schedule-param`` has no month period.
+
+        Measured on 7.6.7 (#189): "last-1-months" is rejected there with
+        "parse object 'time-period' error". It is refused here, with the
+        periods that do run, before a run request is made.
         """
         faz = appliance(NO_SCHEDULE)
 
-        await tool(layout=str(LAYOUT_ID), adom="root", time_range="last-1-months")
+        result = await tool(layout=str(LAYOUT_ID), adom="root", time_range=time_range)
 
-        assert faz.run_params()["schedule-param"] == _schedule_param(
-            **{"time-period": "last-1-months"}
-        )
+        assert result["status"] == "error"
+        for alternative in ("last-N-days", "last-N-weeks", "start|end"):
+            assert alternative in result["message"]
+        assert faz.writes() == []
+        assert RUN_URL not in faz.urls()
+
+    @BOTH_TOOLS
+    @pytest.mark.parametrize("time_range", ["last-0-hours", "last-0-days", "last-0-weeks"])
+    async def test_a_count_of_zero_is_refused_and_no_run_is_sent(
+        self, tool: Any, time_range: str, appliance: Callable[..., _Appliance]
+    ) -> None:
+        faz = appliance(NO_SCHEDULE)
+
+        result = await tool(layout=str(LAYOUT_ID), adom="root", time_range=time_range)
+
+        assert result["status"] == "error"
+        assert faz.writes() == []
 
 
 class TestLayoutWithSchedule:
@@ -359,6 +391,36 @@ class TestLayoutWithSchedule:
             '"period-start": "00:00 2026/06/27", "period-end": "00:00 2026/06/28"}}], '
             '"id": 1, "jsonrpc": "2.0", "session": "mock-session-id"}'
         )
+
+    @BOTH_TOOLS
+    async def test_a_custom_window_with_a_device_sends_the_name(
+        self, tool: Any, appliance: Callable[..., _Appliance]
+    ) -> None:
+        """The custom window runs through ``schedule-param`` on every layout,
+        so the device is a string here as well. The flat preset form above
+        keeps its list."""
+        faz = appliance(HAS_SCHEDULE)
+
+        result = await tool(
+            layout=str(LAYOUT_ID), adom="root", device="fw-branch-01", time_range=CUSTOM_RANGE
+        )
+
+        assert result["status"] == "success"
+        assert faz.run_params()["schedule-param"]["device"] == "fw-branch-01"
+        assert "device" not in {k for k in faz.run_params() if k != "schedule-param"}
+
+    @BOTH_TOOLS
+    async def test_a_month_period_still_runs_in_the_flat_form(
+        self, tool: Any, appliance: Callable[..., _Appliance]
+    ) -> None:
+        """The refusal is for ``schedule-param`` only. With a schedule the
+        request is the one main sent."""
+        faz = appliance(HAS_SCHEDULE)
+
+        result = await tool(layout=str(LAYOUT_ID), adom="root", time_range="last-1-months")
+
+        assert result["status"] == "success"
+        assert faz.run_params()["time-period"] == "last-1-months"
 
     async def test_run_report_says_no_schedule_was_created(
         self, appliance: Callable[..., _Appliance]

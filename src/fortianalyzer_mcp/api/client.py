@@ -1604,6 +1604,7 @@ class FortiAnalyzerClient:
         period_end: str | None = None,
         period_last_n: int | None = None,
         without_schedule: bool = False,
+        device_name: str | None = None,
     ) -> dict[str, Any]:
         """Run a report.
 
@@ -1625,6 +1626,10 @@ class FortiAnalyzerClient:
                 without_schedule it must be a value of the ``schedule-param``
                 time-period enum (see below).
             device: Device filter list [{"devname": "myfw01"}, ...], or None.
+                Sent by the flat form only.
+            device_name: The device as the caller named it, or None for all
+                devices. Sent by the two ``schedule-param`` forms, which take
+                a string (see below).
             period_start: Custom window start as a FortiOS ``timedate`` string
                 ("HH:MM yyyy/mm/dd"). When both period_start and period_end are
                 given, the run uses a custom window instead of ``time_period``.
@@ -1650,12 +1655,23 @@ class FortiAnalyzerClient:
         is the enum of the reference, not the flat form's string:
         "last-1-hours" is rejected there ("parse object 'time-period' error"),
         while "last-n-hours" with ``period-last-n`` 1 runs.
+
+        ``device`` inside ``schedule-param`` is a string, not the list the
+        flat form takes. Measured on 7.6.7 (#189): ``[{"devname": ...}]`` is
+        rejected there with "parse object 'device' error" and no run starts,
+        while a plain device name is accepted and echoed as
+        ``device: {count: 1, data: "<name>"}``. So both ``schedule-param``
+        forms send ``device_name``, or "all". Not measured: a serial, a serial
+        or name with a VDOM suffix, and more than one device. The custom
+        window sent the list form before, so a custom window with a device
+        was very likely rejected; that was inferred from the same field and
+        the same parse, not run.
         """
         if period_start and period_end:
             # Custom window: nested schedule-param, no top-level "schedule".
             schedule_param: dict[str, Any] = {
                 "layout-id": layout_id,
-                "device": device if device else "all",
+                "device": device_name if device_name else "all",
                 "filter-logic": "all",
                 "time-period": "other",
                 "period-start": period_start,
@@ -1670,7 +1686,7 @@ class FortiAnalyzerClient:
             # Preset on a layout with no schedule: nested schedule-param too.
             schedule_param = {
                 "layout-id": layout_id,
-                "device": device if device else "all",
+                "device": device_name if device_name else "all",
                 "filter-logic": "all",
                 "time-period": time_period,
             }

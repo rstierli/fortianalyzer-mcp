@@ -136,6 +136,7 @@ def _custom_window_timedate(time_range: str) -> tuple[str, str]:
 # count of hours, days or weeks goes in the generic form with period-last-n.
 _SCHEDULE_PARAM_ENUM_PERIODS = frozenset({"last-7-days", "last-30-days"})
 _COUNTED_PERIOD_RE = re.compile(r"last-([0-9]+)-(hours|days|weeks)")
+_MONTH_PERIOD_RE = re.compile(r"last-[0-9]+-months")
 
 
 def _schedule_param_time_period(time_period: str) -> tuple[str, int | None]:
@@ -147,10 +148,24 @@ def _schedule_param_time_period(time_period: str) -> tuple[str, int | None]:
         return time_period, None
     counted = _COUNTED_PERIOD_RE.fullmatch(time_period)
     if counted:
-        return f"last-n-{counted.group(2)}", int(counted.group(1))
-    # "other" (custom window) needs no mapping. A month count, or a period
-    # without a count, has no measured spelling here: it is sent unchanged so
-    # the appliance answers for it rather than this code guessing a window.
+        count = int(counted.group(1))
+        if count == 0:
+            raise ValidationError(
+                f"A report cannot run for {time_period!r}: the count has to be at least 1."
+            )
+        return f"last-n-{counted.group(2)}", count
+    if _MONTH_PERIOD_RE.fullmatch(time_period):
+        # Measured on 7.6.7 (#189): "last-1-months" is rejected inside
+        # schedule-param ("parse object 'time-period' error"). Refused here,
+        # before a run request is made, with the periods that do run.
+        raise ValidationError(
+            f"This report layout has no schedule, and a run without one cannot use "
+            f"{time_period!r}: FortiAnalyzer takes no month period there. Use a number "
+            "of days (last-N-days) or weeks (last-N-weeks), or a custom 'start|end' range."
+        )
+    # "other" (custom window) needs no mapping. A period without a count has
+    # no measured spelling here: it is sent unchanged so the appliance answers
+    # for it rather than this code guessing a window.
     return time_period, None
 
 
@@ -472,6 +487,7 @@ async def run_report(
             adom=adom,
             layout_id=layout_id,
             device=device_filter,
+            device_name=device or None,
             period_start=period_start,
             period_end=period_end,
             **_run_period_args(schedule_result["exists"], time_period),
@@ -803,6 +819,7 @@ async def run_and_wait_report(
             adom=adom,
             layout_id=layout_id,
             device=device_filter,
+            device_name=device or None,
             period_start=period_start,
             period_end=period_end,
             **_run_period_args(schedule_result["exists"], time_period),
