@@ -22,7 +22,7 @@ import json
 import logging
 from collections.abc import Awaitable, Coroutine
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from fortianalyzer_mcp.query.groups import VIEW_SORT_DEFAULTS
 from fortianalyzer_mcp.skills.models import (
@@ -2079,7 +2079,9 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
     # The composite covers the dimensions that ran. One that did not run is
     # left out, not scored 0, and the weights of the rest are renormalised to
     # sum to 1 (#184). One that ran and found nothing is a real 0.
-    dimensions = {
+    dimensions: dict[
+        Literal["vulnerability", "threat", "auth_failure"], tuple[bool, float, int]
+    ] = {
         "vulnerability": (vuln_available, _W_VULN, vuln_sub),
         "threat": (threat_available, _W_THREAT, threat_sub),
         "auth_failure": (auth_available, _W_AUTH, auth_sub),
@@ -2108,7 +2110,7 @@ async def run_risk_assessment(params: RiskAssessmentParams) -> RiskAssessmentRes
         composite_score=composite,
         band=_risk_band(composite) if composite is not None else None,  # type: ignore[arg-type]
         dimensions_scored=len(ran),
-        dimensions_unavailable=missing,  # type: ignore[arg-type]
+        dimensions_unavailable=missing,
         time_range=params.time_range,
         warnings=warnings,
     )
@@ -2480,7 +2482,7 @@ async def _entity_behavioral_alerts(
     """The entity's behavioural alert-handler / IOC alerts in the window.
 
     One eventmgmt GET (no logview slot): alerts in the window filtered to
-    the entity's pivot (srcip==<epip> / user==<euname>), then narrowed to
+    the entity's pivot (srcip==<epip> / euid==<id>), then narrowed to
     the ones whose handler reads as a behavioural / IOC detection. FAZ's own
     anomaly detections — the RFC's "strongest FAZ-provided behavioural
     signal". Degrades to a ``FeatureGap`` when the read fails or the entity
@@ -2495,7 +2497,7 @@ async def _entity_behavioral_alerts(
     if pivot is None:
         return (
             FeatureGap(
-                reason=f"entity {entity_ref} yields no srcip/user pivot; "
+                reason=f"entity {entity_ref} yields no srcip pivot; "
                 "behavioural detections cannot be tied to it"
             ),
             False,
@@ -2631,19 +2633,14 @@ async def _hunt_behavior(
         raise SkillExecutionError(f"end-user {entity_id} not found in the UEBA directory")
 
     importance = record.get("importance")
-    pivot = None
-    euname = record.get("euname")
-    if euname:
-        pivot, gap = _record_pivot("user", euname, "euname")
-        if gap:
-            warnings.append(
-                f"behavior[{entity_id}]: {gap}; behavioural detections cannot be tied to it"
-            )
-    else:
-        warnings.append(
-            f"behavior[{entity_id}]: end-user carries no 'euname'; behavioural "
-            "detections cannot be tied to it"
-        )
+    # Alerts are tied to an end-user by euid, the id the caller asked for.
+    # user==<euname> was used before and is not read on alerts on 7.6:
+    # user=="N/A" and user!="N/A" both returned nothing on 7.6.7 and 7.6.8,
+    # which is how a field alerts do not have behaves. euid is read on 7.6.7,
+    # 7.6.8 and 8.0.2 (7.6.7: euid==3 gave 867 of 1256 alerts, euid!=3 the
+    # other 389). Measured is that the field is read, no more: no lab alert
+    # belongs to a real end-user (none carries an euid above 3).
+    pivot = f"euid=={entity_id}"
     detections, alerts_truncated = await _entity_behavioral_alerts(
         adom, pivot, time_range, warnings, str(entity_id)
     )

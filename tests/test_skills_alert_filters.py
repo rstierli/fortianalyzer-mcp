@@ -99,7 +99,16 @@ class TestSkillAlertFiltersDoNotWarn:
 
         assert alert_reads == [("srcip==192.0.2.7", "success", [])]
 
-    async def test_hunt_ties_alerts_to_an_end_user_by_user(self, alert_reads: list[Any]) -> None:
+    async def test_hunt_ties_alerts_to_an_end_user_by_euid(self, alert_reads: list[Any]) -> None:
+        """Alerts are tied to an end-user by ``euid``, the id the caller gave.
+
+        ``user`` is not read on alerts on 7.6.7 or 7.6.8: ``user=="N/A"`` and
+        ``user!="N/A"`` both return nothing there, which is how a field that
+        alerts do not have behaves. ``euid`` is read on 7.6.7, 7.6.8 and
+        8.0.2 (on 7.6.7 ``euid==3`` gave 867 of 1256 alerts and ``euid!=3``
+        the other 389). Only that the field is read was measured: no lab
+        alert belongs to a real end-user.
+        """
         with (
             t(GET_ENDUSERS, return_value=ok(data=[ENDUSER])),
             t(QUERY_LOGS, return_value=ok(tid=1, logs=[], total=0)),
@@ -108,4 +117,45 @@ class TestSkillAlertFiltersDoNotWarn:
                 HuntParams(entity="euid:42", sweep_logtypes=["traffic"], include_estate_stats=False)
             )
 
-        assert alert_reads == [("user==jdoe", "success", [])]
+        assert alert_reads == [("euid==42", "success", [])]
+
+    async def test_an_end_user_without_a_name_is_still_tied_to_its_alerts(
+        self, alert_reads: list[Any]
+    ) -> None:
+        """The alert pivot no longer needs ``euname``. The log sweep does."""
+        nameless = {"euid": 42, "importance": "low"}
+        with (
+            t(GET_ENDUSERS, return_value=ok(data=[nameless])),
+            t(QUERY_LOGS, return_value=ok(tid=1, logs=[], total=0)),
+        ):
+            result = await handlers.run_hunt(
+                HuntParams(entity="euid:42", sweep_logtypes=["traffic"], include_estate_stats=False)
+            )
+
+        assert alert_reads == [("euid==42", "success", [])]
+        assert isinstance(result.behavior.behavioral_detections, list)
+
+
+class TestUserIsNotAKnownAlertField:
+    """``user`` was listed so that the hunt's own filter did not warn.
+
+    The hunt no longer writes it, and on 7.6 it is a field alerts do not
+    have, so a filter on it returns 0 rows with no error. The warning is
+    the only sign of that. On 8.0.2 the appliance does read ``user`` on
+    alerts, so a caller there gets the warning for a filter that works.
+    """
+
+    async def test_a_filter_on_user_warns(self, alert_reads: list[Any]) -> None:
+        result = await event_tools.get_alerts(filter="user==jdoe")
+
+        assert result["status"] == "success"
+        assert len(result["warnings"]) == 1
+        assert "'user'" in result["warnings"][0]
+
+    @pytest.mark.parametrize("clause", ["euid==42", "euname==jdoe", "srcip==192.0.2.7"])
+    async def test_the_fields_alerts_do_carry_do_not_warn(
+        self, alert_reads: list[Any], clause: str
+    ) -> None:
+        result = await event_tools.get_alerts(filter=clause)
+
+        assert result["warnings"] == []
