@@ -153,6 +153,17 @@ class TestTheDeprecationWindow:
         assert closed.unmask_ip(closed.mask_ip("192.0.2.9")) == "192.0.2.9"
         assert closed.unmask_mac(closed.mask_mac("54:01:81:74:f5:ef")) == "54:01:81:74:f5:ef"
 
+    def test_the_engine_says_whether_the_window_is_open(self) -> None:
+        """Read-only, for the caller that has to act on the window itself:
+        ``ArgUnmasker`` reads an unmarked address as a v1 token only while
+        it is open (#180)."""
+        closed = FPEEngine(KEY, accept_v1_tokens=False)
+
+        assert FPEEngine(KEY, accept_v1_tokens=True).accept_v1_tokens is True
+        assert closed.accept_v1_tokens is False
+        with pytest.raises(AttributeError):
+            closed.accept_v1_tokens = True
+
     def test_the_open_window_says_so_once(
         self, engine: FPEEngine, caplog: pytest.LogCaptureFixture
     ) -> None:
