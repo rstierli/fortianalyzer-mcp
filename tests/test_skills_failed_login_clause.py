@@ -187,3 +187,44 @@ class TestIdentityProfile:
         _, result = await _identity_filter()
 
         assert result.activity_clause == f"({CLAUSE} or subtype==vpn)"
+
+
+class TestTheFiltersReachTheApplianceAsWritten:
+    """The skill tests above patch ``query_logs``. These run the real tool.
+
+    A nested clause with ``or`` inside ``and`` has to arrive at the log search
+    exactly as the skill wrote it, and the masking layer, which reads every
+    clause of a raw filter, has to leave it alone: none of its values is a
+    token.
+    """
+
+    FILTERS = [f"{CLAUSE} and srcip==192.0.2.10", f"user==alice and ({CLAUSE} or subtype==vpn)"]
+
+    @pytest.mark.parametrize("sent", FILTERS, ids=["risk_assessment", "identity_profile"])
+    async def test_query_logs_forwards_it_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch, sent: str
+    ) -> None:
+        from fortianalyzer_mcp.tools import log_tools
+        from tests.test_response_contract import ContractFaz, _install, _rows
+
+        fake = ContractFaz(page=_rows(2), total=2)
+        _install(monkeypatch, fake)
+
+        result = await log_tools.query_logs(
+            adom="root", logtype="event", time_range="24-hour", filter=sent
+        )
+
+        assert result["status"] == "success"
+        assert fake.start_calls[0]["filter"] == sent
+
+    @pytest.mark.parametrize("sent", FILTERS, ids=["risk_assessment", "identity_profile"])
+    def test_the_masking_layer_leaves_it_alone(self, sent: str) -> None:
+        from fortianalyzer_mcp.masking.fpe_engine import FPEEngine
+        from fortianalyzer_mcp.masking.unmask import ArgUnmasker
+
+        # The v1 window closed, as the server has it by default. Open, the
+        # endpoint's address would be read as a v1 token (#180); the clause
+        # would still be untouched.
+        engine = FPEEngine("2DE79D232DF5585D68CE47882AE256D6", accept_v1_tokens=False)
+
+        assert ArgUnmasker(engine).unmask_filter(sent) == sent
