@@ -895,9 +895,9 @@ class TestMutatingToolGate:
         self, monkeypatch: pytest.MonkeyPatch
     ):
         """A resolved filter value that no literal can hold (#164) fails the
-        call before the body runs, instead of sending the token in its place."""
+        call before the body runs, instead of sending the token in its place.
+        The caller gets the reason as an error, without the value."""
         from fortianalyzer_mcp.tool_annotations import READ_ONLY
-        from fortianalyzer_mcp.utils.errors import ValidationError
 
         mcp = self._install(monkeypatch)
         engine = FPEEngine(KEY)
@@ -909,10 +909,13 @@ class TestMutatingToolGate:
             calls.append(filter)
             return {"status": "success", "logs": []}
 
-        with pytest.raises(ValidationError, match="backslash"):
-            await fake_query_logs(filter=f'url=="{token}"')
+        result = await fake_query_logs(filter=f'url=="{token}"')
 
         assert calls == []
+        assert result["status"] == "error"
+        assert result["error"] == "validation_error"
+        assert "backslash" in result["message"]
+        assert "value\\" not in str(result) and token not in str(result)
 
     async def test_forged_token_to_mutating_tool_is_refused(self, monkeypatch: pytest.MonkeyPatch):
         # A marker that matches but does not decrypt is the forged/stale

@@ -6,15 +6,20 @@ negated operator that is every row. The first refusal looked only at a value
 that is v2-shaped as a whole or ends in the mask suffix. A token that lost its
 tag, lost or gained one character, picked up a character nobody sees, or sits
 as the host of a URL is none of those, and went out.
+
+The second half: the refusal has to reach the caller as an error it can read.
+Raised out of the wrapped tool, the SDK reduces it to the tool's name.
 """
 
-from collections.abc import Callable
+import json
+from collections.abc import Callable, Iterator
+from typing import Any
 
 import pytest
 
 from fortianalyzer_mcp.masking.fpe_engine import FPEEngine
 from fortianalyzer_mcp.masking.unmask import ArgUnmasker
-from fortianalyzer_mcp.masking.wrapper import OutputMasker
+from fortianalyzer_mcp.masking.wrapper import OutputMasker, install_masking
 from fortianalyzer_mcp.utils.errors import ValidationError
 
 KEY = "2DE79D232DF5585D68CE47882AE256D6"
@@ -275,3 +280,124 @@ class TestWhatStillGoesThrough:
         lost its tag."""
         with pytest.raises(ValidationError, match="a real value of that shape"):
             unmasker.unmask_filter('devname!="host-dc01-core"')
+
+
+@pytest.fixture
+def reader(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, Any]]:
+    """An async and a sync read-only tool behind the installed masking layer."""
+    from mcp.server.mcpserver import MCPServer
+
+    import fortianalyzer_mcp.utils.config as config
+    from fortianalyzer_mcp.tool_annotations import READ_ONLY
+
+    monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
+    monkeypatch.setenv("FAZ_MASKING_ACCEPT_V1_TOKENS", "false")
+    config.get_settings.cache_clear()
+    mcp = MCPServer("test")
+    install_masking(mcp)
+    ran: list[dict[str, Any]] = []
+
+    @mcp.tool(annotations=READ_ONLY)
+    async def query_logs(filter: str | None = None, filters: list | None = None) -> dict:
+        ran.append({"filter": filter, "filters": filters})
+        return {"status": "success", "filter": filter}
+
+    @mcp.tool(annotations=READ_ONLY)
+    def count_logs(filter: str | None = None) -> dict:
+        ran.append({"filter": filter})
+        return {"status": "success", "filter": filter}
+
+    yield {"query_logs": query_logs, "count_logs": count_logs, "ran": ran}
+    config.get_settings.cache_clear()
+
+
+class TestTheRefusalReachesTheCaller:
+    """Through a wrapped tool: an error the client can read, and no call."""
+
+    async def test_an_async_tool_answers_with_the_usual_error(
+        self, reader: dict[str, Any], other: FPEEngine
+    ) -> None:
+        foreign = other.mint("username", "jsmith")
+
+        result = await reader["query_logs"](filter=f'user!="{foreign}"')
+
+        assert result["status"] == "error"
+        assert result["error"] == "validation_error"
+        assert result["operation"] == "query_logs"
+        assert "did not resolve" in result["message"]
+        assert foreign not in json.dumps(result)
+        assert reader["ran"] == []
+
+    def test_a_sync_tool_answers_the_same_way(
+        self, reader: dict[str, Any], other: FPEEngine
+    ) -> None:
+        foreign = other.mint("username", "jsmith")
+
+        result = reader["count_logs"](filter=f'user!="{foreign[:-1]}"')
+
+        assert result["status"] == "error"
+        assert result["error"] == "validation_error"
+        assert result["operation"] == "count_logs"
+        assert "did not resolve" in result["message"]
+        assert foreign[:-1] not in json.dumps(result)
+        assert reader["ran"] == []
+
+    async def test_a_structured_condition_answers_the_same_way(
+        self, reader: dict[str, Any], other: FPEEngine
+    ) -> None:
+        foreign = other.mint("username", "jsmith")
+
+        result = await reader["query_logs"](
+            filters=[{"field": "user", "op": "ne", "value": foreign}]
+        )
+
+        assert result["status"] == "error"
+        assert "did not resolve" in result["message"]
+        assert foreign not in json.dumps(result)
+        assert reader["ran"] == []
+
+    async def test_what_resolved_before_the_refusal_is_not_in_the_answer(
+        self, reader: dict[str, Any], other: FPEEngine
+    ) -> None:
+        own = FPEEngine(KEY, accept_v1_tokens=False)
+        user, address = own.mint("username", "jsmith"), own.mint("ip", "192.0.2.102")
+        foreign = other.mint("username", "jdoe")
+
+        result = await reader["query_logs"](
+            filter=f'user=="{user}" and srcip=={address} and user!="{foreign}"'
+        )
+
+        answer = json.dumps(result)
+        assert result["status"] == "error"
+        assert "jsmith" not in answer and "192.0.2.102" not in answer
+        assert foreign not in answer
+        assert reader["ran"] == []
+
+    async def test_a_refusal_that_quoted_a_resolved_value_goes_out_with_the_token(
+        self, reader: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No message of the argument side quotes a value today. The answer is
+        masked like any result all the same: with one that did, the caller
+        would read the plaintext of its own token in the refusal."""
+        from fortianalyzer_mcp.masking import unmask
+
+        def quoting(value: str, *args: Any, **kwargs: Any) -> str:
+            raise ValidationError(f"filter value '{value}' cannot be written")
+
+        monkeypatch.setattr(unmask, "sanitize_filter_value", quoting)
+        own = FPEEngine(KEY, accept_v1_tokens=False).mint("username", "jsmith")
+
+        result = await reader["query_logs"](filter=f"user!={own}")
+
+        assert result["status"] == "error"
+        assert "jsmith" not in json.dumps(result)
+        assert result["message"] == f"Validation error: filter value '{own}' cannot be written"
+        assert reader["ran"] == []
+
+    async def test_a_filter_that_resolves_still_runs(self, reader: dict[str, Any]) -> None:
+        own = FPEEngine(KEY, accept_v1_tokens=False).mint("username", "jsmith")
+
+        result = await reader["query_logs"](filter=f'user!="{own}"')
+
+        assert reader["ran"] == [{"filter": 'user!="jsmith"', "filters": None}]
+        assert result == {"status": "success", "filter": f'user!="{own}"'}
