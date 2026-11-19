@@ -195,6 +195,40 @@ class TestATokenWhereTheResolverExpectsOne:
             with pytest.raises(ValidationError, match="did not resolve"):
                 unmasker.unmask_filter(f'url!="{url}"')
 
+    @pytest.mark.parametrize("who", ["own", "foreign"])
+    @pytest.mark.parametrize(
+        ("address", "prefix"), [("192.0.2.0", "24"), ("2001:db8::", "32")], ids=["v4", "v6"]
+    )
+    @pytest.mark.parametrize("template", ['srcip!="{v}"', 'srcip=="{v}"', "srcip!={v}"])
+    def test_an_address_token_with_a_prefix_length(
+        self,
+        unmasker: ArgUnmasker,
+        engine: FPEEngine,
+        other: FPEEngine,
+        who: str,
+        address: str,
+        prefix: str,
+        template: str,
+    ) -> None:
+        """A network is echoed as the token of its address with the prefix
+        length after it (#195). The resolver does not open that form yet, for
+        the server's own token either, so the token text went out. Until it is
+        opened there, the filter is refused."""
+        token = (engine if who == "own" else other).mint("ip", address)
+
+        with pytest.raises(ValidationError, match="did not resolve"):
+            unmasker.unmask_filter(template.format(v=f"{token}/{prefix}"))
+
+    def test_a_structured_condition_on_a_network_token(
+        self, unmasker: ArgUnmasker, other: FPEEngine
+    ) -> None:
+        token = other.mint("ip", "192.0.2.0")
+
+        with pytest.raises(ValidationError, match="did not resolve"):
+            unmasker.unmask_filter_conditions(
+                {"field": "srcip", "op": "ne", "value": f"{token}/24"}
+            )
+
     def test_a_foreign_token_behind_a_group_by_prefix(
         self, unmasker: ArgUnmasker, other: FPEEngine
     ) -> None:
@@ -254,6 +288,10 @@ class TestWhatStillGoesThrough:
             'url!="/index.html?next=//www.example.com/"',
             'user!="jo\u200dhn"',
             'groupby1!="user:admin"',
+            'srcip!="192.0.2.0/24"',
+            "srcip!=2001:db8::/32",
+            'url!="https://www.example.com/a/24"',
+            'msg like "%10/24 of the hosts%"',
             'user like "_dmin"',
             'user like "%\\_svc%"',
             'msg like "%user-agent%"',

@@ -491,7 +491,9 @@ class ArgUnmasker:
 
         The value itself, and the parts the resolver takes it apart into: the
         host of a URL and what follows its first slash, the host of
-        ``host:port``, each value behind a group-by prefix. Read without
+        ``host:port``, each value behind a group-by prefix. Also the address
+        of ``address/prefix``, which the output side writes for a network and
+        the resolver does not take apart yet. Read without
         format characters, and under ``like`` without the wildcards around
         it: ``_`` continues a name, so a token beside one is not found as a
         token.
@@ -511,6 +513,11 @@ class ArgUnmasker:
             yield from text.partition(":")[2].split(",")
         else:
             yield _without_port(text)
+            # A network is echoed as the token of its address with the prefix
+            # length after it, and that form is not opened yet (#195).
+            address, _, length = text.rpartition("/")
+            if address and length.isascii() and length.isdigit():
+                yield address
 
     def _refuse_unopened_token(self, field: str, value: str, *, like: bool = False) -> None:
         """Refuse a filter whose value is a masking token that did not open.
