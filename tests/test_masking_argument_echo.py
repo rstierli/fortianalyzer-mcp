@@ -488,10 +488,13 @@ def _register(mcp: MCPServer, sweep: Sweep, fn: Any) -> str:
 
 @skip_if_dynamic_mode
 class TestNoArgumentEchoesAResolvedToken:
+    @pytest.mark.parametrize("flag", ["masked", "masked_with_device_identity"])
     async def test_no_read_only_tool_or_skill_returns_the_plaintext_of_a_token(
-        self, masked: tuple[MCPServer, Sweep]
+        self, request: pytest.FixtureRequest, flag: str
     ) -> None:
-        _, sweep = masked
+        """Under both settings of the device-identity flag: off, a value is
+        put back by the rewrite of what the call resolved; on, by its type."""
+        _, sweep = request.getfixturevalue(flag)
 
         for name in sorted(sweep.tools):
             await sweep.tool(name)
