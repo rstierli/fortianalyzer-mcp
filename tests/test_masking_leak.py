@@ -23,6 +23,8 @@ from typing import Any
 
 import pytest
 
+from fortianalyzer_mcp.masking import wrapper as masking_wrapper
+from fortianalyzer_mcp.masking.fields import COMPOSITE_DEVICE_VDOM, DEVICE_IDENTITY_TYPES
 from fortianalyzer_mcp.masking.fpe_engine import FPEEngine
 from fortianalyzer_mcp.masking.unmask import ArgUnmasker
 from fortianalyzer_mcp.masking.wrapper import OutputMasker
@@ -1433,6 +1435,56 @@ class TestAResolvedValueIsNotKeptReadable:
             return node.format(real=real, token=token) if isinstance(node, str) else node
 
         assert masker.mask_result(fill(reply), {real: token}) == fill(expected)
+
+    #: Every key the keep set reads a value from, taken from the tables the
+    #: walk itself goes by, so a key added there is a case here.
+    KEEP_SET_KEYS = sorted(
+        set(DEVICE_IDENTITY_TYPES)
+        | set(COMPOSITE_DEVICE_VDOM)
+        | masking_wrapper._KEEP_SET_KEYS_OUTSIDE_DEVICE_IDENTITY
+    )
+    #: The forms a value takes under such a key.
+    KEEP_SET_FORMS: dict[str, Any] = {
+        "whole": lambda v: v,
+        "padded": lambda v: f"  {v} ",
+        "upper case": lambda v: v.upper(),
+        "comma-joined": lambda v: f"fgt-branch-02, {v}",
+        "list": lambda v: ["fgt-branch-02", f" {v} "],
+        "tuple": lambda v: ("fgt-branch-02", v),
+        "record below": lambda v: {"devname": v},
+        "records in a list": lambda v: [{"devname": v}],
+        "device[vdom]": lambda v: f"{v}[root]",
+        "device[vdom] joined": lambda v: f"fgt-branch-02[root],{v}[dmz]",
+    }
+
+    @pytest.mark.parametrize("form", KEEP_SET_FORMS.values(), ids=KEEP_SET_FORMS.keys())
+    @pytest.mark.parametrize("key", KEEP_SET_KEYS)
+    def test_whatever_the_keep_set_learns_is_rewritten_once_it_was_resolved(
+        self, masker: OutputMasker, engine: FPEEngine, key: str, form: Any
+    ):
+        """The keep set and the rewrite of a resolved value are two walks over
+        the same units. Here the first is the oracle for the second: each
+        value the keep set learns from a reply is then sent as the value the
+        call resolved, and must not be readable in what goes out. A unit the
+        keep set learned and the rewrite did not would fail this. Where the
+        keep set reads nothing (``csf`` and ``devvds`` as a list), there is
+        nothing to compare."""
+        sent = engine.mint("hostname", "stand-in")
+        for reply in (
+            {key: form("fgt-branch-01")},
+            {"logs": [{key.upper(): form("fgt-branch-01")}]},
+        ):
+            for value in masker._device_identity_values(reply):
+                if "fgt-branch-01" not in value.lower():
+                    continue
+                out = masker.mask_result(reply, {value: sent})
+
+                assert survivors(out, [value]) == {}, (reply, value, out)
+
+    @pytest.mark.parametrize("key", KEEP_SET_KEYS)
+    def test_the_keep_set_does_learn_from_each_of_those_keys(self, masker: OutputMasker, key: str):
+        """The control for the test above, which passes where nothing is learned."""
+        assert masker._device_identity_values({key: "fgt-branch-01"}) == {"fgt-branch-01"}
 
     def test_it_is_not_spared_where_the_keep_set_is_consulted(
         self, masker: OutputMasker, engine: FPEEngine
