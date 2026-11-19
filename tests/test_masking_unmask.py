@@ -825,7 +825,10 @@ class TestResolveNeverRaises:
         expression = f'url=="{stale}"'
 
         assert unmasker.resolve_url(stale) == stale
-        assert unmasker.unmask_filter(expression) == expression
+        # The resolver leaves it as written. A filter is not sent with it:
+        # the token text would match nothing.
+        with pytest.raises(ValidationError, match="did not resolve"):
+            unmasker.unmask_filter(expression)
 
     def test_marked_token_engine_failure_passes_through(
         self, unmasker: ArgUnmasker, engine: FPEEngine, monkeypatch: pytest.MonkeyPatch
