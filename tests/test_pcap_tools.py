@@ -215,10 +215,21 @@ class TestIpsFilterAddresses:
 
     @pytest.mark.parametrize(
         "address",
-        ["192.0.2.10", "192.0.2.0/24", "2001:db8::1", "2001:db8::/32", "::ffff:192.0.2.10"],
+        [
+            "192.0.2.10",
+            "192.0.2.0/24",
+            "2001:db8::1",
+            "2001:DB8::A",
+            "2001:db8::/32",
+            "::ffff:192.0.2.10",
+        ],
     )
     def test_an_address_or_network_is_written_as_given(self, address: str) -> None:
         assert pcap_tools._build_ips_filter(srcip=address) == f'srcip="{address}"'
+
+    def test_the_refusal_names_both_cases_of_a_hex_digit(self) -> None:
+        with pytest.raises(ValidationError, match="a-f or A-F"):
+            pcap_tools._build_ips_filter(srcip="fe80::1%eth0")
 
     def test_surrounding_whitespace_is_dropped(self) -> None:
         assert pcap_tools._build_ips_filter(dstip=" 192.0.2.10 ") == 'dstip="192.0.2.10"'

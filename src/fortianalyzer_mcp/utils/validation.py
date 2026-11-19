@@ -521,7 +521,7 @@ def validate_ip_or_cidr(value: str, field: str = "IP address") -> str:
     # result between quotes of their own. A log has no zone to match either.
     if not _IP_LITERAL_RE.fullmatch(value):
         raise ValidationError(
-            f"Invalid {field}: an address is written with digits, a-f, ':', '.' and '/'; "
+            f"Invalid {field}: an address is written with digits, a-f or A-F, ':', '.' and '/'; "
             "an IPv6 zone id ('%...') is not accepted."
         )
 
