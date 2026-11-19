@@ -77,18 +77,37 @@ class TestOriginsWithAllowedHostsSet:
 
 
 class TestWithoutAllowedHosts:
-    def test_no_setting_leaves_the_choice_to_the_sdk(self) -> None:
-        assert transport_security_for([], []) is None
+    """The checks are always on. ``run_http`` gives the SDK no ``host``, the
+    SDK's default for it is 127.0.0.1, and so the SDK applied its loopback-only
+    check for a server handed no settings, whatever address it was bound to.
+    The settings are now always passed, with the same result when nothing is
+    configured (``tests/test_transport_security_app.py`` sends the requests)."""
 
-    def test_origins_alone_change_nothing_and_say_so(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """Without MCP_ALLOWED_HOSTS no transport security is passed, so a
-        list of origins would be read by nobody. It must not look applied."""
+    def test_no_setting_is_the_loopback_only_check(self) -> None:
+        security = transport_security_for([], [])
+
+        assert security.enable_dns_rebinding_protection is True
+        assert security.allowed_hosts == ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+        assert security.allowed_origins == [
+            "http://127.0.0.1:*",
+            "http://localhost:*",
+            "http://[::1]:*",
+        ]
+
+    def test_origins_alone_are_applied(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level(logging.WARNING, logger="fortianalyzer_mcp.server"):
-            assert transport_security_for([], ["https://app.example.com"]) is None
+            security = transport_security_for([], ["https://app.example.com"])
 
-        assert any("MCP_ALLOWED_ORIGINS" in r.getMessage() for r in caplog.records)
+        assert security.allowed_origins[-1] == "https://app.example.com"
+        assert security.allowed_hosts == ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+        assert caplog.records == []
+
+    def test_nothing_is_decided_or_logged_when_the_module_is_imported(self) -> None:
+        """The settings are built where the HTTP app is, so a stdio server
+        neither builds nor reports them."""
+        import fortianalyzer_mcp.server as server
+
+        assert not hasattr(server, "_transport_security")
 
 
 class TestAllowedOriginsParsing:

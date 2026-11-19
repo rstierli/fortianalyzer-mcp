@@ -42,46 +42,36 @@ def get_faz_client() -> FortiAnalyzerClient | None:
     return faz_client
 
 
-#: What the SDK allows by itself when it is handed no settings and binds to
-#: loopback (``MCPServer.streamable_http_app``). Handing it settings of our own
-#: replaces that list, so the loopback entries have to be put back by hand.
+#: What the SDK allows by itself when it is handed no settings
+#: (``MCPServer.streamable_http_app``, whose ``host`` defaults to 127.0.0.1
+#: whatever address the server is bound to). Settings of our own replace that
+#: list, so the loopback entries are put back by hand.
 _LOOPBACK_HOSTS = ("127.0.0.1:*", "localhost:*", "[::1]:*")
 _LOOPBACK_ORIGINS = ("http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*")
 
 
 def transport_security_for(
     allowed_hosts: list[str], allowed_origins: list[str]
-) -> TransportSecuritySettings | None:
-    """Transport security for ``MCP_ALLOWED_HOSTS``, or None to let the SDK choose.
+) -> TransportSecuritySettings:
+    """The host and origin checks of the HTTP transport, always switched on.
 
-    The configured hosts are added to the loopback entries, not put in their
-    place (#187): a health probe or a local client on 127.0.0.1 keeps working
-    once a proxy hostname is configured. ``MCP_ALLOWED_ORIGINS`` is added to
-    the loopback origins the same way, for a browser client that reaches the
-    public hostname; every other ``Origin`` gets 403.
+    Loopback, plus what ``MCP_ALLOWED_HOSTS`` lists, plus what
+    ``MCP_ALLOWED_ORIGINS`` lists (#187). The configured hosts are added to
+    the loopback entries, not put in their place: a health probe or a local
+    client on 127.0.0.1 keeps working once a proxy hostname is configured.
+    The origins are added to the loopback origins the same way, for a browser
+    client that reaches the public hostname; every other ``Origin`` gets 403.
 
-    Without ``MCP_ALLOWED_HOSTS`` nothing is passed. The SDK then protects the
-    server by itself only when it binds to loopback, so a server bound to
-    0.0.0.0 has no host check, and a list of origins is read by nobody.
+    With neither setting this is the loopback-only check the SDK applies when
+    it is handed nothing, also for a server bound to 0.0.0.0. Passing it
+    explicitly lets either setting be used without the other.
     """
-    if not allowed_hosts:
-        if allowed_origins:
-            logger.warning(
-                "MCP_ALLOWED_ORIGINS is set and MCP_ALLOWED_HOSTS is not: the origins "
-                "are not applied. Set MCP_ALLOWED_HOSTS to turn the host and origin "
-                "checks on."
-            )
-        return None
     return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
         allowed_hosts=[*_LOOPBACK_HOSTS, *allowed_hosts],
         allowed_origins=[*_LOOPBACK_ORIGINS, *allowed_origins],
     )
 
-
-# Configure transport security for reverse proxy deployments
-_transport_security = transport_security_for(
-    settings.MCP_ALLOWED_HOSTS, settings.MCP_ALLOWED_ORIGINS
-)
 
 # Create the MCP server.
 #
@@ -777,7 +767,9 @@ def run_http() -> None:
                 "/",
                 app=mcp.streamable_http_app(
                     stateless_http=True,  # Stateless for Docker deployment
-                    transport_security=_transport_security,
+                    transport_security=transport_security_for(
+                        settings.MCP_ALLOWED_HOSTS, settings.MCP_ALLOWED_ORIGINS
+                    ),
                 ),
             ),
         ],

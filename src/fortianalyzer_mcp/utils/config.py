@@ -126,20 +126,18 @@ class Settings(BaseSettings):
     # SettingsError at startup before the validator below ever runs.
     MCP_ALLOWED_HOSTS: Annotated[list[str], NoDecode] = Field(
         default_factory=list,
-        description="Allowed Host header values for DNS rebinding protection. "
-        "Comma-separated in env var (a JSON array is also accepted). When set, the server "
-        "checks the Host and Origin headers and adds the loopback hosts and origins "
-        "(127.0.0.1, localhost, [::1], any port) itself, because the SDK drops its own "
-        "once a list is passed. When unset, this server passes no transport security: "
-        "the SDK then protects the server by itself only when it binds to loopback, so "
-        "a server bound to 0.0.0.0 has no host check.",
+        description="Allowed Host header values for DNS rebinding protection, beside "
+        "the loopback hosts (127.0.0.1, localhost, [::1], any port), which are always "
+        "accepted. Comma-separated in env var (a JSON array is also accepted). The Host "
+        "header is always checked, whatever address the server is bound to: when this is "
+        "unset, only a loopback Host is accepted and any other gets 421.",
     )
     MCP_ALLOWED_ORIGINS: Annotated[list[str], NoDecode] = Field(
         default_factory=list,
         description="Additional allowed Origin header values, for a browser-based client "
         "that reaches the public hostname (for example https://app.example.com). Same "
         "format as MCP_ALLOWED_HOSTS. Added to the loopback origins; every other Origin "
-        "gets 403. Applied only when MCP_ALLOWED_HOSTS is set.",
+        "gets 403. Works with or without MCP_ALLOWED_HOSTS.",
     )
 
     # Tool Loading Mode

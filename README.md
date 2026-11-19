@@ -331,7 +331,7 @@ MCP Client → HTTPS → Reverse Proxy (Traefik/nginx) → HTTP → MCP Containe
 
 **Key considerations:**
 
-1. **MCP_ALLOWED_HOSTS** — The MCP SDK validates the Host header to prevent DNS rebinding attacks. Unset, the SDK checks it only for a server bound to loopback, where it accepts `localhost` and `127.0.0.1`; a server bound to `0.0.0.0`, as in Docker, then has no host check. Set this to the value clients put in their connection URL (NOT the client's IP). Loopback stays accepted beside it. A browser-based client also sends an `Origin` header: list its origin in `MCP_ALLOWED_ORIGINS` (same format), otherwise it gets 403:
+1. **MCP_ALLOWED_HOSTS** — The MCP SDK validates the Host header to prevent DNS rebinding attacks. By default only `localhost` and `127.0.0.1` are accepted, whatever address the server is bound to. Set this to the value clients put in their connection URL (NOT the client's IP). Loopback stays accepted beside it. A browser-based client also sends an `Origin` header: list its origin in `MCP_ALLOWED_ORIGINS` (same format, with or without `MCP_ALLOWED_HOSTS`), otherwise it gets 403:
 
    ```bash
    # Reverse-proxy hostname (Traefik/nginx):
