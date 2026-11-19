@@ -214,6 +214,19 @@ async def get_alert_count(
         return {"status": "error", "message": redact(str(e))}
 
 
+def _submitted_message(count: int, what: str, purpose: str) -> str:
+    """Say what an acknowledge count is: ids sent, not changes confirmed (#187).
+
+    FortiAnalyzer's own answer is under ``data``. The ``*_count`` key beside
+    this message is the number of ids the caller passed.
+    """
+    noun = what if count == 1 else f"{what}s"
+    return (
+        f"Submitted {count} {noun} to FortiAnalyzer for {purpose}. The count is of "
+        "ids sent, not of changes FortiAnalyzer confirmed; its answer is under 'data'."
+    )
+
+
 @mcp.tool(annotations=UPDATES)
 async def acknowledge_alerts(
     alert_ids: list[str],
@@ -248,6 +261,7 @@ async def acknowledge_alerts(
             "status": "success",
             "adom": adom,
             "acknowledged_count": len(alert_ids),
+            "message": _submitted_message(len(alert_ids), "alert id", "acknowledgement"),
             "user": user,
             "data": result,
         }
@@ -290,6 +304,7 @@ async def unacknowledge_alerts(
             "status": "success",
             "adom": adom,
             "unacknowledged_count": len(alert_ids),
+            "message": _submitted_message(len(alert_ids), "alert id", "unacknowledgement"),
             "user": user,
             "data": result,
         }

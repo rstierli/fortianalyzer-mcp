@@ -49,8 +49,11 @@ class TestParseTimeRangePresets:
     )
     def test_each_preset_produces_expected_window_size(self, key: str, delta: timedelta) -> None:
         result = parse_time_range(key)
-        start = datetime.strptime(result["start"], "%Y-%m-%d %H:%M:%S")
-        end = datetime.strptime(result["end"], "%Y-%m-%d %H:%M:%S")
+        # The window is elapsed time (#187 D23). Read both ends as wall times
+        # of this host, each with the offset of its own day, so that a window
+        # that crosses a clock change is still measured in real hours.
+        start = datetime.strptime(result["start"], "%Y-%m-%d %H:%M:%S").astimezone()
+        end = datetime.strptime(result["end"], "%Y-%m-%d %H:%M:%S").astimezone()
         assert end - start == delta
 
     def test_unknown_key_raises_value_error(self) -> None:
@@ -208,3 +211,69 @@ class TestParseTimeRangeBounds:
         start, end = parse_time_range_bounds(original)
         assert start == datetime(2024, 1, 1, 0, 0, 0)
         assert end == datetime(2024, 1, 2, 12, 34, 56)
+
+
+class TestRelativeWindowIsElapsedTime:
+    """A relative window is that much elapsed time, not wall-clock time (#187 D23).
+
+    Europe/Zurich moved its clocks on 2026-03-29 (02:00 to 03:00) and on
+    2026-10-25 (03:00 to 02:00). Subtracting 24 hours from a local wall time
+    covered 23 real hours across the first change and 25 across the second.
+    """
+
+    ZURICH = ZoneInfo("Europe/Zurich")
+
+    def test_24_hours_across_the_spring_change(self) -> None:
+        anchor = datetime(2026, 3, 29, 12, 0, 0)  # CEST, 10:00 UTC
+
+        result = parse_time_range("24-hour", faz_tz=self.ZURICH, anchor=anchor)
+
+        # 24 real hours earlier is 10:00 UTC the day before, which was 11:00 CET.
+        assert result == {"start": "2026-03-28 11:00:00", "end": "2026-03-29 12:00:00"}
+
+    def test_24_hours_across_the_autumn_change(self) -> None:
+        anchor = datetime(2026, 10, 25, 12, 0, 0)  # CET, 11:00 UTC
+
+        result = parse_time_range("24-hour", faz_tz=self.ZURICH, anchor=anchor)
+
+        # 24 real hours earlier is 11:00 UTC the day before, which was 13:00 CEST.
+        assert result == {"start": "2026-10-24 13:00:00", "end": "2026-10-25 12:00:00"}
+
+    def test_a_day_preset_is_elapsed_time_too(self) -> None:
+        anchor = datetime(2026, 3, 30, 9, 0, 0)  # CEST, 07:00 UTC
+
+        result = parse_time_range("7-day", faz_tz=self.ZURICH, anchor=anchor)
+
+        # 168 real hours earlier is 07:00 UTC on the 23rd, which was 08:00 CET.
+        assert result == {"start": "2026-03-23 08:00:00", "end": "2026-03-30 09:00:00"}
+
+    def test_a_window_with_no_clock_change_is_as_before(self) -> None:
+        anchor = datetime(2026, 6, 1, 12, 0, 0)
+
+        result = parse_time_range("24-hour", faz_tz=self.ZURICH, anchor=anchor)
+
+        assert result == {"start": "2026-05-31 12:00:00", "end": "2026-06-01 12:00:00"}
+
+    def test_an_anchor_with_no_known_zone_stays_wall_clock(self) -> None:
+        """Without the zone there is nothing to convert through."""
+        anchor = datetime(2026, 3, 29, 12, 0, 0)
+
+        result = parse_time_range("24-hour", anchor=anchor)
+
+        assert result == {"start": "2026-03-28 12:00:00", "end": "2026-03-29 12:00:00"}
+
+    def test_the_appliance_clock_path_is_elapsed_time(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fortianalyzer_mcp.utils.time_range as time_range_module
+
+        class _Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):  # type: ignore[no-untyped-def,override]
+                return datetime(2026, 3, 29, 10, 0, 0, tzinfo=UTC).astimezone(tz)
+
+        monkeypatch.setattr(time_range_module, "datetime", _Clock)
+
+        result = parse_time_range("24-hour", faz_tz=self.ZURICH)
+
+        assert result == {"start": "2026-03-28 11:00:00", "end": "2026-03-29 12:00:00"}

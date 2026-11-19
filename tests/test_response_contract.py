@@ -5,7 +5,7 @@ offset/limit/next_offset, the deterministic warnings channel, the count==0 guard
 and the unified error envelope (machine `error` code + retry_count).
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -300,9 +300,15 @@ class TestSevenAndThirtyDayFlows:
         )
 
         assert r["status"] == "success"
+        # The window is elapsed time (#187 D23): both ends are wall times of the
+        # appliance's zone, compared in UTC so that a clock change inside the
+        # window does not shorten or lengthen it.
         start = datetime.strptime(r["time_range"]["start"], "%Y-%m-%d %H:%M:%S")
         end = datetime.strptime(r["time_range"]["end"], "%Y-%m-%d %H:%M:%S")
-        assert (end - start).days == days
+        elapsed = end.replace(tzinfo=fake.tz).astimezone(UTC) - start.replace(
+            tzinfo=fake.tz
+        ).astimezone(UTC)
+        assert elapsed.days == days
         assert fake.start_calls[0]["filter"] == filt
 
     @pytest.mark.parametrize("logtype", ["traffic", "event"])

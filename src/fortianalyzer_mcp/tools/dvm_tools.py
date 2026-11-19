@@ -288,6 +288,7 @@ async def delete_device(
             - status: "success" or "error"
             - task_id: Task ID if run as background task
             - message: Status or error message
+            - warning: Only with a task_id: the delete is still running
 
     Example:
         >>> result = await delete_device("root", "FGT-OldBranch")
@@ -305,9 +306,22 @@ async def delete_device(
             flags=flags,
         )
 
+        task_id = result.get("taskid")
+        if task_id:
+            # As a task the delete has only been handed over: the result is on
+            # the task, as with the bulk tools.
+            return {
+                "status": "success",
+                "task_id": task_id,
+                "message": f"Delete of device {device} submitted as task {task_id}",
+                "warning": (
+                    "The delete runs as a background task; its result is on the "
+                    f"task. Verify with wait_for_task({task_id})."
+                ),
+            }
         return {
             "status": "success",
-            "task_id": result.get("taskid"),
+            "task_id": task_id,
             "message": f"Device {device} deleted successfully",
         }
     except ValidationError as e:

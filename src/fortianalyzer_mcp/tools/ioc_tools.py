@@ -170,6 +170,12 @@ async def acknowledge_ioc_events(
             "status": "success",
             "adom": adom,
             "acknowledged_count": len(events),
+            # The count is of events sent, not of changes confirmed (#187).
+            "message": (
+                f"Submitted {len(events)} IOC event{'' if len(events) == 1 else 's'} to "
+                "FortiAnalyzer for acknowledgement. The count is of events sent, not of "
+                "changes FortiAnalyzer confirmed; its answer is under 'data'."
+            ),
             "data": result,
         }
     except Exception as e:
