@@ -2474,7 +2474,7 @@ def _is_behavioral_alert(alert: dict[str, Any]) -> bool:
 
 async def _entity_behavioral_alerts(
     adom: str | None,
-    pivot: str | None,
+    pivot: str,
     time_range: str,
     warnings: list[str],
     entity_ref: str,
@@ -2482,11 +2482,10 @@ async def _entity_behavioral_alerts(
     """The entity's behavioural alert-handler / IOC alerts in the window.
 
     One eventmgmt GET (no logview slot): alerts in the window filtered to
-    the entity's pivot (srcip==<epip> / euid==<id>), then narrowed to
+    the entity's pivot (epid==<id> / euid==<id>), then narrowed to
     the ones whose handler reads as a behavioural / IOC detection. FAZ's own
     anomaly detections — the RFC's "strongest FAZ-provided behavioural
-    signal". Degrades to a ``FeatureGap`` when the read fails or the entity
-    yields no pivot to tie alerts to.
+    signal". Degrades to a ``FeatureGap`` when the read fails.
 
     Also returns whether the alert page filled. The narrowing is done here,
     on one page, so a full page leaves the alerts behind it unread: the
@@ -2494,14 +2493,6 @@ async def _entity_behavioral_alerts(
     """
     from fortianalyzer_mcp.tools.event_tools import get_alerts
 
-    if pivot is None:
-        return (
-            FeatureGap(
-                reason=f"entity {entity_ref} yields no srcip pivot; "
-                "behavioural detections cannot be tied to it"
-            ),
-            False,
-        )
     alerts_res, err = await _call(
         get_alerts,
         adom=adom,
@@ -2582,19 +2573,13 @@ async def _hunt_behavior(
         vuln_stats = _vuln_stats_counts(record)
         importance = record.get("importance")
 
-        pivot = None
-        epip = record.get("epip")
-        if epip:
-            pivot, gap = _record_pivot("srcip", epip, "epip")
-            if gap:
-                warnings.append(
-                    f"behavior[{entity_id}]: {gap}; behavioural detections cannot be tied to it"
-                )
-        else:
-            warnings.append(
-                f"behavior[{entity_id}]: endpoint carries no 'epip'; behavioural "
-                "detections cannot be tied to it"
-            )
+        # Alerts are tied to an endpoint by epid, the id the caller asked for.
+        # srcip==<epip> was used before. The alerts backend expands srcip to
+        # the address an alert stored (srcip, epip, epname), which need not be
+        # the address the endpoint has now: on 7.6.7 the busiest endpoint had
+        # 286 alerts by epid over seven days and none by srcip==<its epip>.
+        # Measured on 7.6.7 only.
+        pivot = f"epid=={entity_id}"
         detections, alerts_truncated = await _entity_behavioral_alerts(
             adom, pivot, time_range, warnings, str(entity_id)
         )

@@ -771,19 +771,22 @@ class TestHuntBehaviorPercentile:
         # importance high + a detection -> anomalous.
         assert b.anomalous is True
 
-    async def test_endpoint_address_no_literal_can_hold_degrades_both_halves(self):
-        """The behaviour half and the entity-scoped sweep each report the gap."""
+    async def test_endpoint_address_no_literal_can_hold_degrades_the_sweep_only(self):
+        """The entity-scoped sweep filters logs by the address and reports the
+        gap. The behaviour half ties alerts by ``epid`` and is not affected."""
         estate = [dict(ep) for ep in ESTATE]
         estate[4] = {**estate[4], "epip": "value\\"}
         assert estate[4]["epid"] == 5
         with (
             t(GET_ENDPOINTS, return_value=ok(data=estate)),
-            t(GET_ALERTS, return_value=ok(data=[])),
+            t(GET_ALERTS, return_value=ok(data=[])) as alerts,
             t(QUERY_LOGS, return_value=logs_ok([])),
         ):
             result = await handlers.run_hunt(HuntParams(entity="epid:5"))
         assert isinstance(result.behavior, EntityBehavior)
-        assert any(w.startswith("behavior[") and "backslash" in w for w in result.warnings)
+        assert alerts.call_args.kwargs["filter"] == "epid==5"
+        assert isinstance(result.behavior.behavioral_detections, list)
+        assert not any(w.startswith("behavior[") for w in result.warnings)
         assert any(w.startswith("hunt:") and "sweep skipped" in w for w in result.warnings)
 
     async def test_enduser_name_no_literal_can_hold_degrades_the_pivot(self):

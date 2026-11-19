@@ -86,9 +86,15 @@ class TestSkillAlertFiltersDoNotWarn:
         assert result.subject == ALERT
         assert alert_reads == [("alertid==alert-001", "success", [])]
 
-    async def test_hunt_ties_alerts_to_an_endpoint_by_srcip(self, alert_reads: list[Any]) -> None:
-        """srcip is in no alert reference; measured, it returns the same
-        alerts as epip."""
+    async def test_hunt_ties_alerts_to_an_endpoint_by_epid(self, alert_reads: list[Any]) -> None:
+        """Alerts are tied to an endpoint by ``epid``, the id the caller gave.
+
+        ``srcip==<epip>`` was used before. The alerts backend expands ``srcip``
+        to the address an alert stored (``srcip``, ``epip``, ``epname``), and
+        that need not be the address the endpoint has now: on 7.6.7 the
+        busiest endpoint had 286 alerts by ``epid`` over seven days and none
+        by ``srcip==<its epip>``. Measured on 7.6.7 only.
+        """
         with (
             t(GET_ENDPOINTS, return_value=ok(data=[ENDPOINT])),
             t(QUERY_LOGS, return_value=ok(tid=1, logs=[], total=0)),
@@ -97,7 +103,24 @@ class TestSkillAlertFiltersDoNotWarn:
                 HuntParams(entity="epid:7", sweep_logtypes=["traffic"], include_estate_stats=False)
             )
 
-        assert alert_reads == [("srcip==192.0.2.7", "success", [])]
+        assert alert_reads == [("epid==7", "success", [])]
+
+    async def test_an_endpoint_without_an_address_is_still_tied_to_its_alerts(
+        self, alert_reads: list[Any]
+    ) -> None:
+        """The alert pivot no longer needs ``epip``. The log sweep does."""
+        no_address = {"epid": 7, "epname": "ws-finance-01", "risk_score": 0.2}
+        with (
+            t(GET_ENDPOINTS, return_value=ok(data=[no_address])),
+            t(QUERY_LOGS, return_value=ok(tid=1, logs=[], total=0)),
+        ):
+            result = await handlers.run_hunt(
+                HuntParams(entity="epid:7", sweep_logtypes=["traffic"], include_estate_stats=False)
+            )
+
+        assert alert_reads == [("epid==7", "success", [])]
+        assert isinstance(result.behavior.behavioral_detections, list)
+        assert not [w for w in result.warnings if "cannot be tied" in w]
 
     async def test_hunt_ties_alerts_to_an_end_user_by_euid(self, alert_reads: list[Any]) -> None:
         """Alerts are tied to an end-user by ``euid``, the id the caller gave.
