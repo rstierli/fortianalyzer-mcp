@@ -365,13 +365,19 @@ class FortiAnalyzerClient:
         ``wait`` bounds the wait for the I/O lock; when it runs out the logout
         is skipped and the session is left to idle out.
         """
-        # pyfmg hands its own timeout to requests, so this bounds the logout
-        # request itself; asyncio.wait_for would only stop waiting for it.
-        # The caller drops fmg, so nothing needs restoring.
-        fmg.timeout = min(self.timeout, self._LOGOUT_TIMEOUT)
         try:
             async with self._io_section(wait=wait):
-                await self._run_io(fmg.logout)
+                # pyfmg hands its own timeout to requests, so this bounds the
+                # logout request itself; asyncio.wait_for would only stop
+                # waiting for it. Set inside the lock and put back after: a
+                # call queued on this handle, ahead of the logout or behind
+                # it, runs with the timeout the deployment set.
+                timeout = fmg.timeout
+                fmg.timeout = min(self.timeout, self._LOGOUT_TIMEOUT)
+                try:
+                    await self._run_io(fmg.logout)
+                finally:
+                    fmg.timeout = timeout
         except _IoBusy:
             logger.warning(
                 "A request is still in flight; the logout is skipped and the "

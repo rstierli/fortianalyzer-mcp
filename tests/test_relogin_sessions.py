@@ -26,6 +26,7 @@ class _Appliance:
         self.logins = 0
         self.logouts = 0
         self.calls: list[tuple[str, str, bool]] = []  # (session, url, session was live)
+        self.timeouts: list[tuple[str, int]] = []  # (url or "logout", the handle's timeout)
         self.hold = threading.Event()
         self.holding = threading.Event()
         self.hold.set()
@@ -37,11 +38,11 @@ class _Appliance:
 class _Handle:
     """Stands in for pyFMG's FortiManager: one handle, one session."""
 
-    def __init__(self, appliance: _Appliance, *, token: bool) -> None:
+    def __init__(self, appliance: _Appliance, *, token: bool, timeout: int = 30) -> None:
         self._appliance = appliance
         self.api_key_used = token
         self.sid: str | None = None
-        self.timeout = 30
+        self.timeout = timeout
         self.req_id = 0
 
     def login(self) -> tuple[int, dict[str, Any]]:
@@ -54,6 +55,7 @@ class _Handle:
     def logout(self) -> tuple[int, dict[str, Any]] | None:
         if self.sid is None:
             return None
+        self._appliance.timeouts.append(("logout", self.timeout))
         self._appliance.in_logout.set()
         self._appliance.logout_hold.wait(5)
         self._appliance.logouts += 1
@@ -66,6 +68,7 @@ class _Handle:
         assert self.sid is not None, f"{url} was sent on a handle whose session was ended"
         live = self.api_key_used or self.sid in self._appliance.live
         self._appliance.calls.append((self.sid, url, live))
+        self._appliance.timeouts.append((url, self.timeout))
         if url == "/held":
             self._appliance.holding.set()
             self._appliance.hold.wait(5)
@@ -79,7 +82,7 @@ def appliance(monkeypatch: pytest.MonkeyPatch) -> _Appliance:
     appliance = _Appliance()
     monkeypatch.setattr(
         "fortianalyzer_mcp.api.client.FortiManager",
-        lambda *_a, **kw: _Handle(appliance, token="apikey" in kw),
+        lambda *_a, **kw: _Handle(appliance, token="apikey" in kw, timeout=kw["timeout"]),
     )
     return appliance
 
@@ -184,3 +187,70 @@ class TestReloginEndsTheOldSession:
 
         assert appliance.logouts == 0
         assert client.is_connected
+
+
+class TestTheLogoutTimeoutStaysWithTheLogout:
+    """The logout is sent with a short timeout, set on the handle. Set before
+    the logout had its turn, it was also the timeout of a call that was queued
+    on the same handle ahead of it: 5 seconds where the deployment had set
+    120, and a write that times out is not retried."""
+
+    def _client(self) -> FortiAnalyzerClient:
+        return FortiAnalyzerClient(
+            host="faz.example.com", username="admin", password="password", timeout=120
+        )
+
+    async def test_a_call_queued_ahead_of_the_logout_keeps_its_timeout(
+        self, appliance: _Appliance
+    ) -> None:
+        client = self._client()
+        await client.connect()
+        appliance.hold.clear()
+
+        denied = asyncio.create_task(client.get("/held"))
+        assert await asyncio.to_thread(appliance.holding.wait, 2)
+        queued = [asyncio.create_task(client.get("/ok")) for _ in range(3)]
+        await asyncio.sleep(0)
+        appliance.hold.set()
+
+        for call in queued:
+            assert await asyncio.wait_for(call, 5) == {"url": "/ok"}
+        with pytest.raises(FazPermissionError):
+            await asyncio.wait_for(denied, 5)
+
+        assert ("logout", 5) in appliance.timeouts
+        assert {seen for what, seen in appliance.timeouts if what != "logout"} == {120}
+
+    async def test_the_handle_has_its_timeout_back_after_the_logout(
+        self, appliance: _Appliance
+    ) -> None:
+        """A call queued behind the logout reads the handle's timeout too
+        (the raw request path takes it from the handle when it runs)."""
+        client = self._client()
+        await client.connect()
+        handle = client._fmg
+        assert handle is not None
+
+        await client._logout(handle, wait=None)
+
+        assert appliance.timeouts == [("logout", 5)]
+        assert handle.timeout == 120
+
+    async def test_a_logout_that_is_skipped_leaves_the_timeout_alone(
+        self, appliance: _Appliance
+    ) -> None:
+        client = self._client()
+        await client.connect()
+        handle = client._fmg
+        assert handle is not None
+        appliance.hold.clear()
+        held = asyncio.create_task(client.get("/held"))
+        assert await asyncio.to_thread(appliance.holding.wait, 2)
+
+        await client._logout(handle, wait=0.05)
+
+        assert handle.timeout == 120
+        assert appliance.logouts == 0
+        appliance.hold.set()
+        with pytest.raises(FazPermissionError):
+            await asyncio.wait_for(held, 5)
