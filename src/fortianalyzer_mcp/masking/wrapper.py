@@ -218,7 +218,9 @@ _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _DEVVDS_RE = re.compile(r"^(?P<dev>[^\[\]]+)\[(?P<vdom>[^\[\]]*)\]$")
 
 #: Values shorter than this are not substituted into free text: a two or
-#: three character username would match inside unrelated words.
+#: three character username would match inside unrelated words. A value the
+#: call resolved from the caller's own token is not held to it
+#: (``_TrackedMapping.exact``).
 _MIN_SUBSTITUTION_LEN = 4
 
 
@@ -269,11 +271,17 @@ class _TrackedMapping(dict[str, str]):
     which changes what the alternation must resolve to while leaving the
     length identical. ``_mask_filter_entries`` does exactly that, in pass 2
     (see ``_plan_for``).
+
+    ``exact`` holds the raw values that are known exactly, because this call
+    resolved them from the caller's own token: the swap looks for those
+    whatever their length. Set through :meth:`resolved_exactly`, which counts
+    as a write.
     """
 
-    __slots__ = ("version",)
+    __slots__ = ("exact", "version")
 
     version: int
+    exact: frozenset[str]
 
     def __new__(cls, *args: Any, **kwargs: Any) -> "_TrackedMapping":
         # The slot is initialised in __new__, not __init__, because unpickling
@@ -283,10 +291,16 @@ class _TrackedMapping(dict[str, str]):
         # latent crash from becoming a live one.
         self = super().__new__(cls, *args, **kwargs)
         self.version = 0
+        self.exact = frozenset()
         return self
 
     def __init__(self) -> None:
         super().__init__()
+
+    def resolved_exactly(self, raws: set[str]) -> None:
+        """Name the raw values the length floor of the swap does not apply to."""
+        self.exact = frozenset(raw for raw in raws if raw.strip())
+        self.version += 1
 
     # EVERY mutating entry point, not just __setitem__. In CPython
     # ``setdefault``, ``update``, ``pop``, ``popitem``, ``clear``, ``|=`` and
@@ -346,6 +360,29 @@ def _version_of(mapping: dict[str, str]) -> int | None:
     the bug class this whole mechanism exists to close.
     """
     return mapping.version if isinstance(mapping, _TrackedMapping) else None
+
+
+def _swappable(mapping: dict[str, str], keep: frozenset[str]) -> list[str]:
+    """The raw values of ``mapping`` the known-value swap looks for, longest first.
+
+    Not a value the deployment chose to leave readable (#73 item 5): some
+    composite key may still have masked it into ``mapping`` on the way past,
+    and substituting it would print a token for a name shown in clear two
+    keys away, which is the pairing the keep set exists to withhold.
+
+    Not a value under ``_MIN_SUBSTITUTION_LEN`` either, unless this call
+    resolved it from the caller's own token. A short name a row carried may
+    be any three letters of a sentence. One the caller's token resolved to is
+    the value the caller asked about, and left alone it is the plaintext of
+    that token in every echo of the argument. The boundaries of the swap keep
+    it out of a longer word, as they keep a long value out of a longer name.
+    """
+    exact = mapping.exact if isinstance(mapping, _TrackedMapping) else frozenset()
+    return [
+        raw
+        for raw in sorted(mapping, key=len, reverse=True)
+        if (len(raw) >= _MIN_SUBSTITUTION_LEN or raw in exact) and raw not in keep
+    ]
 
 
 @dataclass(frozen=True)
@@ -1382,16 +1419,7 @@ class OutputMasker:
         rebuilt and recompiled an n-branch alternation n times, which is
         what made a large response quadratic in time (#73 item 7c).
         """
-        raws = [
-            raw
-            for raw in sorted(mapping, key=len, reverse=True)
-            # A value the deployment chose to leave readable stays readable in
-            # prose too (#73 item 5). Some composite key may still have masked
-            # it into ``mapping`` on the way past; substituting it here would
-            # print a token for a name shown in clear two keys away, which is
-            # the pairing the keep set exists to withhold.
-            if len(raw) >= _MIN_SUBSTITUTION_LEN and raw not in keep
-        ]
+        raws = _swappable(mapping, keep)
         if not raws:
             return None
         # An inexact (case-only) match may reuse a token only when exactly one
@@ -1444,11 +1472,7 @@ class OutputMasker:
         self, mapping: dict[str, str], keep: frozenset[str]
     ) -> "_SubstitutionPlan | None":
         """Build without touching the cache, for a caller-supplied plain dict."""
-        raws = [
-            raw
-            for raw in sorted(mapping, key=len, reverse=True)
-            if len(raw) >= _MIN_SUBSTITUTION_LEN and raw not in keep
-        ]
+        raws = _swappable(mapping, keep)
         if not raws:
             return None
         folded: dict[str, str] = {}
@@ -1598,11 +1622,12 @@ class OutputMasker:
         token even when no row of the result carries it. It also wins over
         the device-identity keep set (:meth:`_resolved_leaves_keep_set`).
         """
-        mapping: dict[str, str] = _TrackedMapping()
+        mapping = _TrackedMapping()
         for real, sent in (resolved or {}).items():
             mapping[real] = sent
             for spelled in _echo_spellings(real):
                 mapping.setdefault(spelled, sent)
+        mapping.resolved_exactly(set(mapping))
         keep = frozenset() if self._mask_device_identity else self._device_identity_values(obj)
         if resolved and not self._mask_device_identity:
             obj, keep = self._resolved_leaves_keep_set(obj, keep, resolved)

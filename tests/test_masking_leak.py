@@ -1174,17 +1174,101 @@ class TestDocumentedGaps:
         masked = masker.mask_result({"socialid": {"data": [{"srcip": ENDPOINT_IP}]}})
         assert masked["socialid"]["data"][0]["srcip"] != ENDPOINT_IP
 
-    def test_a_short_value_resolved_from_an_argument_is_not_masked_in_prose(
-        self, masker: OutputMasker, engine: FPEEngine
-    ):
-        """Pass 2 does not look for a value under four characters inside free
-        text, whether a row carried it or the caller's token resolved to it
-        (the second argument, real value -> the text that was sent): a name
-        that short would match inside unrelated words."""
-        token = engine.mint("username", "bob")
-        reply = {"status": "error", "message": "nothing is named 'bob'"}
+    def test_a_short_value_a_row_carries_is_not_masked_in_prose(self, masker: OutputMasker):
+        """Pass 2 does not look for a value under four characters that a row
+        carried: nothing says the same three letters in a sentence are that
+        value. One the caller's own token resolved to is known exactly and is
+        looked for (``TestAShortValueTheCallersTokenResolvedTo``)."""
+        masked = masker.mask_result({"user": "bob", "message": "nothing is named 'bob'"})
 
-        assert masker.mask_result(reply, {"bob": token}) == reply
+        assert masked["message"] == "nothing is named 'bob'"
+
+
+#: Where a tool hands back what it was called with, and how it reads there.
+#: ``{}`` is the value; no other run of the same letters stands on its own.
+ECHOES = {
+    "filter": 'user=="{}" and action==deny',
+    "filter_applied": "user=={}",
+    "name_filter": "{}",
+    "message": "no log has the user '{}'",
+    "pivot_filter": 'user=="{}"',
+    "headline": "hunt for {}: 0 matches",
+    "warnings": ["user {} matched nothing"],
+}
+
+
+@pytest.mark.parametrize("fixture", ["masker", "full_masker"], ids=["flag-off", "flag-on"])
+class TestAShortValueTheCallersTokenResolvedTo:
+    """A value under four characters is not looked for in free text: a short
+    name a row carried would match inside unrelated words. A value the call
+    resolved from the caller's own token is known exactly, so it is looked
+    for whatever its length. Without that, a token for ``sa`` or ``ftp`` came
+    back as its plaintext in every echo of the argument."""
+
+    @pytest.mark.parametrize("real", ["sa", "ftp", "x"])
+    @pytest.mark.parametrize("key", ECHOES)
+    def test_an_echo_holds_the_token_and_not_the_value(
+        self, request: pytest.FixtureRequest, engine: FPEEngine, fixture: str, key: str, real: str
+    ):
+        masker: OutputMasker = request.getfixturevalue(fixture)
+        token = engine.mint("username", real)
+        echo = ECHOES[key]
+
+        def written(value: str) -> Any:
+            return [echo[0].format(value)] if isinstance(echo, list) else echo.format(value)
+
+        out = masker.mask_result({key: written(real)}, {real: token})
+
+        assert out == {key: written(token)}
+
+    def test_the_value_inside_a_longer_word_is_left_alone(
+        self, request: pytest.FixtureRequest, engine: FPEEngine, fixture: str
+    ):
+        """The boundaries that keep a long value out of a longer name keep a
+        short one out of a word."""
+        masker: OutputMasker = request.getfixturevalue(fixture)
+        token = engine.mint("username", "sa")
+        reply = {"message": "the usage of 'sa' passes; sa-backup and mesa are other names"}
+
+        out = masker.mask_result(reply, {"sa": token})
+
+        assert out == {
+            "message": f"the usage of '{token}' passes; sa-backup and mesa are other names"
+        }
+
+    def test_naming_the_resolved_values_is_a_change_the_cached_plan_sees(
+        self, request: pytest.FixtureRequest, engine: FPEEngine, fixture: str
+    ):
+        """The plan for the swap is cached on the map's write count. Naming
+        the values the floor does not apply to changes what the plan holds,
+        so it has to count as a write."""
+        from fortianalyzer_mcp.masking.wrapper import _TrackedMapping
+
+        masker: OutputMasker = request.getfixturevalue(fixture)
+        mapping = _TrackedMapping()
+        mapping["sa"] = engine.mint("username", "sa")
+        mapping["jsmith"] = engine.mint("username", "jsmith")
+
+        assert masker._substitute_known("jsmith asked for sa", mapping) == (
+            f"{mapping['jsmith']} asked for sa"
+        )
+        mapping.resolved_exactly({"sa", "", " "})
+
+        assert mapping.exact == {"sa"}
+        assert masker._substitute_known("jsmith asked for sa", mapping) == (
+            f"{mapping['jsmith']} asked for {mapping['sa']}"
+        )
+
+    def test_a_short_value_a_row_carries_beside_it_is_still_left_alone(
+        self, request: pytest.FixtureRequest, engine: FPEEngine, fixture: str
+    ):
+        masker: OutputMasker = request.getfixturevalue(fixture)
+        token = engine.mint("username", "sa")
+        reply = {"user": "bob", "message": "bob asked for sa"}
+
+        out = masker.mask_result(reply, {"sa": token})
+
+        assert out["message"] == f"bob asked for {token}"
 
 
 class TestAResolvedValueEchoedInAnotherSpelling:

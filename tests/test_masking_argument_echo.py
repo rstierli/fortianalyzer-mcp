@@ -63,9 +63,12 @@ CUSTOM_RANGE = "2024-01-01 00:00:00|2024-01-02 00:00:00"
 #: the routes: a name validator (ADOM, device, vdom) refuses the dotted name
 #: and the addresses and accepts the plain name, and an address validator
 #: accepts only an address. Between them a parameter is swept on its refusal
-#: and past it. All are longer than the four characters pass 2 needs before it
-#: looks for a value in prose. One holds an underscore, which a substring
-#: filter does not write as it stands.
+#: and past it. One holds an underscore, which a substring filter does not
+#: write as it stands. Two are shorter than the four characters pass 2 asks of
+#: a value a row carried before it looks for it in prose: a value the caller's
+#: token resolved to is looked for whatever its length. They are letters no
+#: word, key or token of a reply holds in that order, because the sweep looks
+#: for a plaintext as a substring.
 PLAINTEXTS = {
     "fw-core.example.net": "hostname",
     "fw-core-01": "hostname",
@@ -73,6 +76,8 @@ PLAINTEXTS = {
     "2001:db8::77": "ip",
     "jdoe-probe": "username",
     "svc_bak_probe": "username",
+    "qzx": "username",
+    "qj": "username",
 }
 
 #: Every operator of a structured filter condition. Each is compiled into the
