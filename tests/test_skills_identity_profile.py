@@ -95,7 +95,9 @@ class TestIdentityProfile:
         assert result.time_range == "24-hour"
         kwargs = logs.call_args.kwargs
         assert kwargs["logtype"] == "event"
-        assert kwargs["filter"] == "user==alice and (action==failure or subtype==vpn)"
+        assert kwargs["filter"] == (
+            f"user==alice and ({handlers._FAILED_LOGIN_CLAUSE} or subtype==vpn)"
+        )
         assert kwargs["limit"] == 100
         assert result.warnings == []
 
