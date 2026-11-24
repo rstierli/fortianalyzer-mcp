@@ -142,3 +142,40 @@ class TestResolveTimeWindow:
         fake = FakeClock()
         with pytest.raises(ValueError, match="Unknown time_range"):
             await resolve_time_window(fake, "root", "3-hour")
+
+
+class TestWindowIsElapsedTime:
+    """The anchor carries its zone, so the window is real time (#187 D23)."""
+
+    ZURICH = ZoneInfo("Europe/Zurich")
+
+    async def test_the_detected_zone_travels_with_the_anchor(self) -> None:
+        result = await detect_logview_anchor(FakeClock(tz=self.ZURICH), "root")
+
+        assert result.zone is self.ZURICH
+
+    async def test_no_zone_when_the_appliance_zone_is_unknown(self) -> None:
+        result = await detect_logview_anchor(FakeClock(tz=None), "root")
+
+        assert result.zone is None
+
+    async def test_a_relative_window_across_a_clock_change(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fortianalyzer_mcp.utils.log_clock as log_clock
+        from fortianalyzer_mcp.utils.log_clock import AnchorResult
+
+        async def anchored(*_a: object, **_kw: object) -> AnchorResult:
+            return AnchorResult(
+                anchor=datetime(2026, 3, 29, 12, 0, 0),
+                source="logstats",
+                timezone="Europe/Zurich",
+                clock_skew_seconds=0,
+                zone=self.ZURICH,
+            )
+
+        monkeypatch.setattr(log_clock, "detect_logview_anchor", anchored)
+
+        window = await resolve_time_window(FakeClock(tz=self.ZURICH), "root", "24-hour")
+
+        assert window.time_range == {"start": "2026-03-28 11:00:00", "end": "2026-03-29 12:00:00"}

@@ -86,13 +86,17 @@ def parse_time_range(
             stripped to naive form. When ``None``, falls back to
             :func:`datetime.now` (caller-local) — preserves legacy
             behavior, but only correct if the caller and FAZ happen
-            to share a timezone.
+            to share a timezone. Either way the window is elapsed time:
+            the subtraction is done in UTC.
         anchor: Explicit naive FAZ-local "now" to end relative windows on.
             When provided it takes precedence over ``faz_tz``/``datetime.now``
             — used to align relative ranges to the appliance's LogView ingest
             clock (see :mod:`fortianalyzer_mcp.utils.log_clock`) so a post-
-            upgrade clock skew does not silently miss recent logs. Ignored for
-            custom ``"start|end"`` ranges (those carry explicit timestamps).
+            upgrade clock skew does not silently miss recent logs. Pass
+            ``faz_tz`` with it: the anchor is read as a wall time in that
+            zone, and without it the window falls back to wall-clock
+            arithmetic. Ignored for custom ``"start|end"`` ranges (those
+            carry explicit timestamps).
 
     Returns:
         ``{"start": "...", "end": "..."}`` ready to send as
@@ -137,16 +141,28 @@ def parse_time_range(
             f"'YYYY-MM-DD HH:MM:SS|YYYY-MM-DD HH:MM:SS'."
         )
 
+    # The window is ``delta`` of elapsed time, so the subtraction is done in
+    # UTC and both ends are converted to local wall time afterwards (#187).
+    # Subtracting from a local wall time instead made "24-hour" cover 23 real
+    # hours across a spring clock change and 25 across an autumn one.
     if anchor is not None:
         # Explicit FAZ-local anchor (e.g. latest LogView ingest time). Strip any
         # tzinfo so the bytes-on-wire stay naive FAZ-local like every other path.
         now = anchor.replace(tzinfo=None)
-    elif faz_tz is not None:
-        now = datetime.now(UTC).astimezone(faz_tz).replace(tzinfo=None)
+        if faz_tz is None:
+            # The anchor's zone is not known, so there is nothing to convert
+            # through: this one case stays wall-clock arithmetic.
+            start_dt = now - delta
+        else:
+            anchor_utc = now.replace(tzinfo=faz_tz).astimezone(UTC)
+            start_dt = (anchor_utc - delta).astimezone(faz_tz).replace(tzinfo=None)
     else:
-        now = datetime.now()
+        # ``astimezone(None)`` is the host's own zone, with the offset that
+        # applied at each instant.
+        now_utc = datetime.now(UTC)
+        now = now_utc.astimezone(faz_tz).replace(tzinfo=None)
+        start_dt = (now_utc - delta).astimezone(faz_tz).replace(tzinfo=None)
 
-    start_dt = now - delta
     return {
         "start": start_dt.strftime(_TIMESTAMP_FMT),
         "end": now.strftime(_TIMESTAMP_FMT),

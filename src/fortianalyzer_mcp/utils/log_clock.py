@@ -61,6 +61,7 @@ class AnchorResult:
     source: str  # logfiles_state | logstats | faz_tz | naive
     timezone: str  # FAZ system tz name, or "unknown"
     clock_skew_seconds: int | None  # anchor - faz_now, when measurable
+    zone: ZoneInfo | None = None  # the FAZ system tz itself, when known
 
 
 @dataclass(frozen=True)
@@ -186,10 +187,22 @@ async def detect_logview_anchor(
             continue
         skew = int((anchor - faz_now).total_seconds())
         logger.info(f"LogView clock anchored via {source}: {anchor} (skew {skew}s)")
-        return AnchorResult(anchor=anchor, source=source, timezone=tz_name, clock_skew_seconds=skew)
+        return AnchorResult(
+            anchor=anchor,
+            source=source,
+            timezone=tz_name,
+            clock_skew_seconds=skew,
+            zone=faz_tz,
+        )
 
     if faz_tz is not None:
-        return AnchorResult(anchor=faz_now, source="faz_tz", timezone=tz_name, clock_skew_seconds=0)
+        return AnchorResult(
+            anchor=faz_now,
+            source="faz_tz",
+            timezone=tz_name,
+            clock_skew_seconds=0,
+            zone=faz_tz,
+        )
     return AnchorResult(anchor=faz_now, source="naive", timezone=tz_name, clock_skew_seconds=None)
 
 
@@ -229,7 +242,7 @@ async def resolve_time_window(
         )
 
     anchor = await detect_logview_anchor(client, adom, device)
-    window = parse_time_range(time_range, anchor=anchor.anchor)
+    window = parse_time_range(time_range, faz_tz=anchor.zone, anchor=anchor.anchor)
     return TimeWindow(
         time_range=window,
         timezone=anchor.timezone,
