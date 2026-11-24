@@ -120,7 +120,11 @@ async def test_run_report_and_fetch_status(
     # Run the report with last-1-hours to minimize data
     try:
         run_result = await faz_client.report_run(
-            test_adom, layout_id=int(layout_id), time_period="last-1-hours"
+            test_adom,
+            layout_id=int(layout_id),
+            time_period="last-n-hours",
+            period_last_n=1,
+            has_schedule=True,
         )
         assert run_result is not None
         assert "tid" in run_result
@@ -174,7 +178,11 @@ async def test_report_run_and_wait_for_completion(
     try:
         # Run report
         run_result = await faz_client.report_run(
-            test_adom, layout_id=int(layout_id), time_period="last-1-hours"
+            test_adom,
+            layout_id=int(layout_id),
+            time_period="last-n-hours",
+            period_last_n=1,
+            has_schedule=True,
         )
         assert "tid" in run_result
         tid = run_result["tid"]

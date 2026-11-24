@@ -208,16 +208,18 @@ class _ReportRunFakeClient:
         adom: str,
         layout_id: int,
         time_period: str | None = "last-7-days",
-        device: list[dict[str, str]] | None = None,
         period_start: str | None = None,
         period_end: str | None = None,
         device_name: str | None = None,
+        period_last_n: int | None = None,
+        has_schedule: bool = False,
     ) -> dict[str, Any]:
         self.run_calls.append(
             {
                 "layout_id": layout_id,
                 "time_period": time_period,
-                "device": device,
+                "device_name": device_name,
+                "has_schedule": has_schedule,
                 "period_start": period_start,
                 "period_end": period_end,
             }
@@ -326,15 +328,18 @@ class TestReportRunPayload:
         assert sp["layout-id"] == 10002
         assert params["runfrom"] == "GUI"
 
-    async def test_preset_uses_flat_form(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_preset_names_the_schedule_and_nests_the_period(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Beside ``schedule`` a top-level time-period is ignored (#198)."""
         client, captured = self._client_capturing(monkeypatch)
 
-        await client.report_run("root", 10002, time_period="last-7-days")
+        await client.report_run("root", 10002, time_period="last-7-days", has_schedule=True)
 
         params = captured["params"]
         assert params["schedule"] == "10002"
-        assert params["time-period"] == "last-7-days"
-        assert "schedule-param" not in params
+        assert params["schedule-param"] == {"time-period": "last-7-days"}
+        assert "time-period" not in params
 
 
 class TestPercentageCoercion:

@@ -335,14 +335,21 @@ class TestLayoutWithoutSchedule:
 
 
 class TestLayoutWithSchedule:
-    """A layout that has a schedule runs with the request it always had.
+    """A layout that has a schedule names it and carries the period in
+    ``schedule-param`` (#198).
 
-    The bodies below are what the unchanged code posted; they pin the flat
-    form (and the custom-window form) byte for byte.
+    Measured on 7.6.8: beside ``schedule``, a top-level ``time-period`` and
+    ``device`` are ignored and the schedule's stored period and devices run
+    (layout 3, schedule "last 30 days", asked ``last-7-days`` and one device:
+    30 days on three devices). ``schedule`` plus ``schedule-param`` ran the
+    requested ``last-7-days``, ``last-n-days`` 3, ``last-n-hours`` 6 with one
+    device, and a custom window; the schedule's stored period was unchanged.
+    The reference documents only ``schedule`` and ``schedule-param`` at the
+    top level of the run, and says the parameters override the schedule's.
     """
 
     @BOTH_TOOLS
-    async def test_preset_request_is_unchanged(
+    async def test_preset_period_goes_into_schedule_param(
         self, tool: Any, appliance: Callable[..., _Appliance]
     ) -> None:
         faz = appliance(HAS_SCHEDULE)
@@ -352,13 +359,28 @@ class TestLayoutWithSchedule:
         assert result["status"] == "success"
         assert faz.run_body() == (
             '{"method": "add", "params": [{"url": "/report/adom/root/run", "apiver": 3, '
-            '"schedule": "10002", "time-period": "last-1-hours", "runfrom": "GUI"}], '
+            '"runfrom": "GUI", "schedule": "10002", '
+            '"schedule-param": {"time-period": "last-n-hours", "period-last-n": 1}}], '
             '"id": 1, "jsonrpc": "2.0", "session": "mock-session-id"}'
         )
         assert faz.writes() == [("add", RUN_URL)]
 
     @BOTH_TOOLS
-    async def test_preset_request_with_device_is_unchanged(
+    async def test_an_enum_period_goes_as_it_is(
+        self, tool: Any, appliance: Callable[..., _Appliance]
+    ) -> None:
+        faz = appliance(HAS_SCHEDULE)
+
+        result = await tool(layout=str(LAYOUT_ID), adom="root", time_range="30-day")
+
+        assert result["status"] == "success"
+        params = faz.run_params()
+        assert params["schedule"] == str(LAYOUT_ID)
+        assert params["schedule-param"] == {"time-period": "last-30-days"}
+        assert "time-period" not in params
+
+    @BOTH_TOOLS
+    async def test_a_device_goes_into_schedule_param_as_its_name(
         self, tool: Any, appliance: Callable[..., _Appliance]
     ) -> None:
         faz = appliance(HAS_SCHEDULE)
@@ -370,13 +392,27 @@ class TestLayoutWithSchedule:
         assert result["status"] == "success"
         assert faz.run_body() == (
             '{"method": "add", "params": [{"url": "/report/adom/root/run", "apiver": 3, '
-            '"schedule": "10002", "time-period": "last-7-days", "runfrom": "GUI", '
-            '"device": [{"devname": "fw-branch-01"}]}], '
+            '"runfrom": "GUI", "schedule": "10002", '
+            '"schedule-param": {"time-period": "last-7-days", "device": "fw-branch-01"}}], '
             '"id": 1, "jsonrpc": "2.0", "session": "mock-session-id"}'
         )
 
     @BOTH_TOOLS
-    async def test_custom_window_request_is_unchanged(
+    async def test_no_device_leaves_the_schedules_devices(
+        self, tool: Any, appliance: Callable[..., _Appliance]
+    ) -> None:
+        """Without a device the schedule's own devices run, so none is sent:
+        "all" would widen a schedule that names one device group."""
+        faz = appliance(HAS_SCHEDULE)
+
+        await tool(layout=str(LAYOUT_ID), adom="root", time_range="7-day")
+
+        sp = faz.run_params()["schedule-param"]
+        assert "device" not in sp
+        assert "layout-id" not in sp
+
+    @BOTH_TOOLS
+    async def test_custom_window_names_the_schedule(
         self, tool: Any, appliance: Callable[..., _Appliance]
     ) -> None:
         faz = appliance(HAS_SCHEDULE)
@@ -386,8 +422,8 @@ class TestLayoutWithSchedule:
         assert result["status"] == "success"
         assert faz.run_body() == (
             '{"method": "add", "params": [{"url": "/report/adom/root/run", "apiver": 3, '
-            '"runfrom": "GUI", "schedule-param": {"layout-id": 10002, "device": "all", '
-            '"filter-logic": "all", "time-period": "other", '
+            '"runfrom": "GUI", "schedule": "10002", '
+            '"schedule-param": {"time-period": "other", '
             '"period-start": "00:00 2026/06/27", "period-end": "00:00 2026/06/28"}}], '
             '"id": 1, "jsonrpc": "2.0", "session": "mock-session-id"}'
         )
@@ -396,9 +432,6 @@ class TestLayoutWithSchedule:
     async def test_a_custom_window_with_a_device_sends_the_name(
         self, tool: Any, appliance: Callable[..., _Appliance]
     ) -> None:
-        """The custom window runs through ``schedule-param`` on every layout,
-        so the device is a string here as well. The flat preset form above
-        keeps its list."""
         faz = appliance(HAS_SCHEDULE)
 
         result = await tool(
@@ -410,17 +443,20 @@ class TestLayoutWithSchedule:
         assert "device" not in {k for k in faz.run_params() if k != "schedule-param"}
 
     @BOTH_TOOLS
-    async def test_a_month_period_still_runs_in_the_flat_form(
-        self, tool: Any, appliance: Callable[..., _Appliance]
+    @pytest.mark.parametrize("time_range", ["last-1-months", "last-12-months"])
+    async def test_a_month_period_is_refused_and_no_run_is_sent(
+        self, tool: Any, time_range: str, appliance: Callable[..., _Appliance]
     ) -> None:
-        """The refusal is for ``schedule-param`` only. With a schedule the
-        request is the one main sent."""
+        """The flat form took a month period and then ran the schedule's own
+        period, so it never ran one. ``schedule-param`` has no month period."""
         faz = appliance(HAS_SCHEDULE)
 
-        result = await tool(layout=str(LAYOUT_ID), adom="root", time_range="last-1-months")
+        result = await tool(layout=str(LAYOUT_ID), adom="root", time_range=time_range)
 
-        assert result["status"] == "success"
-        assert faz.run_params()["time-period"] == "last-1-months"
+        assert result["status"] == "error"
+        for alternative in ("last-N-days", "last-N-weeks", "start|end"):
+            assert alternative in result["message"]
+        assert faz.writes() == []
 
     async def test_run_report_says_no_schedule_was_created(
         self, appliance: Callable[..., _Appliance]
