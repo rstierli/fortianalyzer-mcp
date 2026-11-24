@@ -1706,12 +1706,11 @@ class FortiAnalyzerClient:
         self,
         adom: str,
         layout_id: int,
-        time_period: str | None = "last-7-days",
-        device: list[dict[str, str]] | None = None,
+        time_period: str = "last-7-days",
         period_start: str | None = None,
         period_end: str | None = None,
         period_last_n: int | None = None,
-        without_schedule: bool = False,
+        has_schedule: bool = False,
         device_name: str | None = None,
     ) -> dict[str, Any]:
         """Run a report.
@@ -1725,96 +1724,79 @@ class FortiAnalyzerClient:
         Args:
             adom: ADOM name
             layout_id: Report layout ID (from get_report_layouts).
-                       The preset (flat) form names the layout's schedule, so
-                       one must exist; pass without_schedule=True when it
-                       does not.
-            time_period: Preset time period for the report, e.g. "last-1-hours",
-                "last-7-days", "last-30-days", "last-4-weeks". Ignored when a
-                custom window (period_start + period_end) is supplied. With
-                without_schedule it must be a value of the ``schedule-param``
-                time-period enum (see below).
-            device: Device filter list [{"devname": "myfw01"}, ...], or None.
-                Sent by the flat form only.
-            device_name: The device as the caller named it, or None for all
-                devices. Sent by the two ``schedule-param`` forms, which take
-                a string (see below).
+            time_period: A value of the ``schedule-param`` time-period enum,
+                e.g. "last-7-days" or "last-n-days" (with period_last_n).
+                Replaced by "other" when period_start and period_end are given.
             period_start: Custom window start as a FortiOS ``timedate`` string
-                ("HH:MM yyyy/mm/dd"). When both period_start and period_end are
-                given, the run uses a custom window instead of ``time_period``.
+                ("hh:mm:ss YYYY/MM/DD"). Sent with time_period "other".
             period_end: Custom window end as a FortiOS ``timedate`` string.
             period_last_n: The count for the generic ``last-n-hours``,
-                ``last-n-days`` and ``last-n-weeks`` periods. Only sent with
-                without_schedule.
-            without_schedule: Start a preset run through the nested
-                ``schedule-param`` object instead of naming a schedule. For a
-                layout that has no schedule; nothing is created.
+                ``last-n-days`` and ``last-n-weeks`` periods.
+            has_schedule: The layout has a schedule (its name is the
+                layout-id). The run then names it, and keeps the schedule's
+                own settings (devices, filters, output) apart from what
+                ``schedule-param`` overrides. Nothing is written to it.
+            device_name: The device as the caller named it, or None. A layout
+                without a schedule runs on all devices when it is None; one
+                with a schedule runs on the schedule's devices.
 
-        A custom window is delivered inside the nested ``schedule-param`` object
-        with ``time-period="other"`` (the string form; the numeric schedule-
-        config code is rejected here) and the two ``timedate`` bounds — NOT as a
-        top-level ``schedule`` with flat period fields. Live-verified on 7.6.7
-        and 8.0.0: the flat run form and the schedule-config object both fail to
-        scope a custom window (ignored / empty report); only nested
-        ``schedule-param`` with ``"other"`` produces the requested period.
+        Every run carries the period in the nested ``schedule-param`` object.
+        The reference documents only ``schedule`` and ``schedule-param`` at
+        the top level of the run, and says the parameters override the
+        named schedule's. A top-level ``time-period`` or ``device`` beside
+        ``schedule`` is ignored: measured on 7.6.8 (#198), layout 3 with a
+        schedule of "last 30 days" asked for ``last-7-days`` and one device
+        ran 30 days on all three devices. The same layout with ``schedule``
+        plus ``schedule-param`` ran the requested ``last-7-days``,
+        ``last-n-days`` 3, ``last-n-hours`` 6 with one device, and a custom
+        window, and the schedule's stored period was unchanged afterwards.
+        The same held on 8.0.2.
+        The FortiAnalyzer GUI sets a period differently: it writes it into
+        the schedule first, then runs ``{schedule}`` alone.
 
-        The same object starts a preset run on a layout that has no schedule:
-        layout-id, device, filter-logic and time-period are enough, and no
-        schedule is created (measured on 7.6.7, issue #181). Its time-period
-        is the enum of the reference, not the flat form's string:
-        "last-1-hours" is rejected there ("parse object 'time-period' error"),
-        while "last-n-hours" with ``period-last-n`` 1 runs.
+        ``layout-id`` is always sent: the reference marks it required in
+        ``schedule-param``. With a schedule it was not needed (the runs above
+        went without it), and it was measured beside ``schedule`` on 7.6.8
+        and 8.0.2. ``device`` is also marked required, but beside a schedule
+        it is sent only when the caller names one: "all" would override the
+        schedule's devices. A layout without a schedule runs through
+        ``schedule-param`` alone, with device "all" when none is named, and
+        no schedule is created (measured on 7.6.7, issue #181).
 
-        ``device`` inside ``schedule-param`` is a string, not the list the
-        flat form takes. Measured on 7.6.7 (#189): ``[{"devname": ...}]`` is
-        rejected there with "parse object 'device' error" and no run starts,
-        while a plain device name is accepted and echoed as
-        ``device: {count: 1, data: "<name>"}``. So both ``schedule-param``
-        forms send ``device_name``, or "all". Not measured: a serial, a serial
-        or name with a VDOM suffix, and more than one device. The custom
-        window sent the list form before, so a custom window with a device
-        was very likely rejected; that was inferred from the same field and
-        the same parse, not run.
+        The time-period is the enum of the reference, not a
+        "last-<count>-<unit>" string: "last-1-hours" is rejected there
+        ("parse object 'time-period' error"), while "last-n-hours" with
+        ``period-last-n`` 1 runs. A custom window is ``"other"`` with the two
+        bounds, spelled "hh:mm:ss YYYY/MM/DD" as in the reference (measured
+        on 7.6.8 and 8.0.2).
+
+        ``device`` inside ``schedule-param`` is a string, not a list. Measured
+        on 7.6.7 (#189): ``[{"devname": ...}]`` is rejected there with "parse
+        object 'device' error" and no run starts, while a plain device name
+        is accepted and echoed as ``device: {count: 1, data: "<name>"}``. Not
+        measured: a serial, a serial or name with a VDOM suffix, and more
+        than one device.
         """
+        schedule_param: dict[str, Any] = {"layout-id": layout_id, "time-period": time_period}
         if period_start and period_end:
-            # Custom window: nested schedule-param, no top-level "schedule".
-            schedule_param: dict[str, Any] = {
-                "layout-id": layout_id,
-                "device": device_name if device_name else "all",
-                "filter-logic": "all",
-                "time-period": "other",
-                "period-start": period_start,
-                "period-end": period_end,
-            }
-            params: dict[str, Any] = {
-                "apiver": API_VERSION,
-                "runfrom": "GUI",
-                "schedule-param": schedule_param,
-            }
-        elif without_schedule:
-            # Preset on a layout with no schedule: nested schedule-param too.
+            schedule_param["time-period"] = "other"
+            schedule_param["period-start"] = period_start
+            schedule_param["period-end"] = period_end
+        elif period_last_n is not None:
+            schedule_param["period-last-n"] = period_last_n
+        if device_name:
+            schedule_param["device"] = device_name
+        params: dict[str, Any] = {"apiver": API_VERSION, "runfrom": "GUI"}
+        if has_schedule:
+            params["schedule"] = str(layout_id)
+        else:
             schedule_param = {
                 "layout-id": layout_id,
                 "device": device_name if device_name else "all",
                 "filter-logic": "all",
-                "time-period": time_period,
+                **schedule_param,
             }
-            if period_last_n is not None:
-                schedule_param["period-last-n"] = period_last_n
-            params = {
-                "apiver": API_VERSION,
-                "runfrom": "GUI",
-                "schedule-param": schedule_param,
-            }
-        else:
-            # Preset: flat form. schedule is the layout-id as a string.
-            params = {
-                "apiver": API_VERSION,
-                "schedule": str(layout_id),
-                "time-period": time_period,
-                "runfrom": "GUI",
-            }
-            if device:
-                params["device"] = device
+        params["schedule-param"] = schedule_param
 
         return await self._raw_request_dict("add", f"/report/adom/{adom}/run", **params)
 
@@ -1909,7 +1891,7 @@ class FortiAnalyzerClient:
         FNDN: GET /config/adom/{adom}/sql-report/schedule
 
         The flat form of report_run names a layout's schedule. A layout
-        without one runs through schedule-param (without_schedule=True).
+        without one runs through schedule-param alone (has_schedule=False).
         The schedule name matches the layout-id.
 
         Args:
@@ -1978,7 +1960,7 @@ class FortiAnalyzerClient:
         FNDN: SET /report/adom/{adom}/config/schedule/{layout_id}
 
         For explicit use only. Running a report does not need it:
-        report_run(without_schedule=True) runs a layout that has no schedule,
+        report_run(has_schedule=False) runs a layout that has no schedule,
         and the report tools never create one (issue #181).
 
         Args:

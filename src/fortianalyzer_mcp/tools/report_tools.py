@@ -24,7 +24,6 @@ from fortianalyzer_mcp.utils.time_range import parse_time_range
 from fortianalyzer_mcp.utils.validation import (
     ValidationError,
     assert_within_directory,
-    build_device_filter,
     get_default_adom,
     validate_adom,
     validate_output_path,
@@ -111,9 +110,11 @@ def _convert_to_api_time_period(time_range: str) -> str:
 # ``schedule-param`` object (time-period="other" + the two timedate bounds),
 # NOT on the schedule config object and NOT as flat run params -- both of those
 # fail to scope the window (ignored / empty report on 7.6.7 and 8.0.0, verified
-# live). period-start / period-end are FortiOS ``timedate`` strings:
-# "HH:MM yyyy/mm/dd" (time first, minute resolution).
-_PERIOD_TIMEDATE_FMT = "%H:%M %Y/%m/%d"
+# live). period-start / period-end are "hh:mm:ss YYYY/MM/DD" as the FNDN
+# reference spells them: measured on 7.6.8 and 8.0.2 with and without a
+# schedule, the window ran to the minute (00:00:00 to 12:30:00). The older
+# "HH:MM yyyy/mm/dd" spelling also ran on 7.6.7, 8.0.0 and 7.6.8.
+_PERIOD_TIMEDATE_FMT = "%H:%M:%S %Y/%m/%d"
 
 
 def _format_period_timedate(ts: str) -> str:
@@ -127,9 +128,9 @@ def _custom_window_timedate(time_range: str) -> tuple[str, str]:
     return _format_period_timedate(tr["start"]), _format_period_timedate(tr["end"])
 
 
-# A layout that has no schedule runs through the run's nested ``schedule-param``
-# as well, and that object takes the time-period ENUM of the FNDN reference, not
-# the "last-<count>-<unit>" strings of the flat run form. Measured by the
+# Every run carries its period in the run's nested ``schedule-param`` (#198),
+# and that object takes the time-period ENUM of the FNDN reference, not
+# "last-<count>-<unit>" strings. Measured by the
 # maintainer on 7.6.7 (issue #181): "last-1-hours" is rejected there ("parse
 # object 'time-period' error"), "last-n-hours" plus "period-last-n": 1 runs.
 # "last-7-days" and "last-30-days" are enum members as they are; any other
@@ -159,9 +160,9 @@ def _schedule_param_time_period(time_period: str) -> tuple[str, int | None]:
         # schedule-param ("parse object 'time-period' error"). Refused here,
         # before a run request is made, with the periods that do run.
         raise ValidationError(
-            f"This report layout has no schedule, and a run without one cannot use "
-            f"{time_period!r}: FortiAnalyzer takes no month period there. Use a number "
-            "of days (last-N-days) or weeks (last-N-weeks), or a custom 'start|end' range."
+            f"A report cannot run for {time_period!r}: FortiAnalyzer takes no month "
+            "period in a run request. Use a number of days (last-N-days) or weeks "
+            "(last-N-weeks), or a custom 'start|end' range."
         )
     # "other" (custom window) needs no mapping. A period without a count has
     # no measured spelling here: it is sent unchanged so the appliance answers
@@ -170,18 +171,17 @@ def _schedule_param_time_period(time_period: str) -> tuple[str, int | None]:
 
 
 def _run_period_args(has_schedule: bool, time_period: str) -> dict[str, Any]:
-    """client.report_run arguments for the period, by the form the run takes.
+    """client.report_run arguments for the period.
 
-    A layout with a schedule runs as it always did: the flat form, which
-    names the schedule. A layout without one runs through ``schedule-param``.
+    Every run carries the period in ``schedule-param``, with or without a
+    schedule: beside a schedule's name, a top-level time-period is ignored
+    and the schedule's stored period runs instead (#198).
     """
-    if has_schedule:
-        return {"time_period": time_period}
     sp_time_period, period_last_n = _schedule_param_time_period(time_period)
     return {
         "time_period": sp_time_period,
         "period_last_n": period_last_n,
-        "without_schedule": True,
+        "has_schedule": has_schedule,
     }
 
 
@@ -405,9 +405,11 @@ async def run_report(
 
     This function:
     1. Looks up the layout-id by title (or uses directly if numeric)
-    2. Checks whether the layout has a schedule. Nothing is created: a layout
-       with a schedule runs through it, a layout without one runs through the
-       run request's own schedule-param (all devices unless ``device`` is given)
+    2. Checks whether the layout has a schedule. Nothing is created or
+       changed: a layout with a schedule runs through it with its own devices
+       and settings, a layout without one runs on all devices. Either way the
+       period, and ``device`` when given, travel in the run request's
+       schedule-param, so they apply to this run only
     3. Runs the report and returns the TID for tracking
 
     Reports run asynchronously. Use get_running_reports() to check progress
@@ -419,7 +421,8 @@ async def run_report(
             - Layout title (e.g., "Secure SD-WAN Report", "VPN Report")
             Use list_report_layouts() to see available layouts.
         adom: ADOM name (default: from config DEFAULT_ADOM)
-        device: Device ID filter (optional - run for specific device)
+        device: Device name (optional - run for this device only). Sent as a
+            plain name; a serial or a VDOM suffix is not measured.
         time_range: Time range. Options:
             - Short format: "1-hour", "6-hour", "12-hour", "24-hour",
               "1-day", "7-day", "30-day", "90-day"
@@ -469,24 +472,19 @@ async def run_report(
                 ),
             }
 
-        # Step 3: Resolve the time range. A custom "start|end" range is passed
-        # to the run's nested schedule-param as period-start/period-end; a
-        # preset uses the flat time-period string when the layout has a
-        # schedule (see _run_period_args and client.report_run).
+        # Step 3: Resolve the time range. It travels in the run's nested
+        # schedule-param, a custom "start|end" range as period-start/period-end
+        # (see _run_period_args and client.report_run).
         time_period = _convert_to_api_time_period(time_range)
         period_start = period_end = None
         if time_period == "other":
             period_start, period_end = _custom_window_timedate(time_range)
 
-        # Step 4: Build device filter if specified (serials -> devid, names -> devname)
-        device_filter = build_device_filter(device) if device else None
-
-        # Step 5: Run the report
+        # Step 4: Run the report
         logger.info(f"Running report with layout-id {layout_id}, time-period: {time_period}")
         result = await client.report_run(
             adom=adom,
             layout_id=layout_id,
-            device=device_filter,
             device_name=device or None,
             period_start=period_start,
             period_end=period_end,
@@ -735,9 +733,11 @@ async def run_and_wait_report(
 
     Convenience function that:
     1. Looks up the layout-id by title
-    2. Checks whether the layout has a schedule. Nothing is created: a layout
-       with a schedule runs through it, a layout without one runs through the
-       run request's own schedule-param (all devices unless ``device`` is given)
+    2. Checks whether the layout has a schedule. Nothing is created or
+       changed: a layout with a schedule runs through it with its own devices
+       and settings, a layout without one runs on all devices. Either way the
+       period, and ``device`` when given, travel in the run request's
+       schedule-param, so they apply to this run only
     3. Runs the report
     4. Polls until completion or timeout
 
@@ -747,7 +747,8 @@ async def run_and_wait_report(
             - Layout title (e.g., "Secure SD-WAN Report", "VPN Report")
             Use list_report_layouts() to see available layouts.
         adom: ADOM name (default: from config DEFAULT_ADOM)
-        device: Device ID filter (optional - run for specific device)
+        device: Device name (optional - run for this device only). Sent as a
+            plain name; a serial or a VDOM suffix is not measured.
         time_range: Time range. Options:
             - Short format: "1-hour", "6-hour", "12-hour", "24-hour",
               "1-day", "7-day", "30-day", "90-day"
@@ -806,7 +807,6 @@ async def run_and_wait_report(
         # period-end); FAZ scopes the report from that alone, so there is no
         # shared schedule to mutate, hold, or restore.
         time_period = _convert_to_api_time_period(time_range)
-        device_filter = build_device_filter(device) if device else None
         period_start = period_end = None
         requested_window: dict[str, str] | None = None
         if time_period == "other":
@@ -818,7 +818,6 @@ async def run_and_wait_report(
         run_result = await client.report_run(
             adom=adom,
             layout_id=layout_id,
-            device=device_filter,
             device_name=device or None,
             period_start=period_start,
             period_end=period_end,
