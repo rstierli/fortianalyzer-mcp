@@ -126,6 +126,11 @@ NON_IDENTIFIER_STRINGS = {
     "note",
     "notes",
     "summary",
+    # fixed filter clauses: module constants that say what a skill counted.
+    # They hold field names and literal log values, never an entity, a row
+    # value or anything the caller sent (#187).
+    "failed_login_clause",
+    "activity_clause",
     # windows and counters
     "time_range",
     "timestamp",
