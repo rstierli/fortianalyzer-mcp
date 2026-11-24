@@ -110,9 +110,11 @@ def _convert_to_api_time_period(time_range: str) -> str:
 # ``schedule-param`` object (time-period="other" + the two timedate bounds),
 # NOT on the schedule config object and NOT as flat run params -- both of those
 # fail to scope the window (ignored / empty report on 7.6.7 and 8.0.0, verified
-# live). period-start / period-end are FortiOS ``timedate`` strings:
-# "HH:MM yyyy/mm/dd" (time first, minute resolution).
-_PERIOD_TIMEDATE_FMT = "%H:%M %Y/%m/%d"
+# live). period-start / period-end are "hh:mm:ss YYYY/MM/DD" as the FNDN
+# reference spells them: measured on 7.6.8 and 8.0.2 with and without a
+# schedule, the window ran to the minute (00:00:00 to 12:30:00). The older
+# "HH:MM yyyy/mm/dd" spelling also ran on 7.6.7, 8.0.0 and 7.6.8.
+_PERIOD_TIMEDATE_FMT = "%H:%M:%S %Y/%m/%d"
 
 
 def _format_period_timedate(ts: str) -> str:

@@ -250,8 +250,8 @@ class TestLayoutWithoutSchedule:
         assert params["schedule-param"] == _schedule_param(
             **{
                 "time-period": "other",
-                "period-start": "00:00 2026/06/27",
-                "period-end": "00:00 2026/06/28",
+                "period-start": "00:00:00 2026/06/27",
+                "period-end": "00:00:00 2026/06/28",
             }
         )
         assert "schedule" not in params
@@ -360,7 +360,8 @@ class TestLayoutWithSchedule:
         assert faz.run_body() == (
             '{"method": "add", "params": [{"url": "/report/adom/root/run", "apiver": 3, '
             '"runfrom": "GUI", "schedule": "10002", '
-            '"schedule-param": {"time-period": "last-n-hours", "period-last-n": 1}}], '
+            '"schedule-param": {"layout-id": 10002, "time-period": "last-n-hours", '
+            '"period-last-n": 1}}], '
             '"id": 1, "jsonrpc": "2.0", "session": "mock-session-id"}'
         )
         assert faz.writes() == [("add", RUN_URL)]
@@ -376,7 +377,7 @@ class TestLayoutWithSchedule:
         assert result["status"] == "success"
         params = faz.run_params()
         assert params["schedule"] == str(LAYOUT_ID)
-        assert params["schedule-param"] == {"time-period": "last-30-days"}
+        assert params["schedule-param"] == {"layout-id": LAYOUT_ID, "time-period": "last-30-days"}
         assert "time-period" not in params
 
     @BOTH_TOOLS
@@ -393,7 +394,8 @@ class TestLayoutWithSchedule:
         assert faz.run_body() == (
             '{"method": "add", "params": [{"url": "/report/adom/root/run", "apiver": 3, '
             '"runfrom": "GUI", "schedule": "10002", '
-            '"schedule-param": {"time-period": "last-7-days", "device": "fw-branch-01"}}], '
+            '"schedule-param": {"layout-id": 10002, "time-period": "last-7-days", '
+            '"device": "fw-branch-01"}}], '
             '"id": 1, "jsonrpc": "2.0", "session": "mock-session-id"}'
         )
 
@@ -402,14 +404,15 @@ class TestLayoutWithSchedule:
         self, tool: Any, appliance: Callable[..., _Appliance]
     ) -> None:
         """Without a device the schedule's own devices run, so none is sent:
-        "all" would widen a schedule that names one device group."""
+        "all" would widen a schedule that names one device group. layout-id
+        is sent: the reference marks it required."""
         faz = appliance(HAS_SCHEDULE)
 
         await tool(layout=str(LAYOUT_ID), adom="root", time_range="7-day")
 
         sp = faz.run_params()["schedule-param"]
         assert "device" not in sp
-        assert "layout-id" not in sp
+        assert sp["layout-id"] == LAYOUT_ID
 
     @BOTH_TOOLS
     async def test_custom_window_names_the_schedule(
@@ -423,8 +426,8 @@ class TestLayoutWithSchedule:
         assert faz.run_body() == (
             '{"method": "add", "params": [{"url": "/report/adom/root/run", "apiver": 3, '
             '"runfrom": "GUI", "schedule": "10002", '
-            '"schedule-param": {"time-period": "other", '
-            '"period-start": "00:00 2026/06/27", "period-end": "00:00 2026/06/28"}}], '
+            '"schedule-param": {"layout-id": 10002, "time-period": "other", '
+            '"period-start": "00:00:00 2026/06/27", "period-end": "00:00:00 2026/06/28"}}], '
             '"id": 1, "jsonrpc": "2.0", "session": "mock-session-id"}'
         )
 

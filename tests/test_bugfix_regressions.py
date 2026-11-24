@@ -179,8 +179,8 @@ class TestReportTimeRange:
         assert _convert_to_api_time_period("2026-01-01 00:00:00|2026-01-02 00:00:00") == "other"
 
     def test_period_timedate_format(self) -> None:
-        # FortiOS `timedate` fields are "HH:MM yyyy/mm/dd" (time first).
-        assert _format_period_timedate("2026-01-02 12:30:00") == "12:30 2026/01/02"
+        # The FNDN spelling of period-start/period-end: "hh:mm:ss YYYY/MM/DD".
+        assert _format_period_timedate("2026-01-02 12:30:00") == "12:30:00 2026/01/02"
 
 
 class _ReportRunFakeClient:
@@ -254,11 +254,11 @@ class TestReportCustomWindow:
         assert result["tid"] == "tid-99"
         call = fake.run_calls[0]
         assert call["time_period"] == "other"
-        assert call["period_start"] == "00:00 2026/06/27"
-        assert call["period_end"] == "00:00 2026/06/28"
+        assert call["period_start"] == "00:00:00 2026/06/27"
+        assert call["period_end"] == "00:00:00 2026/06/28"
         assert result["requested_window"] == {
-            "period-start": "00:00 2026/06/27",
-            "period-end": "00:00 2026/06/28",
+            "period-start": "00:00:00 2026/06/27",
+            "period-end": "00:00:00 2026/06/28",
         }
         # Mechanism is confirmed, so no under-validation warning is attached.
         assert "warning" not in result
@@ -272,8 +272,8 @@ class TestReportCustomWindow:
         assert result["status"] == "success"
         call = fake.run_calls[0]
         assert call["time_period"] == "other"
-        assert call["period_start"] == "00:00 2026/06/27"
-        assert call["period_end"] == "00:00 2026/06/28"
+        assert call["period_start"] == "00:00:00 2026/06/27"
+        assert call["period_end"] == "00:00:00 2026/06/28"
 
     async def test_preset_range_sends_no_window(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake = _ReportRunFakeClient()
@@ -314,8 +314,8 @@ class TestReportRunPayload:
         await client.report_run(
             "root",
             10002,
-            period_start="00:00 2026/06/27",
-            period_end="00:00 2026/06/28",
+            period_start="00:00:00 2026/06/27",
+            period_end="00:00:00 2026/06/28",
         )
 
         params = captured["params"]
@@ -323,8 +323,8 @@ class TestReportRunPayload:
         assert "schedule" not in params
         sp = params["schedule-param"]
         assert sp["time-period"] == "other"
-        assert sp["period-start"] == "00:00 2026/06/27"
-        assert sp["period-end"] == "00:00 2026/06/28"
+        assert sp["period-start"] == "00:00:00 2026/06/27"
+        assert sp["period-end"] == "00:00:00 2026/06/28"
         assert sp["layout-id"] == 10002
         assert params["runfrom"] == "GUI"
 
@@ -338,7 +338,7 @@ class TestReportRunPayload:
 
         params = captured["params"]
         assert params["schedule"] == "10002"
-        assert params["schedule-param"] == {"time-period": "last-7-days"}
+        assert params["schedule-param"] == {"layout-id": 10002, "time-period": "last-7-days"}
         assert "time-period" not in params
 
 

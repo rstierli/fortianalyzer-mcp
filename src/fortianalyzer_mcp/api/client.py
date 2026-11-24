@@ -1620,7 +1620,7 @@ class FortiAnalyzerClient:
                 e.g. "last-7-days" or "last-n-days" (with period_last_n).
                 Replaced by "other" when period_start and period_end are given.
             period_start: Custom window start as a FortiOS ``timedate`` string
-                ("HH:MM yyyy/mm/dd"). Sent with time_period "other".
+                ("hh:mm:ss YYYY/MM/DD"). Sent with time_period "other".
             period_end: Custom window end as a FortiOS ``timedate`` string.
             period_last_n: The count for the generic ``last-n-hours``,
                 ``last-n-days`` and ``last-n-weeks`` periods.
@@ -1642,18 +1642,25 @@ class FortiAnalyzerClient:
         plus ``schedule-param`` ran the requested ``last-7-days``,
         ``last-n-days`` 3, ``last-n-hours`` 6 with one device, and a custom
         window, and the schedule's stored period was unchanged afterwards.
+        The same held on 8.0.2.
         The FortiAnalyzer GUI sets a period differently: it writes it into
         the schedule first, then runs ``{schedule}`` alone.
 
-        A layout without a schedule runs through ``schedule-param`` alone,
-        which then needs layout-id, device and time-period, and no schedule
-        is created (measured on 7.6.7, issue #181).
+        ``layout-id`` is always sent: the reference marks it required in
+        ``schedule-param``. With a schedule it was not needed (the runs above
+        went without it), and it was measured beside ``schedule`` on 7.6.8
+        and 8.0.2. ``device`` is also marked required, but beside a schedule
+        it is sent only when the caller names one: "all" would override the
+        schedule's devices. A layout without a schedule runs through
+        ``schedule-param`` alone, with device "all" when none is named, and
+        no schedule is created (measured on 7.6.7, issue #181).
 
         The time-period is the enum of the reference, not a
         "last-<count>-<unit>" string: "last-1-hours" is rejected there
         ("parse object 'time-period' error"), while "last-n-hours" with
         ``period-last-n`` 1 runs. A custom window is ``"other"`` with the two
-        ``timedate`` bounds (live-verified on 7.6.7 and 8.0.0).
+        bounds, spelled "hh:mm:ss YYYY/MM/DD" as in the reference (measured
+        on 7.6.8 and 8.0.2).
 
         ``device`` inside ``schedule-param`` is a string, not a list. Measured
         on 7.6.7 (#189): ``[{"devname": ...}]`` is rejected there with "parse
@@ -1662,7 +1669,7 @@ class FortiAnalyzerClient:
         measured: a serial, a serial or name with a VDOM suffix, and more
         than one device.
         """
-        schedule_param: dict[str, Any] = {"time-period": time_period}
+        schedule_param: dict[str, Any] = {"layout-id": layout_id, "time-period": time_period}
         if period_start and period_end:
             schedule_param["time-period"] = "other"
             schedule_param["period-start"] = period_start
