@@ -27,15 +27,21 @@ _VALID_TIMESCALES = {"month", "hour"}
 # alert vocabulary in query/fields.py does not carry them. The endpoint's
 # reference lists event_value, trigger_name, count, comment and flags as
 # filter fields. srcip is in no reference and works: measured, it returns the
-# same alerts as epip (#184). user is the field the hunt skill ties an
-# end-user's alerts to, and it is listed so that the server does not warn
-# about a filter it wrote itself. Measured over one 7-day window: on 8.0.2
-# user=="N/A" returned all 610 alerts and user!="N/A" none, where a field
-# alerts do not have returns none for either operator; on 7.6.8 both returned
-# none of 791, as for such a field. The names are compared as written:
-# Severity==... returned no alert on either build where severity==... did.
+# same alerts as epip (#184).
+#
+# user is deliberately not listed, so a filter on it warns. Measured over one
+# 7-day window: on 7.6.7 and 7.6.8 user=="N/A" and user!="N/A" both returned
+# no alert (of 1256 and of 791), which is how a field alerts do not have
+# behaves, so there the warning is the only sign that the filter reads
+# nothing. On 8.0.2 the appliance does read it (user=="N/A" returned all 610
+# alerts and user!="N/A" none), so a caller on 8.0.2 gets the warning for a
+# filter that works. The hunt skill ties an end-user's alerts to euid, which
+# every build measured reads.
+#
+# The names are compared as written: Severity==... returned no alert on
+# either build where severity==... did.
 _ALERT_FILTER_ONLY_FIELDS = frozenset(
-    {"event_value", "trigger_name", "count", "comment", "flags", "srcip", "user"}
+    {"event_value", "trigger_name", "count", "comment", "flags", "srcip"}
 )
 
 

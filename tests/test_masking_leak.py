@@ -1875,6 +1875,26 @@ class TestWave3SkillAssemblyKeys:
         token = masked["rows"][0]["srcip"]
         assert masked["sweep"]["pivot_filter"] == f'srcip=="{token}"'
 
+    def test_a_per_match_pivot_filter_tracks_the_row_token(self, masker: OutputMasker):
+        # hunt reports the clause of each log type's search under
+        # sweep.matches[].pivot_filter (#184). Same key, one level down.
+        masked = masker.mask_result(
+            {
+                "rows": [{"srcip": PEER_IP}],
+                "sweep": {
+                    "pivot_filter": None,
+                    "matches": [
+                        {"logtype": "traffic", "pivot_filter": f'srcip=="{PEER_IP}"'},
+                        {"logtype": "dns", "pivot_filter": f'srcip=="{PEER_IP}"'},
+                    ],
+                },
+            }
+        )
+
+        assert PEER_IP not in str(masked)
+        token = masked["rows"][0]["srcip"]
+        assert [m["pivot_filter"] for m in masked["sweep"]["matches"]] == [f'srcip=="{token}"'] * 2
+
     def test_pivot_tracks_the_enduser_token(self, masker: OutputMasker):
         # investigate_deep: pivot built from the UEBA record's euname.
         masked = masker.mask_result(

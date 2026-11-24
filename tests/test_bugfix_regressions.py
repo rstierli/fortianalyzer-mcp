@@ -211,6 +211,7 @@ class _ReportRunFakeClient:
         device: list[dict[str, str]] | None = None,
         period_start: str | None = None,
         period_end: str | None = None,
+        device_name: str | None = None,
     ) -> dict[str, Any]:
         self.run_calls.append(
             {

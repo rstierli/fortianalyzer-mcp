@@ -325,13 +325,13 @@ async def _get_layout_id_by_title(client, adom, title):
     return None
 ```
 
-**Schedule Management:**
+**Schedule Lookup:**
 ```python
-# FortiAnalyzer requires a schedule before running reports
-async def _ensure_schedule_exists(client, adom, layout_id):
+# Read only. A layout with a schedule runs through it; a layout without
+# one runs through the run request's schedule-param. Nothing is created.
+async def _check_schedule_exists(client, adom, layout_id):
     schedules = await client.get_report_schedules(adom, layout_id)
-    if not schedules.get("data"):
-        await client.create_report_schedule(adom, layout_id)
+    return {"exists": bool(schedules.get("data"))}
 ```
 
 ---
@@ -662,7 +662,7 @@ def get_faz_client():
 
 FortiAnalyzer reports require:
 1. **Layout** (report definition) - read-only blueprints
-2. **Schedule** (must exist before running)
+2. **Schedule** (looked up, never created; a layout without one runs through `schedule-param`)
 3. **Run** (starts generation, returns TID)
 4. **Poll** (check progress via `get_running_reports`)
 5. **Download** (get data as base64 ZIP)

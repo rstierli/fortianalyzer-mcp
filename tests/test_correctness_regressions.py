@@ -154,6 +154,7 @@ class TestRunAndWaitReportVerifiesCompletion:
                 device: list[dict[str, str]] | None = None,
                 period_start: str | None = None,
                 period_end: str | None = None,
+                device_name: str | None = None,
             ) -> dict[str, Any]:
                 return {"tid": "TID-1"}
 
@@ -209,6 +210,7 @@ class TestRunAndWaitReportVerifiesCompletion:
                 device: list[dict[str, str]] | None = None,
                 period_start: str | None = None,
                 period_end: str | None = None,
+                device_name: str | None = None,
             ) -> dict[str, Any]:
                 return {"tid": "TID-1"}
 
