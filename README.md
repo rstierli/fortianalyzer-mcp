@@ -195,6 +195,8 @@ LOG_LEVEL=INFO  # DEBUG for troubleshooting
 # The MCP SDK rejects non-localhost Host headers by default for DNS rebinding protection.
 # Examples: ["mcp.example.com"], ["10.1.5.62:8001"], or wildcard ["10.1.5.62:*"]
 # MCP_ALLOWED_HOSTS=["mcp.example.com"]
+# Allowed Origin headers for a browser-based client (optional, works on its own)
+# MCP_ALLOWED_ORIGINS=["https://app.example.com"]
 
 # Skills layer (beta, optional — see "Skills Layer" below)
 # FAZ_SKILLS_ENABLED=true
@@ -340,6 +342,8 @@ MCP Client → HTTPS → Reverse Proxy (Traefik/nginx) → HTTP → MCP Containe
    MCP_ALLOWED_HOSTS=["10.1.5.62:8001"]
    # Port wildcard (any port on the host):
    MCP_ALLOWED_HOSTS=["10.1.5.62:*"]
+   # Origin of a browser-based client:
+   MCP_ALLOWED_ORIGINS=["https://app.example.com"]
    ```
 
 2. **MCP_AUTH_TOKEN** — Always set a Bearer token for HTTP deployments. If it is unset, the server runs **fail-open**: every tool (log search, device add/delete, PCAP download) is exposed unauthenticated to anyone who can reach the port.
@@ -528,6 +532,16 @@ three; see CHANGELOG.md for the migration table.
 | `get_report_history` | Get report generation history |
 | `run_and_wait_report` | Run report and wait for completion |
 | `save_report` | Download and save report to disk |
+
+> **Running a report:** `run_report` and `run_and_wait_report` run a *layout*
+> (`list_report_layouts`), not a template. Templates are the base a layout is
+> created from, and they can't be run. The `time_range` and `device` you pass
+> apply to that run only: they travel in the run request, so a layout with a
+> schedule keeps its schedule unchanged, and a layout without one runs without
+> creating one. Without `device`, a layout with a schedule runs on the
+> schedule's devices, one without on all devices. `device` is a device name.
+> A month period (`last-N-months`) is refused: use `last-N-days`,
+> `last-N-weeks` or a custom `"start|end"` range.
 
 ### FortiView Analytics Tools (3 tools)
 
@@ -1072,7 +1086,8 @@ LOG_LEVEL=DEBUG fortianalyzer-mcp
 - For production, use a valid (CA-trusted) SSL certificate on the FAZ
 
 **Report Generation Issues**
-- Ensure the report layout exists (use `list_report_layouts`)
+- Ensure the report layout exists (use `list_report_layouts`); a template id can't be run
+- A report covers the schedule's period instead of the one you asked for: upgrade to 2.18.0 or later (#198)
 - Verify the ADOM has the required data for the report
 - Check FortiAnalyzer has sufficient disk space
 
