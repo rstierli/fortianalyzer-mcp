@@ -110,6 +110,8 @@ from fortianalyzer_mcp.masking.fpe_engine import (
     begin_v2_verification_budget,
 )
 from fortianalyzer_mcp.masking.unmask import ArgUnmasker, recording_resolved_values
+from fortianalyzer_mcp.utils.responses import TRUNCATION_MARK
+from fortianalyzer_mcp.utils.validation import like_spelling
 
 logger = logging.getLogger(__name__)
 
@@ -216,11 +218,33 @@ _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _DEVVDS_RE = re.compile(r"^(?P<dev>[^\[\]]+)\[(?P<vdom>[^\[\]]*)\]$")
 
 #: Values shorter than this are not substituted into free text: a two or
-#: three character username would match inside unrelated words.
+#: three character username would match inside unrelated words. A value the
+#: call resolved from the caller's own token is not held to it
+#: (``_TrackedMapping.exact``).
 _MIN_SUBSTITUTION_LEN = 4
 
 
 _PERCENT_RUN_RE = re.compile(r"(?:%[0-9A-Fa-f]{2})+")
+
+#: A character that continues a name to its left. The known-value swap does
+#: not start inside a longer name (see ``_build_substitution_plan``), and
+#: neither does the rule for a value a cut message kept only the head of.
+_NAME_CHAR_RE = re.compile(r"[A-Za-z0-9._-]")
+
+
+def _echo_spellings(value: str) -> set[str]:
+    """The other ways a tool hands back a value the caller's token resolved to.
+
+    Pass 2 looks for a known value as it stands, and an echo is not always
+    that. A substring search is written for ``like``, whose writers put a
+    backslash before each ``_`` and ``%`` of the value (and double one that
+    is there), and the tool echoes the filter it built. And prose is read
+    percent-decoded first, where a URL's ``%20`` is a space. Either way the
+    value was not found and stayed readable beside the token, whole or from
+    the first character the echo spelled differently.
+    """
+    written = {value, like_spelling(value)}
+    return (written | {_unquote_utf8(text) for text in written}) - {value}
 
 
 def _unquote_utf8(text: str) -> str:
@@ -247,11 +271,17 @@ class _TrackedMapping(dict[str, str]):
     which changes what the alternation must resolve to while leaving the
     length identical. ``_mask_filter_entries`` does exactly that, in pass 2
     (see ``_plan_for``).
+
+    ``exact`` holds the raw values that are known exactly, because this call
+    resolved them from the caller's own token: the swap looks for those
+    whatever their length. Set through :meth:`resolved_exactly`, which counts
+    as a write.
     """
 
-    __slots__ = ("version",)
+    __slots__ = ("exact", "version")
 
     version: int
+    exact: frozenset[str]
 
     def __new__(cls, *args: Any, **kwargs: Any) -> "_TrackedMapping":
         # The slot is initialised in __new__, not __init__, because unpickling
@@ -261,10 +291,16 @@ class _TrackedMapping(dict[str, str]):
         # latent crash from becoming a live one.
         self = super().__new__(cls, *args, **kwargs)
         self.version = 0
+        self.exact = frozenset()
         return self
 
     def __init__(self) -> None:
         super().__init__()
+
+    def resolved_exactly(self, raws: set[str]) -> None:
+        """Name the raw values the length floor of the swap does not apply to."""
+        self.exact = frozenset(raw for raw in raws if raw.strip())
+        self.version += 1
 
     # EVERY mutating entry point, not just __setitem__. In CPython
     # ``setdefault``, ``update``, ``pop``, ``popitem``, ``clear``, ``|=`` and
@@ -324,6 +360,29 @@ def _version_of(mapping: dict[str, str]) -> int | None:
     the bug class this whole mechanism exists to close.
     """
     return mapping.version if isinstance(mapping, _TrackedMapping) else None
+
+
+def _swappable(mapping: dict[str, str], keep: frozenset[str]) -> list[str]:
+    """The raw values of ``mapping`` the known-value swap looks for, longest first.
+
+    Not a value the deployment chose to leave readable (#73 item 5): some
+    composite key may still have masked it into ``mapping`` on the way past,
+    and substituting it would print a token for a name shown in clear two
+    keys away, which is the pairing the keep set exists to withhold.
+
+    Not a value under ``_MIN_SUBSTITUTION_LEN`` either, unless this call
+    resolved it from the caller's own token. A short name a row carried may
+    be any three letters of a sentence. One the caller's token resolved to is
+    the value the caller asked about, and left alone it is the plaintext of
+    that token in every echo of the argument. The boundaries of the swap keep
+    it out of a longer word, as they keep a long value out of a longer name.
+    """
+    exact = mapping.exact if isinstance(mapping, _TrackedMapping) else frozenset()
+    return [
+        raw
+        for raw in sorted(mapping, key=len, reverse=True)
+        if (len(raw) >= _MIN_SUBSTITUTION_LEN or raw in exact) and raw not in keep
+    ]
 
 
 @dataclass(frozen=True)
@@ -1360,16 +1419,7 @@ class OutputMasker:
         rebuilt and recompiled an n-branch alternation n times, which is
         what made a large response quadratic in time (#73 item 7c).
         """
-        raws = [
-            raw
-            for raw in sorted(mapping, key=len, reverse=True)
-            # A value the deployment chose to leave readable stays readable in
-            # prose too (#73 item 5). Some composite key may still have masked
-            # it into ``mapping`` on the way past; substituting it here would
-            # print a token for a name shown in clear two keys away, which is
-            # the pairing the keep set exists to withhold.
-            if len(raw) >= _MIN_SUBSTITUTION_LEN and raw not in keep
-        ]
+        raws = _swappable(mapping, keep)
         if not raws:
             return None
         # An inexact (case-only) match may reuse a token only when exactly one
@@ -1422,11 +1472,7 @@ class OutputMasker:
         self, mapping: dict[str, str], keep: frozenset[str]
     ) -> "_SubstitutionPlan | None":
         """Build without touching the cache, for a caller-supplied plain dict."""
-        raws = [
-            raw
-            for raw in sorted(mapping, key=len, reverse=True)
-            if len(raw) >= _MIN_SUBSTITUTION_LEN and raw not in keep
-        ]
+        raws = _swappable(mapping, keep)
         if not raws:
             return None
         folded: dict[str, str] = {}
@@ -1533,7 +1579,37 @@ class OutputMasker:
                 return self.placeholder(found)
             return plan.folded.get(key) or self.placeholder(found)
 
-        return plan.pattern.sub(swap, text)
+        swapped = plan.pattern.sub(swap, text)
+        if swapped.endswith(TRUNCATION_MARK):
+            return self._drop_cut_value(swapped, plan)
+        return swapped
+
+    @staticmethod
+    def _drop_cut_value(text: str, plan: "_SubstitutionPlan") -> str:
+        """Drop what a message cut to its length bound kept of a known value.
+
+        ``error_response`` cuts a message at a fixed length and marks the
+        cut. A message that quotes an argument is as long as the argument,
+        so the cut can fall inside a value this response knows. The swap
+        then no longer finds the value, and its head stayed readable in front
+        of the mark, also for a value the caller's own token had resolved to.
+        So the text in front of the mark is dropped from the point where it
+        starts to spell a known value, under the left boundary the swap uses.
+        A value that fits whole was swapped before this runs.
+
+        Dropped, not swapped for the token: a cut inside the argument as a
+        whole would put back the whole text the caller sent, of any length,
+        and the bound on the message is there for a reason.
+        """
+        body = text[: -len(TRUNCATION_MARK)]
+        longest = max(len(raw) for raw in plan.folded)
+        for start in range(max(0, len(body) - longest), len(body)):
+            if start and _NAME_CHAR_RE.match(body[start - 1]):
+                continue
+            tail = body[start:].casefold()
+            if any(raw.startswith(tail) for raw in plan.folded):
+                return body[:start] + TRUNCATION_MARK
+        return text
 
     # -- the two passes -------------------------------------------------- #
 
@@ -1543,14 +1619,116 @@ class OutputMasker:
         ``resolved`` is what the argument side resolved for this call, real
         value -> the text the caller sent. It seeds the map pass 2 works
         from, so an echo of such a value goes back out as the caller's own
-        token even when no row of the result carries it.
+        token even when no row of the result carries it. It also wins over
+        the device-identity keep set (:meth:`_resolved_leaves_keep_set`).
         """
-        mapping: dict[str, str] = _TrackedMapping()
+        mapping = _TrackedMapping()
         for real, sent in (resolved or {}).items():
             mapping[real] = sent
+            for spelled in _echo_spellings(real):
+                mapping.setdefault(spelled, sent)
+        mapping.resolved_exactly(set(mapping))
         keep = frozenset() if self._mask_device_identity else self._device_identity_values(obj)
+        if resolved and not self._mask_device_identity:
+            obj, keep = self._resolved_leaves_keep_set(obj, keep, resolved)
         staged = self._mask_structured(obj, mapping, keep)
         return self._mask_free_text(staged, mapping, keep)
+
+    def _resolved_leaves_keep_set(
+        self, obj: Any, keep: frozenset[str], resolved: dict[str, str]
+    ) -> tuple[Any, frozenset[str]]:
+        """Take what this call resolved out of the keep set and its keys.
+
+        The keep set leaves a device-identity value readable under every
+        key. A tool that names what it was asked for under such a key (a
+        lookup that finds no such device answers with ``devname``) thereby
+        put the value the caller's token resolved to into that set, and the
+        reply held the plaintext of the token, under ``devname`` and in the
+        message, for a token of any kind. A value this call resolved is the
+        caller's token wherever it goes back out. So it leaves the set, which
+        lets every route that consults the set mask it as it masks anything
+        else, and the device-identity keys themselves, which nothing masks
+        with the flag off, are rewritten to the text the caller sent.
+
+        Compared without case, as :meth:`_is_kept` compares every type but a
+        username: the engine lowercases a hostname before it encrypts, so
+        what a device token resolves to is never the spelling an uppercase
+        device is listed under. The record carries no type, so a username is
+        folded here too, which can only mask more.
+
+        The rewrite reads the same units, under the same keys, as
+        :meth:`_device_identity_values` collects from, and has to keep doing
+        so: a unit that walk learns and this one does not would leave a
+        resolved value readable there. Two differences. ``csf`` needs no
+        rewrite: it is typed whatever the flag says, so pass 1 masks it once
+        the value is out of the set. And the buckets of a breakdown by a
+        device-identity field are rewritten although that walk does not
+        collect them: the flag leaves them readable just the same.
+        """
+        sent_for = {real.lower(): sent for real, sent in resolved.items()}
+
+        def swap(text: str) -> str:
+            return sent_for.get(text.strip().lower(), text)
+
+        def swap_device(part: str) -> str:
+            """``device[vdom]``: the device half, which is the half collected."""
+            match = _DEVVDS_RE.match(part.strip())
+            if match is None or match.group("dev").lower() not in sent_for:
+                return swap(part)
+            return f"{swap(match.group('dev'))}[{match.group('vdom')}]"
+
+        def swap_joined(key: str, text: str) -> str:
+            unit = swap_device if key in COMPOSITE_DEVICE_VDOM else swap
+            return ",".join(unit(part) for part in text.split(","))
+
+        def swap_buckets(dimension: Any, buckets: Any) -> Any:
+            """``breakdowns``: each bucket's ``value`` under an identity dimension."""
+            name = dimension.strip().lower() if isinstance(dimension, str) else ""
+            if name not in DEVICE_IDENTITY_TYPES and name not in COMPOSITE_DEVICE_VDOM:
+                return walk(buckets)
+            if not isinstance(buckets, list):
+                return buckets
+            return [
+                {
+                    bkey: swap_joined(name, bvalue)
+                    if bkey.lower() == "value" and isinstance(bvalue, str)
+                    else bvalue
+                    for bkey, bvalue in bucket.items()
+                }
+                if isinstance(bucket, dict)
+                else bucket
+                for bucket in buckets
+            ]
+
+        def walk(node: Any) -> Any:
+            if isinstance(node, dict):
+                shaped = _device_name_in(node)
+                out: dict[str, Any] = {}
+                for key, value in node.items():
+                    lowered = key.lower()
+                    if key == shaped:
+                        out[key] = swap(value)
+                    elif lowered in DEVICE_IDENTITY_TYPES and isinstance(value, str):
+                        out[key] = swap_joined(lowered, value)
+                    elif lowered in DEVICE_IDENTITY_TYPES and isinstance(value, list | tuple):
+                        out[key] = [
+                            swap(item) if isinstance(item, str) else walk(item) for item in value
+                        ]
+                    elif lowered in COMPOSITE_DEVICE_VDOM and isinstance(value, str):
+                        out[key] = swap_joined(lowered, value)
+                    elif lowered in COMPOSITE_BREAKDOWNS and isinstance(value, dict):
+                        out[key] = {
+                            dimension: swap_buckets(dimension, buckets)
+                            for dimension, buckets in value.items()
+                        }
+                    else:
+                        out[key] = walk(value)
+                return out
+            if isinstance(node, list):
+                return [walk(item) for item in node]
+            return node
+
+        return walk(obj), frozenset(value for value in keep if value.lower() not in sent_for)
 
     def _device_identity_values(self, obj: Any) -> frozenset[str]:
         """Device-identity values present in this response, pre-collected.

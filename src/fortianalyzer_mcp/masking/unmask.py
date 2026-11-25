@@ -23,6 +23,11 @@ Three resolution paths, in order of confidence:
    ``FAZ_MASKING_ACCEPT_V1_TOKENS`` set (see the first ambiguity below).
 3. **Everything else passes through untouched.**
 
+These paths are for an argument that holds a value, and "anywhere" means
+anywhere in one. An argument that names a field or a thing instead
+(``FIELD_NAME_ARGS`` and ``NAMING_ARGS`` in ``fields.py``) is left as the
+caller sent it, token or not.
+
 Failure policy mirrors the output side but inverts the default: if a
 value carries a marker and does not decrypt, that is an error worth
 surfacing (the caller sent a corrupted or foreign token) and the argument
@@ -83,6 +88,7 @@ from fortianalyzer_mcp.masking.fields import (
     IP,
     IP_OR_HOST,
     MAC,
+    NAMING_ARGS,
     SKIP_VALUES,
     TEXT,
 )
@@ -92,7 +98,11 @@ from fortianalyzer_mcp.masking.fpe_engine import (
     VerificationBudgetExhausted,
 )
 from fortianalyzer_mcp.query.fields import canonical_log_field
-from fortianalyzer_mcp.utils.validation import ValidationError, sanitize_filter_value
+from fortianalyzer_mcp.utils.validation import (
+    ValidationError,
+    like_spelling,
+    sanitize_filter_value,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +211,12 @@ def filter_fields(expression: str) -> list[str]:
 #: the values the RESULT carries under a typed key. Without this record a
 #: count, an empty page or a projection that leaves the field out hands the
 #: caller the plaintext of the token it has just sent.
+#:
+#: A value is recorded whole, and so is each token found inside a longer
+#: value (``_resolve_embedded``, and the host and tail of a URL). An echo is
+#: not always the whole argument: a validator takes ``name[part]`` apart and
+#: quotes one half. The output side looks for a recorded value as it stands,
+#: so with the whole value alone that half came back as plaintext.
 _RESOLVED_FOR_CALL: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
     "faz_masking_resolved_for_call", default=None
 )
@@ -223,10 +239,14 @@ def recording_resolved_values() -> Iterator[dict[str, str]]:
 
 
 def _note_resolved(sent: str, resolved: str) -> None:
-    """Remember that ``sent`` was resolved to ``resolved`` for this call."""
+    """Remember that ``sent`` was resolved to ``resolved`` for this call.
+
+    Both without their outer whitespace: a tool strips an argument before it
+    quotes it, and the output side looks for the value as it is recorded.
+    """
     record = _RESOLVED_FOR_CALL.get()
     if record is not None and resolved != sent:
-        record.setdefault(resolved, sent.strip())
+        record.setdefault(resolved.strip(), sent.strip())
 
 
 class ArgUnmasker:
@@ -271,6 +291,10 @@ class ArgUnmasker:
             return value
         return value
 
+    def _resolve_embedded(self, text: str) -> str:
+        """Resolve the tokens inside ``text``, recording each beside the whole."""
+        return self._engine.unmask_embedded(text, _note_resolved)
+
     def resolve_scalar(self, value: str, vtype: str | None = None) -> str:
         """Resolve one argument value. ``vtype`` comes from the field name."""
         resolved = self._resolve_scalar(value, vtype)
@@ -289,7 +313,7 @@ class ArgUnmasker:
             # opens here exactly as it would there. The scan runs on the
             # stripped value because a token resolved as a whole string has
             # always come back stripped.
-            resolved = self._engine.unmask_embedded(candidate)
+            resolved = self._resolve_embedded(candidate)
             return resolved if resolved != candidate else value
         try:
             marked = self._unmask_marked(candidate)
@@ -306,7 +330,7 @@ class ArgUnmasker:
                 # specifically -- a bare scalar or a HOSTNAME-typed field
                 # (devvds) gets none of this and keeps failing closed below,
                 # since there the whole value is supposed to BE the token.
-                return self._engine.unmask_embedded(value)
+                return self._resolve_embedded(value)
             # Marker present but payload will not decrypt: leave it alone so
             # the downstream validator rejects it instead of us guessing.
             logger.warning("argument carries a masking marker but does not decrypt; passed through")
@@ -338,7 +362,7 @@ class ArgUnmasker:
         # same in-place treatment inbound. Reuses the whole-string token's
         # own shape/tag verification (``FPEEngine.unmask_embedded``); a
         # value with nothing embedded comes back unchanged.
-        return self._engine.unmask_embedded(value)
+        return self._resolve_embedded(value)
 
     # -- masked URLs (#40 url/referralurl) ---------------------------------- #
 
@@ -421,6 +445,10 @@ class ArgUnmasker:
                 return value
         if resolved_host == host and resolved_tail == tail:
             return value
+        # Each part beside the whole URL, which the callers record: a reply
+        # can name the host or the path alone.
+        _note_resolved(host, resolved_host)
+        _note_resolved(tail, resolved_tail)
         if ":" in resolved_host:  # IPv6 literal: re-bracket
             resolved_host = f"[{resolved_host}]"
         netloc = f"{resolved_host}:{port}" if port is not None else resolved_host
@@ -506,14 +534,15 @@ class ArgUnmasker:
             # doubled backslash as one literal backslash; ``==`` reads every
             # character as written.
             is_like = match.group("op").strip().lower() == "like"
-            escaped = resolved.replace("\\", "\\\\") if is_like else resolved
-            if is_like and _WHOLE_TOKEN_RE.fullmatch(core):
+            escaped = resolved
+            if is_like:
                 # The whole value was one token, so every ``%`` and ``_`` in the
                 # plaintext is the plaintext's own: write them as the characters
                 # (``\%`` and ``\_``, measured). Around an embedded token the
                 # caller's own wildcards sit in the same text and cannot be told
                 # apart, so there they stay as written.
-                escaped = escaped.replace("%", "\\%").replace("_", "\\_")
+                whole = _WHOLE_TOKEN_RE.fullmatch(core) is not None
+                escaped = like_spelling(resolved, escape_wildcards=whole)
             if is_like and not quote:
                 # An unquoted pattern is quoted on the way out, as a bare
                 # comparison value is below, and keeps the ``like`` writing.
@@ -623,8 +652,19 @@ class ArgUnmasker:
     # -- recursive argument walk ------------------------------------------- #
 
     def unmask_args(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Resolve tokens across a tool's keyword arguments, at any depth."""
-        return {key: self._unmask_entry(key, value) for key, value in args.items()}
+        """Resolve tokens across a tool's keyword arguments, at any depth.
+
+        An argument that names a thing (``NAMING_ARGS``) is returned as sent,
+        whatever it holds. Every nested mapping comes back through here, so
+        that holds for the dispatcher's ``params`` as well. It is decided here
+        and not in ``_unmask_entry`` because that method also types a
+        structured filter condition's value by its FIELD name, and a log field
+        can share a name with one of these arguments.
+        """
+        return {
+            key: value if key.lower() in NAMING_ARGS else self._unmask_entry(key, value)
+            for key, value in args.items()
+        }
 
     def _unmask_entry(self, key: str, value: Any) -> Any:
         lowered = key.lower()

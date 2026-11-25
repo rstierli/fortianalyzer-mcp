@@ -88,6 +88,7 @@ import ipaddress
 import logging
 import os
 import re
+from collections.abc import Callable
 
 from ff3 import FF3Cipher
 
@@ -989,7 +990,7 @@ class FPEEngine:
             return self.unmask_serial(candidate)
         return None
 
-    def unmask_embedded(self, text: str) -> str:
+    def unmask_embedded(self, text: str, opened: Callable[[str, str], None] | None = None) -> str:
         """Resolve every v2-shaped token embedded anywhere inside ``text``.
 
         ``unmask_token`` requires the WHOLE string to be a token, which is
@@ -1014,15 +1015,23 @@ class FPEEngine:
         here most shape matches over free text are not tokens at all, and
         refusing the whole string over one coincidental match would make
         ordinary prose unusable.
+
+        ``opened`` is called with each token that opened and the value it
+        opened to. The result alone says what the text became, not which
+        part of it came from which token, and a caller that has to recognise
+        one part of the result later needs the pairs.
         """
 
         def _open(match: re.Match[str]) -> str:
             try:
-                return self.v2_open(match.group(0))
+                real = self.v2_open(match.group(0))
             except VerificationBudgetExhausted:
                 raise
             except MaskingError:
                 return match.group(0)
+            if opened is not None:
+                opened(match.group(0), real)
+            return real
 
         return _V2_EMBEDDED_RE.sub(_open, text)
 

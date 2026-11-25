@@ -23,6 +23,8 @@ from typing import Any
 
 import pytest
 
+from fortianalyzer_mcp.masking import wrapper as masking_wrapper
+from fortianalyzer_mcp.masking.fields import COMPOSITE_DEVICE_VDOM, DEVICE_IDENTITY_TYPES
 from fortianalyzer_mcp.masking.fpe_engine import FPEEngine
 from fortianalyzer_mcp.masking.unmask import ArgUnmasker
 from fortianalyzer_mcp.masking.wrapper import OutputMasker
@@ -1174,6 +1176,462 @@ class TestDocumentedGaps:
         masked = masker.mask_result({"socialid": {"data": [{"srcip": ENDPOINT_IP}]}})
         assert masked["socialid"]["data"][0]["srcip"] != ENDPOINT_IP
 
+    def test_a_short_value_a_row_carries_is_not_masked_in_prose(self, masker: OutputMasker):
+        """Pass 2 does not look for a value under four characters that a row
+        carried: nothing says the same three letters in a sentence are that
+        value. One the caller's own token resolved to is known exactly and is
+        looked for (``TestAShortValueTheCallersTokenResolvedTo``)."""
+        masked = masker.mask_result({"user": "bob", "message": "nothing is named 'bob'"})
+
+        assert masked["message"] == "nothing is named 'bob'"
+
+
+#: Where a tool hands back what it was called with, and how it reads there.
+#: ``{}`` is the value; no other run of the same letters stands on its own.
+ECHOES = {
+    "filter": 'user=="{}" and action==deny',
+    "filter_applied": "user=={}",
+    "name_filter": "{}",
+    "message": "no log has the user '{}'",
+    "pivot_filter": 'user=="{}"',
+    "headline": "hunt for {}: 0 matches",
+    "warnings": ["user {} matched nothing"],
+}
+
+
+@pytest.mark.parametrize("fixture", ["masker", "full_masker"], ids=["flag-off", "flag-on"])
+class TestAShortValueTheCallersTokenResolvedTo:
+    """A value under four characters is not looked for in free text: a short
+    name a row carried would match inside unrelated words. A value the call
+    resolved from the caller's own token is known exactly, so it is looked
+    for whatever its length. Without that, a token for ``sa`` or ``ftp`` came
+    back as its plaintext in every echo of the argument."""
+
+    @pytest.mark.parametrize("real", ["sa", "ftp", "x"])
+    @pytest.mark.parametrize("key", ECHOES)
+    def test_an_echo_holds_the_token_and_not_the_value(
+        self, request: pytest.FixtureRequest, engine: FPEEngine, fixture: str, key: str, real: str
+    ):
+        masker: OutputMasker = request.getfixturevalue(fixture)
+        token = engine.mint("username", real)
+        echo = ECHOES[key]
+
+        def written(value: str) -> Any:
+            return [echo[0].format(value)] if isinstance(echo, list) else echo.format(value)
+
+        out = masker.mask_result({key: written(real)}, {real: token})
+
+        assert out == {key: written(token)}
+
+    def test_the_value_inside_a_longer_word_is_left_alone(
+        self, request: pytest.FixtureRequest, engine: FPEEngine, fixture: str
+    ):
+        """The boundaries that keep a long value out of a longer name keep a
+        short one out of a word."""
+        masker: OutputMasker = request.getfixturevalue(fixture)
+        token = engine.mint("username", "sa")
+        reply = {"message": "the usage of 'sa' passes; sa-backup and mesa are other names"}
+
+        out = masker.mask_result(reply, {"sa": token})
+
+        assert out == {
+            "message": f"the usage of '{token}' passes; sa-backup and mesa are other names"
+        }
+
+    def test_naming_the_resolved_values_is_a_change_the_cached_plan_sees(
+        self, request: pytest.FixtureRequest, engine: FPEEngine, fixture: str
+    ):
+        """The plan for the swap is cached on the map's write count. Naming
+        the values the floor does not apply to changes what the plan holds,
+        so it has to count as a write."""
+        from fortianalyzer_mcp.masking.wrapper import _TrackedMapping
+
+        masker: OutputMasker = request.getfixturevalue(fixture)
+        mapping = _TrackedMapping()
+        mapping["sa"] = engine.mint("username", "sa")
+        mapping["jsmith"] = engine.mint("username", "jsmith")
+
+        assert masker._substitute_known("jsmith asked for sa", mapping) == (
+            f"{mapping['jsmith']} asked for sa"
+        )
+        mapping.resolved_exactly({"sa", "", " "})
+
+        assert mapping.exact == {"sa"}
+        assert masker._substitute_known("jsmith asked for sa", mapping) == (
+            f"{mapping['jsmith']} asked for {mapping['sa']}"
+        )
+
+    def test_a_short_value_a_row_carries_beside_it_is_still_left_alone(
+        self, request: pytest.FixtureRequest, engine: FPEEngine, fixture: str
+    ):
+        masker: OutputMasker = request.getfixturevalue(fixture)
+        token = engine.mint("username", "sa")
+        reply = {"user": "bob", "message": "bob asked for sa"}
+
+        out = masker.mask_result(reply, {"sa": token})
+
+        assert out["message"] == f"bob asked for {token}"
+
+
+class TestAResolvedValueEchoedInAnotherSpelling:
+    """A tool does not always hand a value back as the token resolved to it.
+
+    A substring search is written for ``like``, with a backslash before each
+    ``_`` and ``%`` of the value, and the tool echoes the filter it built.
+    Prose is read percent-decoded first, where a URL's ``%20`` is a space.
+    Either way the value the caller's token had resolved to was not found as
+    it was recorded, and it stayed readable where the token belonged.
+    """
+
+    @pytest.mark.parametrize("key", ["filter", "message"])
+    def test_a_value_written_for_like_is_the_callers_token(
+        self, masker: OutputMasker, engine: FPEEngine, key: str
+    ):
+        real = "svc_bak_probe"
+        token = engine.mint("username", real)
+        reply = {key: 'user like "%svc\\_bak\\_probe%"'}
+
+        out = masker.mask_result(reply, {real: token})
+
+        assert out == {key: f'user like "%{token}%"'}
+
+    def test_a_url_read_percent_decoded_is_the_callers_token(self, masker: OutputMasker):
+        real = "https://www.example.net/a_b/c%20d?x=1"
+        token = masker.mask_result({"url": real})["url"]
+        reply = {"message": f"no stored enrichment for URL '{real}'"}
+
+        out = masker.mask_result(reply, {real: token})
+
+        assert out == {"message": f"no stored enrichment for URL '{token}'"}
+
+    def test_a_url_written_for_like_and_read_percent_decoded_is_the_callers_token(
+        self, masker: OutputMasker
+    ):
+        """With the host recorded beside the whole URL, as the argument side
+        records it: the host alone is found in the decoded text, so the
+        whole URL has to be found there too, or its path stays behind."""
+        real = "https://www.example.net/a_b/c%20d?x=1"
+        token = masker.mask_result({"url": real})["url"]
+        host = masker.mask_result({"hostname": "www.example.net"})["hostname"]
+        reply = {"message": 'searched url like "%https://www.example.net/a\\_b/c\\%20d?x=1%"'}
+
+        out = masker.mask_result(reply, {"www.example.net": host, real: token})
+
+        assert out == {"message": f'searched url like "%{token}%"'}
+
+    def test_a_value_no_token_resolved_to_is_not_looked_for_respelled(
+        self, masker: OutputMasker, engine: FPEEngine
+    ):
+        """Only what the call resolved is looked for this way. A name a row
+        carries is masked where it stands, and a text that merely resembles
+        it with backslashes is not it."""
+        token = engine.mint("username", "svc_bak_probe")
+        reply = {"user": "svc_bak_probe", "message": "pattern svc\\_bak\\_probe not found"}
+
+        out = masker.mask_result(reply)
+
+        assert out == {"user": token, "message": "pattern svc\\_bak\\_probe not found"}
+
+
+class TestAResolvedValueIsNotKeptReadable:
+    """What the caller's token resolved to never leaves as a kept device name.
+
+    With ``FAZ_MASK_DEVICE_IDENTITY`` off, device identity stays readable:
+    every value under a device-identity key joins the keep set and is spared
+    under every other key and in prose. A reply that named what the caller
+    asked for under such a key therefore handed back the plaintext of the
+    token the caller had sent, whatever kind of token it was. The record of
+    what the call resolved (the second argument, real value -> the text that
+    was sent) now wins: such a value goes back out as the caller's own text,
+    under the device-identity key as well.
+    """
+
+    @pytest.mark.parametrize(
+        ("vtype", "real"),
+        [
+            ("hostname", "fw-core.example.net"),
+            ("hostname", "fgt-branch-01"),
+            ("username", "jdoe-probe"),
+            ("domain", "portal.example.com"),
+            ("ip", "192.0.2.77"),
+            ("ip", "2001:db8::77"),
+        ],
+    )
+    def test_it_is_the_callers_token_under_devname_and_in_the_message(
+        self, masker: OutputMasker, engine: FPEEngine, vtype: str, real: str
+    ):
+        token = engine.mint(vtype, real)
+        reply = {
+            "status": "error",
+            "devname": real,
+            "message": f"Device '{real}' has no logs in ADOM 'root'.",
+        }
+
+        out = masker.mask_result(reply, {real: token})
+
+        assert survivors(out, [real]) == {}
+        assert out["devname"] == token
+        assert out["message"] == f"Device '{token}' has no logs in ADOM 'root'."
+
+    @pytest.mark.parametrize(
+        ("reply", "expected"),
+        [
+            ({"devname": "{real}"}, {"devname": "{token}"}),
+            ({"devname": "{real},fgt-branch-02"}, {"devname": "{token},fgt-branch-02"}),
+            ({"devs": ["{real}", "fgt-branch-02"]}, {"devs": ["{token}", "fgt-branch-02"]}),
+            ({"devvds": "{real}[root]"}, {"devvds": "{token}[root]"}),
+            (
+                {"devvds": "fgt-branch-02[root],{real}[dmz]"},
+                {"devvds": "fgt-branch-02[root],{token}[dmz]"},
+            ),
+            (
+                {"name": "{real}", "sn": "FGT60F0000000001"},
+                {"name": "{token}", "sn": "FGT60F0000000001"},
+            ),
+            (
+                {"candidates": [{"devid": "FGT60F0000000001", "devname": "{real}"}]},
+                {"candidates": [{"devid": "FGT60F0000000001", "devname": "{token}"}]},
+            ),
+            ({"devid": {"devname": "{real}"}}, {"devid": {"devname": "{token}"}}),
+            ({"csf": "{real}"}, {"csf": "{token}"}),
+            (
+                {"breakdowns": {"devname": [{"value": "{real}", "hits": 3}]}},
+                {"breakdowns": {"devname": [{"value": "{token}", "hits": 3}]}},
+            ),
+            (
+                {"breakdowns": {"devvds": [{"value": "{real}[root]", "hits": 3}]}},
+                {"breakdowns": {"devvds": [{"value": "{token}[root]", "hits": 3}]}},
+            ),
+        ],
+        ids=[
+            "whole",
+            "comma-joined",
+            "list",
+            "device[vdom]",
+            "device[vdom] joined",
+            "device record name",
+            "nested",
+            "under another identity key",
+            "csf",
+            "breakdown bucket",
+            "breakdown bucket device[vdom]",
+        ],
+    )
+    def test_every_form_a_device_identity_value_takes_is_covered(
+        self, masker: OutputMasker, engine: FPEEngine, reply: Any, expected: Any
+    ):
+        """One case per unit ``_device_identity_values`` reads a kept value
+        from, and the buckets of a breakdown by a device-identity field,
+        which the flag leaves readable without the keep set. A unit left out
+        here would hold the resolved value in clear."""
+        real = "fgt-branch-01"
+        token = engine.mint("hostname", real)
+
+        def fill(node: Any) -> Any:
+            if isinstance(node, dict):
+                return {key: fill(value) for key, value in node.items()}
+            if isinstance(node, list):
+                return [fill(item) for item in node]
+            return node.format(real=real, token=token) if isinstance(node, str) else node
+
+        assert masker.mask_result(fill(reply), {real: token}) == fill(expected)
+
+    #: Every key the keep set reads a value from, taken from the tables the
+    #: walk itself goes by, so a key added there is a case here.
+    KEEP_SET_KEYS = sorted(
+        set(DEVICE_IDENTITY_TYPES)
+        | set(COMPOSITE_DEVICE_VDOM)
+        | masking_wrapper._KEEP_SET_KEYS_OUTSIDE_DEVICE_IDENTITY
+    )
+    #: The forms a value takes under such a key.
+    KEEP_SET_FORMS: dict[str, Any] = {
+        "whole": lambda v: v,
+        "padded": lambda v: f"  {v} ",
+        "upper case": lambda v: v.upper(),
+        "comma-joined": lambda v: f"fgt-branch-02, {v}",
+        "list": lambda v: ["fgt-branch-02", f" {v} "],
+        "tuple": lambda v: ("fgt-branch-02", v),
+        "record below": lambda v: {"devname": v},
+        "records in a list": lambda v: [{"devname": v}],
+        "device[vdom]": lambda v: f"{v}[root]",
+        "device[vdom] joined": lambda v: f"fgt-branch-02[root],{v}[dmz]",
+    }
+
+    @pytest.mark.parametrize("form", KEEP_SET_FORMS.values(), ids=KEEP_SET_FORMS.keys())
+    @pytest.mark.parametrize("key", KEEP_SET_KEYS)
+    def test_whatever_the_keep_set_learns_is_rewritten_once_it_was_resolved(
+        self, masker: OutputMasker, engine: FPEEngine, key: str, form: Any
+    ):
+        """The keep set and the rewrite of a resolved value are two walks over
+        the same units. Here the first is the oracle for the second: each
+        value the keep set learns from a reply is then sent as the value the
+        call resolved, and must not be readable in what goes out. A unit the
+        keep set learned and the rewrite did not would fail this. Where the
+        keep set reads nothing (``csf`` and ``devvds`` as a list), there is
+        nothing to compare."""
+        sent = engine.mint("hostname", "stand-in")
+        for reply in (
+            {key: form("fgt-branch-01")},
+            {"logs": [{key.upper(): form("fgt-branch-01")}]},
+        ):
+            for value in masker._device_identity_values(reply):
+                if "fgt-branch-01" not in value.lower():
+                    continue
+                out = masker.mask_result(reply, {value: sent})
+
+                assert survivors(out, [value]) == {}, (reply, value, out)
+
+    @pytest.mark.parametrize("key", KEEP_SET_KEYS)
+    def test_the_keep_set_does_learn_from_each_of_those_keys(self, masker: OutputMasker, key: str):
+        """The control for the test above, which passes where nothing is learned."""
+        assert masker._device_identity_values({key: "fgt-branch-01"}) == {"fgt-branch-01"}
+
+    def test_it_is_not_spared_where_the_keep_set_is_consulted(
+        self, masker: OutputMasker, engine: FPEEngine
+    ):
+        """A kept value is spared under typed keys, in ``target`` and in
+        prose. A resolved one is masked in each of them."""
+        real = "fgt-branch-01"
+        token = engine.mint("hostname", real)
+        reply = {
+            "devname": real,
+            "srcname": real,
+            "target": [{"name": "device", "value": real}],
+            "msg": f"logs received from {real}",
+        }
+
+        out = masker.mask_result(reply, {real: token})
+
+        assert survivors(out, [real]) == {}
+        assert out["srcname"] == token
+        assert out["msg"] == f"logs received from {token}"
+
+    def test_a_device_listed_in_another_letter_case_is_the_same_device(
+        self, masker: OutputMasker, engine: FPEEngine
+    ):
+        """The engine lowercases a hostname before it encrypts, so what a
+        device token resolves to is never the spelling an uppercase device is
+        listed under."""
+        token = engine.mint("hostname", "FGT-BRANCH-01")
+        reply = {
+            "device": "fgt-branch-01",
+            "logs": [{"devname": "FGT-BRANCH-01", "msg": "link up on FGT-BRANCH-01"}],
+        }
+
+        out = masker.mask_result(reply, {"fgt-branch-01": token})
+
+        assert survivors(out, ["FGT-BRANCH-01", "fgt-branch-01"]) == {}
+        assert out["device"] == token
+        assert out["logs"][0]["devname"] == token
+
+    def test_a_device_name_no_token_resolved_to_stays_readable(
+        self, masker: OutputMasker, engine: FPEEngine
+    ):
+        """The control: device identity is left readable by default, in a
+        call that resolved nothing and in one that resolved something else."""
+        reply = {
+            "status": "error",
+            "devname": DEV_NAME,
+            "srcname": DEV_NAME,
+            "devvds": f"{DEV_NAME}[{VDOM}]",
+            "breakdowns": {"devname": [{"value": DEV_NAME, "hits": 3}]},
+            "message": f"Device '{DEV_NAME}' has no logs in ADOM 'root'.",
+        }
+        other = engine.mint("hostname", SRC_NAME)
+
+        assert masker.mask_result(reply) == reply
+        assert masker.mask_result(reply, {}) == reply
+        assert masker.mask_result(reply, {SRC_NAME: other}) == reply
+
+    def test_with_device_identity_masked_nothing_changes(
+        self, full_masker: OutputMasker, engine: FPEEngine
+    ):
+        token = engine.mint("hostname", DEV_NAME)
+        reply = {"devname": DEV_NAME, "message": f"Device '{DEV_NAME}' has no logs."}
+
+        assert full_masker.mask_result(reply, {DEV_NAME: token}) == {
+            "devname": token,
+            "message": f"Device '{token}' has no logs.",
+        }
+
+
+class TestAKnownValueCutShortByTheMessageBound:
+    """An error message is cut at a fixed length and the cut is marked.
+
+    A message that quotes an argument is as long as the argument, so the cut
+    can fall inside a value the reply knows. Pass 2 then no longer found the
+    value, and its head came back in front of the mark. The end of such a
+    message is now dropped from where it starts to spell a known value.
+    """
+
+    REAL = "fw-core.example.net"
+    CUT = "... (truncated)"
+
+    def test_no_head_of_a_resolved_value_is_left_in_front_of_the_mark(
+        self, masker: OutputMasker, engine: FPEEngine
+    ):
+        token = engine.mint("hostname", self.REAL)
+
+        for kept in range(1, len(self.REAL)):
+            reply = {
+                "status": "error",
+                "message": f"Invalid device 'lab {self.REAL[:kept]}{self.CUT}",
+            }
+
+            out = masker.mask_result(reply, {self.REAL: token})
+
+            assert out["message"] == f"Invalid device 'lab {self.CUT}", kept
+
+    def test_a_value_that_fits_whole_is_the_callers_token(
+        self, masker: OutputMasker, engine: FPEEngine
+    ):
+        token = engine.mint("hostname", self.REAL)
+        reply = {"message": f"Invalid device 'lab {self.REAL}{self.CUT}"}
+
+        out = masker.mask_result(reply, {self.REAL: token})
+
+        assert out["message"] == f"Invalid device 'lab {token}{self.CUT}"
+
+    def test_the_cut_inside_a_longer_recorded_value_takes_the_whole_of_it(
+        self, masker: OutputMasker, engine: FPEEngine
+    ):
+        """The argument as a whole is recorded too; what is left of it is
+        the caller's own text and a head of the value."""
+        token = engine.mint("hostname", self.REAL)
+        resolved = {f"lab {self.REAL}": f"lab {token}", self.REAL: token}
+        reply = {"message": f"Invalid device 'lab {self.REAL[:7]}{self.CUT}"}
+
+        out = masker.mask_result(reply, resolved)
+
+        assert out["message"] == f"Invalid device '{self.CUT}"
+
+    def test_a_value_a_row_of_the_same_reply_carries_is_treated_the_same(
+        self, masker: OutputMasker
+    ):
+        reply = {"logs": [{"srcname": self.REAL}], "message": f"skipped {self.REAL[:9]}{self.CUT}"}
+
+        out = masker.mask_result(reply)
+
+        assert out["message"] == f"skipped {self.CUT}"
+
+    def test_a_head_that_only_ends_a_longer_name_is_left(
+        self, masker: OutputMasker, engine: FPEEngine
+    ):
+        """The left boundary of the swap: ``lab-fw-core`` is another name."""
+        token = engine.mint("hostname", self.REAL)
+        reply = {"message": f"Invalid device 'lab-{self.REAL[:7]}{self.CUT}"}
+
+        assert masker.mask_result(reply, {self.REAL: token}) == reply
+
+    def test_a_cut_message_that_ends_in_nothing_known_is_left(
+        self, masker: OutputMasker, engine: FPEEngine
+    ):
+        token = engine.mint("hostname", self.REAL)
+        reply = {"message": f"Invalid ADOM name 'pppppppp{self.CUT}"}
+
+        assert masker.mask_result(reply, {self.REAL: token}) == reply
+        assert masker.mask_result(reply) == reply
+
 
 class TestHandlerDescription:
     def test_embedded_ip_and_email_are_masked_in_the_description(self, masker: OutputMasker):
@@ -2170,6 +2628,36 @@ class TestProjectionEchoIsNotAnOracle:
         assert (
             masker.mask_result({"count": 0, "fields_returned": names})["fields_returned"] == names
         )
+
+
+class TestNameFilterEchoIsNotAnOracle:
+    """``name_filter`` holds a value in one tool (a device name), so a token
+    there is resolved, and tools echo the argument under its own name. The
+    echo is typed TEXT, as ``fields_returned`` is: pass 2 puts the caller's
+    own text back (the second argument, real value -> the text sent)."""
+
+    def test_the_echo_carries_the_callers_token(self, masker: OutputMasker, engine: FPEEngine):
+        token = engine.mint("hostname", SRC_NAME)
+        reply = {"status": "success", "name_filter": SRC_NAME, "field_count": 0}
+
+        out = masker.mask_result(reply, {SRC_NAME: token})
+
+        assert out == {"status": "success", "name_filter": token, "field_count": 0}
+
+    def test_a_token_inside_a_longer_filter_is_put_back_in_place(
+        self, masker: OutputMasker, engine: FPEEngine
+    ):
+        token = engine.mint("hostname", SRC_NAME)
+        reply = {"name_filter": f"lab {SRC_NAME}"}
+
+        out = masker.mask_result(reply, {f"lab {SRC_NAME}": f"lab {token}", SRC_NAME: token})
+
+        assert out == {"name_filter": f"lab {token}"}
+
+    def test_an_ordinary_filter_is_echoed_as_typed(self, masker: OutputMasker):
+        reply = {"name_filter": "src", "fields": [{"name": "srcip"}]}
+
+        assert masker.mask_result(reply)["name_filter"] == "src"
 
 
 class TestAggregationArgEchoIsNotAnOracle:

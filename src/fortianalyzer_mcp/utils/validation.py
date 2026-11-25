@@ -313,10 +313,14 @@ def validate_device_name(device: str) -> str:
     if "[" in device:
         base_name = device.split("[")[0]
         vdom_part = device.split("[")[1].rstrip("]")
+        # Both refusals quote the argument whole, not the half that failed.
+        # With masking on, the output side puts the caller's token back where
+        # it finds the value the token resolved to, and it finds a value as
+        # it was sent: one half of the argument is not always that.
         if not DEVICE_NAME_PATTERN.match(base_name):
-            raise ValidationError(f"Invalid device name '{base_name}'")
+            raise ValidationError(f"Invalid device name in '{device}'")
         if not ADOM_PATTERN.match(vdom_part):
-            raise ValidationError(f"Invalid VDOM name '{vdom_part}'")
+            raise ValidationError(f"Invalid VDOM name in '{device}'")
         return device
 
     if not DEVICE_NAME_PATTERN.match(device):
@@ -820,6 +824,24 @@ def sanitize_filter_value(value: str, field: str = "filter value", *, strip: boo
     return f"{quote}{value}{quote}"
 
 
+def like_spelling(value: str, *, escape_wildcards: bool = True) -> str:
+    """``value`` spelled so that ``like`` reads its characters as themselves.
+
+    A backslash is doubled and ``%`` and ``_`` are escaped (measured on 7.6.8
+    and 8.0.2). Without ``escape_wildcards`` only the backslash is, for a text
+    whose ``%`` and ``_`` are meant as the wildcards they are.
+
+    One function for every writer of a ``like`` operand, because output
+    masking has to recognise what they wrote: a value a masking token resolved
+    to is looked for in these spellings too (``masking.wrapper``), so that
+    the echo of a filter built around it goes back out as the token.
+    """
+    spelled = value.replace("\\", "\\\\")
+    if escape_wildcards:
+        spelled = spelled.replace("%", "\\%").replace("_", "\\_")
+    return spelled
+
+
 def like_filter_pattern(value: str, field: str = "filter value") -> str:
     """Write a free-text value as a quoted ``%...%`` pattern for ``like``.
 
@@ -841,7 +863,7 @@ def like_filter_pattern(value: str, field: str = "filter value") -> str:
             holds both quote characters.
     """
     value = _checked_filter_value(value, field, strip=False)
-    escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    escaped = like_spelling(value)
     quote = _quote_for(escaped, field)
     return f"{quote}%{escaped}%{quote}"
 

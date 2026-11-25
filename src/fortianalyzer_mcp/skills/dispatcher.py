@@ -53,6 +53,32 @@ def _redact_warnings(node: Any) -> Any:
     return node
 
 
+def _refusal(exc: ValidationError) -> str:
+    """What pydantic refused and where, without what it was given.
+
+    ``str(exc)`` quotes every offending input, cut to a head and a tail. With
+    masking on, the params are resolved before the skill's model types them,
+    so that quote was the plaintext of the caller's token: whole, or in
+    pieces, which the output side cannot put back because it looks for a
+    resolved value whole. On the output side the quote was the row a handler
+    failed to model. The location, pydantic's message and the error type say
+    what to fix, and none of them repeats the input.
+
+    A location is joined with ``/``. One of its parts can be a key of the
+    data, and the output side does not swap a value that follows a dot.
+    """
+    details = []
+    for err in exc.errors(include_url=False, include_context=False, include_input=False):
+        where = "/".join(str(part) for part in err["loc"])
+        what = f"{err['msg']} [{err['type']}]"
+        # An error about the model as a whole has no location.
+        details.append(f"{where}: {what}" if where else what)
+    count = exc.error_count()
+    return (
+        f"{count} validation error{'' if count == 1 else 's'} for {exc.title}: {'; '.join(details)}"
+    )
+
+
 @mcp.tool(annotations=READ_ONLY)
 async def faz_skill(skill: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
     """Run a FortiAnalyzer skill: an opinionated multi-tool orchestration
@@ -92,7 +118,7 @@ async def faz_skill(skill: str, params: dict[str, Any] | None = None) -> dict[st
     except ValidationError as exc:
         return error_response(
             error="invalid_skill_params",
-            message=redact(str(exc)),
+            message=_refusal(exc),
             operation="faz_skill",
             skill=skill,
         )
@@ -120,10 +146,10 @@ async def faz_skill(skill: str, params: dict[str, Any] | None = None) -> dict[st
     except ValidationError as exc:
         # The handler produced data that violates the documented output
         # contract — surface it as an error, never as a malformed result.
-        logger.error("skill %s output failed schema validation: %s", skill, exc)
+        logger.error("skill %s output failed schema validation: %s", skill, _refusal(exc))
         return error_response(
             error="skill_output_invalid",
-            message=redact(str(exc)),
+            message=_refusal(exc),
             operation="faz_skill",
             skill=skill,
         )

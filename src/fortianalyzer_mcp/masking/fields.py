@@ -355,6 +355,15 @@ FIELD_TYPES: dict[str, str] = {
     # the same pass-2 substitution and IOC scan every other caller-facing
     # string gets, for any other route by which a value reaches this key.
     "fields_returned": TEXT,
+    # The echo of the ``name_filter`` argument. It narrows a list of field
+    # names in ``get_log_fields`` and of handler names in
+    # ``get_alert_handlers``, but in ``search_devices`` it is a substring of a
+    # DEVICE name, which is a value masking produces, so a token there has to
+    # resolve: left as sent, a device search for a masked name found nothing
+    # and said success. The argument is therefore not in NAMING_ARGS, and the
+    # close is here, on the key the tools echo it under: TEXT, so pass 2 puts
+    # the caller's own text back in place of what the call resolved.
+    "name_filter": TEXT,
     "device": HOSTNAME,
     # --- caller-facing prose: the skills layer and every tool error build
     # these strings themselves, and they name the record they are about
@@ -463,6 +472,109 @@ FIELD_TYPES: dict[str, str] = {
 #: a real one. Recorded so the docstring neither overclaims safety nor
 #: overclaims exposure.
 FIELD_NAME_ARGS = ("fields", "group_by", "sample_by", "sort_by", "view_name")
+
+#: Tool-argument keys whose value names a *thing* -- an ADOM, a log type, a
+#: report or incident id, a file, a time range, a mode -- and which the
+#: argument unmasker therefore leaves alone, as it leaves ``FIELD_NAME_ARGS``.
+#:
+#: The same reasoning over a wider class. Masking mints a token for a value
+#: read out of a log or a record: an address, a host, a user, a domain, an
+#: email, a URL. Nothing it mints is an ADOM name, a log type or a report id,
+#: so a caller has no legitimate reason to put a token in one of these and
+#: there is nothing for unmasking to be right about. There is something to get
+#: wrong: tools echo these arguments under keys the output side does not scan
+#: (``adom`` in every success dict and in ``utils.responses.error_response``,
+#: ``logtype``, ``tid``, ``incident_id``, ``filename``, ``vdom``, the
+#: discovery tool's ``operation``, skill results such as ``sweep.ttp`` and
+#: ``time_range``, and ``impact_logtypes`` entries used as dict KEYS).
+#: Resolved first, each echo returned the plaintext of whatever
+#: token the caller sent, of any kind, and on a validation-error route without
+#: one appliance call. Left as sent, the token reaches the tool as the
+#: caller's own text and never becomes plaintext in the first place.
+#:
+#: What belongs here: an argument of a read-only tool, or a field of a skill's
+#: params model at any depth, whose value says WHAT the call is about or HOW
+#: it runs. What does not: anything that can hold a value masking produces --
+#: ``device``, the typed address and user arguments, ``filter`` and
+#: ``filters``, a skill's ``entity``, ``username``, ``hostname`` and indicator
+#: ``value``, URLs and free text. Those resolve, and masking their echoes is
+#: the output side's job. Mutating tools never restore an argument, so theirs
+#: are not listed.
+#:
+#: A key is one spelling for every tool that uses it, so a name that holds
+#: a value in ANY tool is not listed, and its echo is closed on the output
+#: side instead:
+#:   name         an ADOM in ``get_adom`` but a device in ``get_device``,
+#:                where a device token is legitimate.
+#:   name_filter  a field-name substring in ``get_log_fields``, a handler-name
+#:                substring in ``get_alert_handlers`` and a device-name
+#:                substring in ``search_devices``, where a device token is
+#:                legitimate. The reply key ``name_filter`` is typed TEXT in
+#:                ``FIELD_TYPES``.
+#:
+#: Matched as an ARGUMENT name only (``ArgUnmasker.unmask_args``), never as
+#: the field of a structured filter condition: ``action``, ``severity`` and
+#: ``filename`` are log fields too, and a token in a condition on one of them
+#: is a filter value like any other.
+#:
+#: This is a deny-list, so it fails open for the next new argument.
+#: ``tests/test_masking_argument_echo.py`` is the other half: it calls every
+#: read-only tool and every skill with a token in each parameter a string can
+#: arrive in and fails when a reply holds the plaintext. The list itself is
+#: pinned name by name in ``tests/test_masking_unmask.py``, because that
+#: sweep cannot reach every echo and so does not catch every removal.
+NAMING_ARGS = (
+    # which ADOM, virtual domain or log type the call reads
+    "adom",
+    "vdom",
+    "logtype",
+    "devtype",
+    "sweep_logtypes",
+    "impact_logtypes",
+    # a window of time
+    "time_range",
+    "context_time_range",
+    "vpn_time_range",
+    "timescale",
+    # an id the appliance or this server issued
+    "tid",
+    "incident_id",
+    "alert_id",
+    "alert_ids",
+    "enrichment_uuid",
+    # a file, a directory, a report layout or title, an output format
+    "filename",
+    "filename_prefix",
+    "output_dir",
+    "output_format",
+    "layout",
+    "title",
+    # which skill or operation
+    "skill",
+    "operation",
+    # a selector with a fixed vocabulary
+    "action",
+    "severity",
+    "connection_status",
+    "filter_state",
+    "handler_type",
+    "detail_level",
+    "detectby",
+    "indicator_type",
+    "key_type",
+    "type",
+    "sort_order",
+    "stats_item",
+    "stats_items",
+    # a pattern over a name the product defines: an IPS signature, a CVE, a
+    # technique, a platform, a firmware version
+    "attack_contains",
+    "attack_exact",
+    "cve",
+    "ttp",
+    "platform_filter",
+    "os_version_filter",
+)
 
 #: Composite keys whose value is a single string holding one or more
 #: identifiers inside a larger structure. Name matching cannot reach them,
