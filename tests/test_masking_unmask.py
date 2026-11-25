@@ -1022,7 +1022,10 @@ class TestResolveNeverRaises:
         expression = f'url=="{stale}"'
 
         assert unmasker.resolve_url(stale) == stale
-        assert unmasker.unmask_filter(expression) == expression
+        # The resolver leaves it as written. A filter is not sent with it:
+        # the token text would match nothing.
+        with pytest.raises(ValidationError, match="did not resolve"):
+            unmasker.unmask_filter(expression)
 
     def test_marked_token_engine_failure_passes_through(
         self, unmasker: ArgUnmasker, engine: FPEEngine, monkeypatch: pytest.MonkeyPatch
@@ -2085,3 +2088,87 @@ class TestTypedAddressAndTheV1Window:
             net=engine.mint("ip", "198.51.100.0"),
             mac=engine.mint("mac", "00:00:5e:00:53:07"),
         )
+
+
+OTHER_KEY = "00112233445566778899AABBCCDDEEFF"
+
+
+class TestTokenThatDoesNotOpenInAFilter:
+    """A token that is a clause's whole value and does not open refuses the filter.
+
+    Anywhere else such a token is left as written so that a validator rejects
+    it. A filter has none: FortiAnalyzer compares the field against the token
+    text, nothing matches, and under a negated operator that is every row.
+    """
+
+    @pytest.fixture
+    def foreign(self) -> str:
+        """A username token minted under another key."""
+        return FPEEngine(OTHER_KEY).mint("username", "jsmith")
+
+    @pytest.mark.parametrize(
+        "template",
+        ['user!="{t}"', "user!='{t}'", "user!={t}", 'user=="{t}"', 'user like "%{t}%"'],
+    )
+    def test_a_token_from_another_key_refuses_the_filter(
+        self, unmasker: ArgUnmasker, foreign: str, template: str
+    ) -> None:
+        with pytest.raises(ValidationError, match="did not resolve"):
+            unmasker.unmask_filter(template.format(t=foreign))
+
+    def test_a_token_with_an_altered_tag_refuses_the_filter(
+        self, unmasker: ArgUnmasker, engine: FPEEngine
+    ) -> None:
+        own = engine.mint("username", "jsmith")
+        altered = own[:-1] + ("0" if own[-1] != "0" else "1")
+        with pytest.raises(ValidationError, match="did not resolve"):
+            unmasker.unmask_filter(f'user!="{altered}" and action=="deny"')
+
+    def test_a_domain_token_from_another_key_refuses_the_filter(
+        self, unmasker: ArgUnmasker
+    ) -> None:
+        foreign_domain = FPEEngine(OTHER_KEY).mask_domain("example.com")
+        with pytest.raises(ValidationError, match="did not resolve"):
+            unmasker.unmask_filter(f'hostname!="{foreign_domain}"')
+
+    def test_the_refusal_does_not_repeat_the_token(
+        self, unmasker: ArgUnmasker, foreign: str
+    ) -> None:
+        with pytest.raises(ValidationError) as refused:
+            unmasker.unmask_filter(f'user!="{foreign}"')
+        assert foreign not in str(refused.value)
+
+    def test_a_structured_condition_is_refused_the_same_way(
+        self, unmasker: ArgUnmasker, foreign: str
+    ) -> None:
+        with pytest.raises(ValidationError, match="did not resolve"):
+            unmasker.unmask_filter_conditions({"field": "user", "op": "ne", "value": foreign})
+
+    def test_one_such_token_in_a_structured_list_is_enough(
+        self, unmasker: ArgUnmasker, engine: FPEEngine, foreign: str
+    ) -> None:
+        own = engine.mint("username", "jdoe")
+        with pytest.raises(ValidationError, match="did not resolve"):
+            unmasker.unmask_filter_conditions(
+                {"field": "user", "op": "not_in", "value": [own, foreign]}
+            )
+
+    def test_the_engines_own_token_still_resolves(
+        self, unmasker: ArgUnmasker, engine: FPEEngine
+    ) -> None:
+        own = engine.mint("username", "jsmith")
+        assert unmasker.unmask_filter(f'user!="{own}"') == 'user!="jsmith"'
+        resolved = unmasker.unmask_filter_conditions({"field": "user", "op": "ne", "value": own})
+        assert resolved["value"] == "jsmith"
+
+    def test_a_plain_value_is_left_alone(self, unmasker: ArgUnmasker) -> None:
+        expression = 'user!="admin" and app=="HTTPS"'
+        assert unmasker.unmask_filter(expression) == expression
+
+    def test_such_a_token_inside_free_text_is_left_as_written(
+        self, unmasker: ArgUnmasker, foreign: str
+    ) -> None:
+        """Most token-shaped runs inside prose are not tokens, so only a
+        clause value that is one whole token is refused."""
+        expression = f'msg like "%see {foreign} for details%"'
+        assert unmasker.unmask_filter(expression) == expression

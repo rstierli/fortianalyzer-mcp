@@ -74,6 +74,7 @@ Known ambiguities, documented rather than papered over:
 import contextvars
 import logging
 import re
+import unicodedata
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -155,6 +156,21 @@ _WHOLE_TOKEN_RE = re.compile(
     r"^(?:ip4|ip6|mac|sn|url|host|user)-[0-9a-f]{4}-[A-Za-z0-9._~-]+(?:-[0-9a-f]{8})?$",
     re.IGNORECASE,
 )
+
+
+def _without_format_chars(text: str) -> str:
+    """``text`` without the characters a copy picks up and nobody sees.
+
+    Unicode format characters: a zero-width space or joiner, a byte-order
+    mark, a soft hyphen.
+    """
+    return "".join(char for char in text if unicodedata.category(char) != "Cf")
+
+
+def _without_port(host: str) -> str:
+    """The host of ``host:port``, or ``host`` as it is."""
+    name, _, port = host.rpartition(":")
+    return name if name and port.isascii() and port.isdigit() else host
 
 
 def _literal_spans(expression: str) -> list[tuple[int, int]]:
@@ -482,6 +498,84 @@ class ArgUnmasker:
 
     # -- filter expressions ------------------------------------------------ #
 
+    def _is_token_shaped(self, text: str) -> bool:
+        """Whether ``text`` is one masking token by its shape alone.
+
+        A marker, four hex digits and a payload, with the tag or without it: a
+        token that lost its tag, or lost or gained a character, has no tag
+        left to be known by. Or the domain and email form, which ends in the
+        mask suffix; a dot after it is the DNS root.
+        """
+        candidate = text.strip().rstrip(".")
+        return bool(
+            self._engine.is_v2_shaped(candidate)
+            or _WHOLE_TOKEN_RE.fullmatch(candidate)
+            or candidate.lower().endswith("." + self._engine.mask_suffix)
+        )
+
+    @staticmethod
+    def _token_positions(field: str, value: str, *, like: bool) -> Iterator[str]:
+        """The parts of a clause value where the resolver expects one whole token.
+
+        The value itself, and the parts the resolver takes it apart into: the
+        host of a URL and what follows its first slash, the host of
+        ``host:port``, each value behind a group-by prefix. Also the address
+        of ``address/prefix``, which the output side writes for a network and
+        the resolver does not take apart yet. Read without
+        format characters, and under ``like`` without the wildcards around
+        it: ``_`` continues a name, so a token beside one is not found as a
+        token.
+        """
+        text = _without_format_chars(value).strip()
+        if like:
+            text = text.strip("%_")
+        yield text
+        lowered = field.lower()
+        if lowered in COMPOSITE_URL_FULL:
+            # With a scheme, without one, or the path alone.
+            rest = text.partition("//")[2] if "//" in text else text
+            authority, _, tail = rest.partition("/")
+            yield _without_port(authority.rpartition("@")[2])
+            yield tail
+        elif lowered in COMPOSITE_PREFIXED:
+            yield from text.partition(":")[2].split(",")
+        else:
+            yield _without_port(text)
+            # A network is echoed as the token of its address with the prefix
+            # length after it, and that form is not opened yet (#195).
+            address, _, length = text.rpartition("/")
+            if address and length.isascii() and length.isdigit():
+                yield address
+
+    def _refuse_unopened_token(self, field: str, value: str, *, like: bool = False) -> None:
+        """Refuse a filter whose value is a masking token that did not open.
+
+        ``value`` is a clause value that resolution left unchanged, or one
+        that holds a format character: there the scan for a token inside a
+        longer text opens the token and keeps the character beside it, and
+        the value that goes out is one no row has. A token
+        minted under another key, or one that was altered, is left as written
+        everywhere else so that a validator downstream rejects it. A filter
+        has no such validator: FortiAnalyzer compares the field against the
+        token text, nothing matches, and under a negated operator that
+        returns every row.
+
+        Refused by shape, wherever the resolver expects one whole token
+        (:meth:`_token_positions`). Token-shaped text inside prose is mostly
+        not a token and stays as written. The shape has no tag to go by, so a
+        real value written as a marker, four hex digits and a rest
+        (``host-dc01-core``) is refused as well, and the message says so.
+        """
+        if any(
+            self._is_token_shaped(part) for part in self._token_positions(field, value, like=like)
+        ):
+            raise ValidationError(
+                "a filter value has the shape of a masking token and did not resolve: it "
+                "was minted under another key, it was altered (a character lost or added), "
+                "or it is a real value of that shape, which a filter cannot carry while "
+                "masking is on; the filter was not sent"
+            )
+
     def unmask_filter(self, expression: str) -> str:
         """Resolve tokens inside a FAZ filter expression.
 
@@ -493,7 +587,8 @@ class ArgUnmasker:
         Raises:
             ValidationError: If a resolved value cannot be written as one
                 filter literal (it ends in a backslash, holds both quote
-                characters, or holds a control character). A token left in
+                characters, or holds a control character), or if a clause
+                value is a token that does not open. A token left in
                 place would match nothing, which under a negated operator
                 returns every row, so the filter is refused instead.
         """
@@ -515,6 +610,10 @@ class ArgUnmasker:
             else:
                 vtype = FIELD_TYPES.get(field.lower())
                 resolved = self.resolve_scalar(core, vtype)
+            if resolved == core or _without_format_chars(core) != core:
+                self._refuse_unopened_token(
+                    field, core, like=match.group("op").strip().lower() == "like"
+                )
             if resolved == core:
                 return match.group(0)
             # A URL or a prefixed value is resolved in parts; the clause value
@@ -643,7 +742,15 @@ class ArgUnmasker:
 
         field = data.get("field")
         if isinstance(field, str):
-            data["value"] = self._unmask_entry(canonical_log_field(field), data.get("value"))
+            before = data.get("value")
+            data["value"] = self._unmask_entry(canonical_log_field(field), before)
+            # A condition compiles to a filter clause, so a token that did not
+            # open is refused here as it is in ``unmask_filter``.
+            was = before if isinstance(before, list) else [before]
+            now = data["value"] if isinstance(data["value"], list) else [data["value"]]
+            for old, new in zip(was, now, strict=False):
+                if isinstance(old, str) and (new == old or _without_format_chars(old) != old):
+                    self._refuse_unopened_token(canonical_log_field(field), old)
 
         if is_model:
             return type(condition).model_validate(data)

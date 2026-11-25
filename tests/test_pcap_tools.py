@@ -191,6 +191,50 @@ class TestAttackExactLiteral:
         assert pcap_tools._build_ips_filter(attack_exact="or") == 'attack="or"'
 
 
+class TestIpsFilterAddresses:
+    """``srcip`` and ``dstip`` are written between quotes the builder adds itself."""
+
+    @pytest.mark.parametrize("param", ["srcip", "dstip"])
+    @pytest.mark.parametrize(
+        "address",
+        [
+            "fe80::1%eth0",
+            "fe80::1%1",
+            'fe80::1%a"b',
+            "fe80::1%a b",
+            "fe80::1%eth0/64",
+            'fe80::1%a"b/64',
+        ],
+    )
+    def test_an_address_with_a_zone_id_is_refused(self, param: str, address: str) -> None:
+        """``ipaddress`` takes anything after ``%`` as the zone id of an IPv6
+        address, a quote and a space included, so the parse alone does not
+        keep the value inside the quotes."""
+        with pytest.raises(ValidationError, match=param):
+            pcap_tools._build_ips_filter(**{param: address})
+
+    @pytest.mark.parametrize(
+        "address",
+        [
+            "192.0.2.10",
+            "192.0.2.0/24",
+            "2001:db8::1",
+            "2001:DB8::A",
+            "2001:db8::/32",
+            "::ffff:192.0.2.10",
+        ],
+    )
+    def test_an_address_or_network_is_written_as_given(self, address: str) -> None:
+        assert pcap_tools._build_ips_filter(srcip=address) == f'srcip="{address}"'
+
+    def test_the_refusal_names_both_cases_of_a_hex_digit(self) -> None:
+        with pytest.raises(ValidationError, match="a-f or A-F"):
+            pcap_tools._build_ips_filter(srcip="fe80::1%eth0")
+
+    def test_surrounding_whitespace_is_dropped(self) -> None:
+        assert pcap_tools._build_ips_filter(dstip=" 192.0.2.10 ") == 'dstip="192.0.2.10"'
+
+
 class TestPCAPClient:
     """Tests for PCAP client methods."""
 

@@ -2555,6 +2555,8 @@ def install_masking(mcp: Any) -> tuple[OutputMasker, ArgUnmasker]:
     or invalid: a deployment that asked for masking must not run without it.
     """
     from fortianalyzer_mcp.utils.config import get_settings
+    from fortianalyzer_mcp.utils.errors import ValidationError
+    from fortianalyzer_mcp.utils.responses import error_response
 
     settings = get_settings()
     # The engine and the placeholder key both read FAZ_MASKING_KEY from the
@@ -2639,6 +2641,19 @@ def install_masking(mcp: Any) -> tuple[OutputMasker, ArgUnmasker]:
             ),
         }
 
+    def refuse_arguments(tool_name: str, refusal: ValidationError, resolved: dict[str, str]) -> Any:
+        # Raised out of the tool, the SDK hands the client the tool's name and
+        # nothing else, and a caller whose token is from before a key rotation
+        # cannot tell why the call failed. The messages the argument side
+        # raises carry no value. The answer is masked like any result all the
+        # same, with what had resolved before the refusal.
+        answer = error_response(
+            error="validation_error",
+            message=f"Validation error: {refusal}",
+            operation=tool_name,
+        )
+        return masker.mask_tool_result(answer, tool_name, resolved)
+
     def patched_tool(*args: Any, **kwargs: Any) -> Any:
         decorator = original_tool(*args, **kwargs)
         # #106: only tools that annotate themselves read-only get argument
@@ -2689,7 +2704,10 @@ def install_masking(mcp: Any) -> tuple[OutputMasker, ArgUnmasker]:
                                 return refuse_restore(fn.__name__, offending)
                             return masker.mask_tool_result(await fn(*fa, **fk), fn.__name__)
                         with recording_resolved_values() as resolved:
-                            real_args = unmasker.unmask_args(fk)
+                            try:
+                                real_args = unmasker.unmask_args(fk)
+                            except ValidationError as refusal:
+                                return refuse_arguments(fn.__name__, refusal, resolved)
                         return masker.mask_tool_result(
                             await fn(*fa, **real_args), fn.__name__, resolved
                         )
@@ -2711,7 +2729,10 @@ def install_masking(mcp: Any) -> tuple[OutputMasker, ArgUnmasker]:
                             return refuse_restore(fn.__name__, offending)
                         return masker.mask_tool_result(fn(*fa, **fk), fn.__name__)
                     with recording_resolved_values() as resolved:
-                        real_args = unmasker.unmask_args(fk)
+                        try:
+                            real_args = unmasker.unmask_args(fk)
+                        except ValidationError as refusal:
+                            return refuse_arguments(fn.__name__, refusal, resolved)
                     return masker.mask_tool_result(fn(*fa, **real_args), fn.__name__, resolved)
                 finally:
                     _AT_BOUNDARY.reset(token)

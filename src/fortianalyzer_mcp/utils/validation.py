@@ -255,6 +255,11 @@ _SAFE_UNQUOTED_FILTER_RE = re.compile(r"^[a-zA-Z0-9._:\-]+$")
 # Words FortiAnalyzer reads as operators where a value is expected.
 _FILTER_OPERATOR_WORDS = frozenset({"and", "or", "not"})
 
+# The characters an IPv4 or IPv6 address or CIDR network is written with.
+# ``ipaddress`` also takes an IPv6 zone id after ``%`` and does not look at
+# what it holds, so a value that parses can still carry a quote or a space.
+_IP_LITERAL_RE = re.compile(r"[0-9A-Fa-f:./]+")
+
 # CVE identifier pattern (e.g. CVE-2025-2945)
 _CVE_RE = re.compile(r"^CVE-\d{4}-\d{4,}$", re.IGNORECASE)
 
@@ -497,7 +502,8 @@ def validate_ip_or_cidr(value: str, field: str = "IP address") -> str:
         Validated IP/CIDR string (stripped).
 
     Raises:
-        ValidationError: If the value is not a valid IP address or network.
+        ValidationError: If the value is not a valid IP address or network,
+            or carries an IPv6 zone id (``fe80::1%eth0``).
     """
     if not value:
         raise ValidationError(f"{field} cannot be empty")
@@ -514,6 +520,14 @@ def validate_ip_or_cidr(value: str, field: str = "IP address") -> str:
         raise ValidationError(
             f"Invalid {field} '{value}'. Must be a valid IPv4/IPv6 address or CIDR network."
         ) from exc
+
+    # A zone id passes the parse whatever it holds, and callers write the
+    # result between quotes of their own. A log has no zone to match either.
+    if not _IP_LITERAL_RE.fullmatch(value):
+        raise ValidationError(
+            f"Invalid {field}: an address is written with digits, a-f or A-F, ':', '.' and '/'; "
+            "an IPv6 zone id ('%...') is not accepted."
+        )
 
     return value
 
