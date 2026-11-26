@@ -8,8 +8,10 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 from fortianalyzer_mcp.api.client import FortiAnalyzerClient
+from tests.appliance_wire import Wire
 
 # =============================================================================
 # Isolated skills-dispatcher import
@@ -407,6 +409,19 @@ def mock_client(mock_fmg_instance: MagicMock) -> FortiAnalyzerClient:
     client._fmg = mock_fmg_instance
     client._connected = True
     return client
+
+
+@pytest.fixture
+def wire(monkeypatch: pytest.MonkeyPatch) -> Wire:
+    """Every HTTP request of the test is answered by the returned ``Wire``,
+    under the real pyFMG (see tests/appliance_wire.py)."""
+    answering = Wire()
+    monkeypatch.setattr(
+        requests.adapters.HTTPAdapter,
+        "send",
+        lambda adapter, request, **kwargs: answering.send(request),
+    )
+    return answering
 
 
 @pytest.fixture
