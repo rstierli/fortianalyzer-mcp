@@ -14,6 +14,7 @@ from typing import Any, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pyFMG.fortimgr import FortiManager
+from requests import Response
 
 from fortianalyzer_mcp.utils.config import Settings
 from fortianalyzer_mcp.utils.errors import (
@@ -127,6 +128,13 @@ class FortiAnalyzerClient:
     # session returns on a per-request basis (not a clean no-session error), so a
     # long-lived client must re-login on it instead of retrying the dead session.
     _RECONNECTABLE_ERROR_CODES = frozenset({-2, -11, -20, -21})
+    # pyFMG's own code for a reply whose body is not JSON: it hands back the
+    # HTTP response in place of FortiAnalyzer's result. FortiAnalyzer's codes
+    # are zero or negative. Such a reply is not FortiAnalyzer's JSON-RPC
+    # answer: a proxy's 502 or 503 page, or one from FortiAnalyzer's own web
+    # server. The raw request path gives its refusal of a status of 400 and
+    # up the same code, for the same reason.
+    _NOT_JSON_CODE = 100
     # The answers to a login that refuse the administrator, each an
     # authentication error. Measured on FortiManager 8.0.2, which answers the
     # same JSON-RPC login (fortimanager-mcp#141), not on FortiAnalyzer: -22
@@ -681,7 +689,7 @@ class FortiAnalyzerClient:
 
     def _note_reachability(self, exc: Exception) -> None:
         """Record what a failed request says about reaching FortiAnalyzer."""
-        if self._is_unreachable_error(exc):
+        if self._is_unreachable_error(exc) or getattr(exc, "code", None) == self._NOT_JSON_CODE:
             self._unreachable = True
         elif isinstance(exc, FortiAnalyzerError) and not isinstance(exc, ConnectionError):
             # FortiAnalyzer answered with an error code. Our ConnectionError
@@ -816,6 +824,11 @@ class FortiAnalyzerClient:
 
         if isinstance(response, dict):
             error_msg = response.get("status", {}).get("message", str(response))
+        elif isinstance(response, Response):
+            error_msg = (
+                "The reply was not FortiAnalyzer's JSON-RPC answer "
+                f"(HTTP {response.status_code}, its body is not JSON)"
+            )
         else:
             error_msg = str(response)
 
@@ -892,7 +905,8 @@ class FortiAnalyzerClient:
         if response.status_code >= 400:
             raise APIError(
                 f"HTTP {response.status_code} from FortiAnalyzer for {method.upper()} {url}; "
-                "the reply was not read"
+                "the reply was not read",
+                code=self._NOT_JSON_CODE,
             )
 
         try:
