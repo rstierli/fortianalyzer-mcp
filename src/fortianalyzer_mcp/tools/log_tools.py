@@ -1646,7 +1646,10 @@ async def cancel_log_search(
     appliance-side cancel is best-effort; clearing the handle always succeeds.
 
     Args:
-        adom: ADOM name (default: reuse the ADOM recorded for this handle)
+        adom: ADOM name (default: reuse the ADOM recorded for this handle). A
+            known handle is bound to its ADOM: passing a different one returns
+            error="adom_mismatch" and leaves the handle in place, as
+            fetch_more_logs does.
         tid: Pagination handle from a previous query_logs call
 
     Returns:
@@ -1664,10 +1667,23 @@ async def cancel_log_search(
                 error="invalid_tid", message="Invalid TID", operation="cancel_log_search"
             )
 
-        # Use the ADOM query_logs ran under when the caller omits it.
+        # Use the ADOM query_logs ran under when the caller omits it. A known
+        # handle is bound to that ADOM, as in fetch_more_logs: a cancel under
+        # another one would go there and still release the handle.
         context = _get_search_context(tid)
         if adom is None:
             adom = context["adom"] if context else get_default_adom()
+        elif context is not None and adom != context["adom"]:
+            return error_response(
+                error="adom_mismatch",
+                message=(
+                    f"This handle is bound to ADOM {context['adom']!r}; it cannot be cancelled "
+                    f"under ADOM {adom!r}. Pass that ADOM, or leave adom out."
+                ),
+                operation="cancel_log_search",
+                adom=adom,
+                tid=tid,
+            )
         adom = validate_adom(adom)
 
         client = _get_client()
@@ -1938,11 +1954,8 @@ def _validate_logfile_name(filename: str) -> str:
 
 
 def _validate_logfile_device(device: str) -> str:
-    """A serial, uppercased as the appliance stores it, or a device name."""
+    """A serial or a device name, as written: ``_device_serial`` decides which."""
     device = (device or "").strip()
-    upper = device.upper()
-    if DEVICE_SERIAL_PATTERN.match(upper) or DEVICE_VM_SERIAL_PATTERN.match(upper):
-        return upper
     if not DEVICE_NAME_PATTERN.match(device):
         raise ValidationError(
             f"Invalid device '{device}'. Pass a serial or a device name (1-64 "
@@ -1959,13 +1972,17 @@ async def _device_serial(
     The logfiles endpoints only take a serial. An HA cluster has one per member,
     so a name can be ambiguous; only the caller knows which member it wants.
 
+    The name is looked up first, also when it has the shape of a serial: a
+    device can be named like one (``fwbranch0001``). A value that names no
+    device and has that shape is the serial, uppercased as the appliance
+    stores it (live 7.6.7 answers a lowercase devid with "not in the user
+    scope").
+
     The errors carry the device under ``devname`` and the serials under
     ``candidates[].devid``, not only in ``message``. Masking types those keys,
     and what it masks there it also replaces in the message; a value only the
     message carried would leave in clear under FAZ_MASK_DEVICE_IDENTITY.
     """
-    if DEVICE_SERIAL_PATTERN.match(device) or DEVICE_VM_SERIAL_PATTERN.match(device):
-        return device
     stats = await client.get_logstats(adom=adom)
     data = stats.get("data") if isinstance(stats, dict) else None
     devices = data.get("devs") if isinstance(data, dict) else None
@@ -1990,6 +2007,9 @@ async def _device_serial(
             devname=device,
             candidates=[{"devid": serial, "devname": device} for serial in serials],
         )
+    upper = device.upper()
+    if DEVICE_SERIAL_PATTERN.match(upper) or DEVICE_VM_SERIAL_PATTERN.match(upper):
+        return upper
     return error_response(
         error="device_not_found",
         message=f"Device '{device}' has no logs in ADOM '{adom}'.",
