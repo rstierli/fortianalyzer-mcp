@@ -600,8 +600,14 @@ class OutputMasker:
     # -- fail-closed primitives ---------------------------------------- #
 
     def placeholder(self, value: str) -> str:
-        """Irreversible, deterministic stand-in for an unmaskable value."""
-        digest = hmac.new(self._placeholder_key, value.encode(), hashlib.sha256).hexdigest()[:10]
+        """Irreversible, deterministic stand-in for an unmaskable value.
+
+        ``surrogatepass``: a lone surrogate (what ``json.loads`` makes of
+        ``"\\ud800"``) has no UTF-8 form, and a placeholder that raised for it
+        took the whole result down with it.
+        """
+        material = value.encode("utf-8", "surrogatepass")
+        digest = hmac.new(self._placeholder_key, material, hashlib.sha256).hexdigest()[:10]
         return f"{_PLACEHOLDER_MARK}{digest}"
 
     def _mask_ip_or_host(self, value: str) -> str:
