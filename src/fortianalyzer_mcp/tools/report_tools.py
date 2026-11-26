@@ -777,7 +777,8 @@ async def run_and_wait_report(
     Returns:
         dict with report result including TID for downloading data.
         ``warnings`` is present when no layout has the given title and one
-        whose title contains it ran; it names that title.
+        whose title contains it ran; it names that title. An error after the
+        report was started carries its ``tid``.
 
     Example:
         >>> result = await run_and_wait_report(
@@ -789,6 +790,7 @@ async def run_and_wait_report(
         ...     print(f"Report completed! TID: {result['tid']}")
         ...     # Use get_report_data(tid=result['tid']) to download
     """
+    tid: Any = None
     try:
         adom = validate_adom(adom or get_default_adom())
         client = _get_client()
@@ -947,6 +949,18 @@ async def run_and_wait_report(
 
     except Exception as e:
         logger.error(f"Failed to run and wait for report '{layout}': {e}")
+        if tid:
+            # The report was started before the error; without its tid a
+            # retry starts a second one (#187).
+            return {
+                "status": "error",
+                "tid": tid,
+                "message": (
+                    f"{redact(str(e))}. The report was started as tid '{tid}' before this "
+                    "error: look it up with get_running_reports() or "
+                    f"fetch_report(tid='{tid}') before starting another."
+                ),
+            }
         return {"status": "error", "message": redact(str(e))}
 
 

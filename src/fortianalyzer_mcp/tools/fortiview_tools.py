@@ -339,11 +339,19 @@ async def _get_fortiview_data_impl(
                 "message": f"FortiView query timed out after {timeout}s",
             }
 
-        fetch_result = await client.fortiview_fetch(
-            adom=adom,
-            view_name=view_name,
-            tid=tid,
-        )
+        try:
+            fetch_result = await client.fortiview_fetch(
+                adom=adom,
+                view_name=view_name,
+                tid=tid,
+            )
+        except Exception as exc:
+            # Still not caught here (see above). The tid rides on the
+            # exception so get_fortiview_data can hand back the query it
+            # started instead of leaving a retry to start a second one
+            # (#187); query_logs does not read it.
+            exc.fortiview_tid = tid  # type: ignore[attr-defined]
+            raise
 
         # Only return once the query is complete; returning on first
         # non-empty data hands back partial aggregates (wrong top-N).
@@ -435,7 +443,8 @@ async def get_fortiview_data(
             warning. Pass the columns you want, or ["*"] to silence the warning.
 
     Returns:
-        dict with FortiView analytics data
+        dict with FortiView analytics data. An error after the query was
+        started carries its ``tid`` and ``view_name``.
 
     Example:
         >>> result = await get_fortiview_data(
@@ -480,4 +489,16 @@ async def get_fortiview_data(
         )
     except Exception as e:
         logger.error(f"Failed to get FortiView data: {e}")
+        tid = getattr(e, "fortiview_tid", None)
+        if tid is not None:
+            return {
+                "status": "error",
+                "tid": tid,
+                "view_name": view_name,
+                "message": (
+                    f"{redact(str(e))}. The query was started as tid {tid} before this "
+                    f"error: look it up with fetch_fortiview(tid={tid}, "
+                    f"view_name='{view_name}') before starting another."
+                ),
+            }
         return {"status": "error", "message": redact(str(e))}
