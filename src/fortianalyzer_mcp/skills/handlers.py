@@ -3514,9 +3514,14 @@ def _parse_entity_subject(entity: str) -> tuple[list[int], list[int], str | None
         if rest.isdigit():
             return [], [int(rest)], None, None
         return [], [], None, "entity 'euid:' expects a numeric id"
-    # Bare IP: a dotted/coloned token with no letters other than hex.
-    if any(sep in text for sep in (".", ":")) and " " not in text:
-        return [], [], text, None
+    # Bare IP: what the IPS address filters accept. A name with a dot in it
+    # used to be typed as an IP here and searched as srcip==<name> (#187).
+    from fortianalyzer_mcp.utils.validation import ValidationError, validate_ip_or_cidr
+
+    try:
+        return [], [], validate_ip_or_cidr(text, "entity"), None
+    except ValidationError:
+        pass
     return (
         [],
         [],
