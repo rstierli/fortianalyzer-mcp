@@ -511,6 +511,38 @@ class TestQueryLogsAggregationModes:
         assert "is_exact" in result
         assert "total_hits_is_known" in result
 
+    async def test_sample_by_full_page_total_is_a_floor(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A scan whose page filled ended the search early (#148), so its
+        total-count is a lower bound, not the window's count (#202)."""
+        self._install(monkeypatch, total=250_000)
+
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, sample_by=["app"], limit=3
+        )
+
+        assert result["total_hits"] == 250_000
+        assert result["total_hits_is_known"] is False
+        assert result["total_hits_is_lower_bound"] is True
+        assert result["total_hit_source"] == "logsearch_total_count"
+        assert result["is_exact"] is False
+        assert "count_only" in result["recommendation"]
+
+    async def test_sample_by_page_that_did_not_fill_keeps_a_known_total(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._install(monkeypatch, total=3)
+
+        result = await log_tools.query_logs(
+            logtype="traffic", time_range=self.CUSTOM_RANGE, sample_by=["app"], limit=100
+        )
+
+        assert result["total_hits"] == 3
+        assert result["total_hits_is_known"] is True
+        assert result["total_hits_is_lower_bound"] is False
+        assert result["is_exact"] is True
+
     async def test_sample_by_accepts_several_dimensions(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

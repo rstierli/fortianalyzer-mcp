@@ -314,7 +314,12 @@ async def _query_policy_logs_bounded(
     The whole-window ``total_hits`` is the sum of the per-slice ``total-count``s
     that the breakdown searches already return (issue #30). Slices are contiguous
     and non-overlapping, so the sum is a valid whole-window count and is at least
-    the rows fetched. ``all_slices_exact`` is True only when every slice reported a
+    the rows fetched. A slice whose page filled ended its search early, so its
+    total-count is a floor (#148); the sum is then a floor too and is reported
+    with ``total_hits_is_lower_bound`` instead of as known (#202). Measured on
+    7.6.8 over 7 days: one policy summed 18,744 over four full slices where
+    ``query_logs(count_only=True)`` counted 40,312, another 24,507 where it
+    counted 201,329. ``all_slices_exact`` is True only when every slice reported a
     total equal to the rows it returned and below the fetch limit (every slice was
     fully scanned); that is what makes a result "complete". A slice that timed out,
     returned no TID, or omitted its total leaves the total unproven and forces a
@@ -332,6 +337,7 @@ async def _query_policy_logs_bounded(
         truncated_slices = 0
         summed_total = 0
         total_hits_is_known = True
+        any_slice_floor = False
         all_slices_exact = True
 
         for time_slice in time_slices:
@@ -359,6 +365,8 @@ async def _query_policy_logs_bounded(
             )
             if slice_known:
                 summed_total += cast(int, slice_total)
+                if truncated:
+                    any_slice_floor = True
             else:
                 total_hits_is_known = False
             # A slice is exact only if it proved its total and was fully scanned.
@@ -371,7 +379,8 @@ async def _query_policy_logs_bounded(
             "slices_scanned": len(time_slices),
             "truncated_slices": truncated_slices,
             "total_hits": summed_total if total_hits_is_known else None,
-            "total_hits_is_known": total_hits_is_known,
+            "total_hits_is_known": total_hits_is_known and not any_slice_floor,
+            "total_hits_is_lower_bound": total_hits_is_known and any_slice_floor,
             "all_slices_exact": all_slices_exact,
         }
 
@@ -392,6 +401,7 @@ def _bounded_metadata(
     total_hits_is_known: bool = False,
     all_slices_exact: bool = False,
     policy_id: int | None = None,
+    total_hits_is_lower_bound: bool = False,
 ) -> dict[str, Any]:
     """Build common bounded-analysis response metadata.
 
@@ -401,8 +411,13 @@ def _bounded_metadata(
     was fully scanned. Exactness is decided from that per-slice proof, not from an
     aggregate ``observed == total`` comparison, so an over/under-count cancellation
     across slices cannot fabricate completeness.
+
+    With ``total_hits_is_lower_bound`` the sum is kept as a floor (a slice's
+    page filled, #202): it is still the best figure there is, but it is not
+    reported as known.
     """
-    authoritative = total_hits if (total_hits_is_known and total_hits is not None) else None
+    from_total_count = total_hits_is_known or total_hits_is_lower_bound
+    authoritative = total_hits if (from_total_count and total_hits is not None) else None
     if authoritative is not None:
         # Belt (the v2.4.1 defensive shim): the summed total is >= observed by
         # construction, so this is normally a no-op. If it ever fires, the
@@ -425,13 +440,20 @@ def _bounded_metadata(
         "analysis_mode": "complete" if is_exact else "bounded_sample",
         "total_hits": resolved_total_hits,
         "total_hits_is_known": total_hits_is_known,
-        "total_hit_source": "logsearch_total-count" if total_hits_is_known else "observed_rows",
+        "total_hits_is_lower_bound": total_hits_is_lower_bound,
+        "total_hit_source": "logsearch_total-count" if from_total_count else "observed_rows",
         "observed_hits": observed_hits,
         "slices_scanned": slices_scanned,
         "truncated_slices": truncated_slices,
         "log_limit_per_slice": LOG_FETCH_LIMIT,
     }
-    if not is_exact:
+    if total_hits_is_lower_bound:
+        metadata["recommendation"] = (
+            "total_hits is a lower bound: at least one slice's page filled. For the "
+            "window's count use query_logs(count_only=True) with this policy's filter; "
+            "narrow the window for exact breakdowns."
+        )
+    elif not is_exact:
         metadata["recommendation"] = (
             "Narrow the request to 24-hour, 6-hour, or a custom shorter window for exact proof."
         )
@@ -485,6 +507,8 @@ async def analyze_policy_traffic(
         dict with per-policy entries under `results`, each carrying
         `breakdowns` plus the bounded metadata block (`is_exact`,
         `analysis_mode`, `total_hits`, `total_hits_is_known`,
+        `total_hits_is_lower_bound` (a slice's page filled, so `total_hits`
+        is a floor: use query_logs(count_only=True) for the count),
         `total_hit_source`, `observed_hits`, `slices_scanned`,
         `truncated_slices`, `log_limit_per_slice`, `recommendation`), the
         echoed `filter`, and `query_time_seconds` / `adom` / `time_range` /
@@ -629,6 +653,9 @@ async def analyze_policy_traffic(
                     total_hits_is_known=policy_result.get("total_hits_is_known") is True,
                     all_slices_exact=policy_result.get("all_slices_exact") is True,
                     policy_id=pid,
+                    total_hits_is_lower_bound=(
+                        policy_result.get("total_hits_is_lower_bound") is True
+                    ),
                 )
             )
             entry["filter"] = policy_filter

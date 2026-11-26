@@ -654,6 +654,9 @@ async def query_logs(
             - is_exact / analysis_mode ("exact" | "bounded_sample"): read these
               before quoting any number
             - total_hits, total_hits_is_known, total_hit_source, observed_hits
+            - total_hits_is_lower_bound: True when the scan's page filled: the
+              search stopped early, so total_hits is a floor. Use count_only
+              for the window's count.
             - log_limit_per_slice, slices_scanned, truncated_slices, recommendation
 
         With count_only:
@@ -1122,6 +1125,9 @@ async def query_logs(
             # left behind, so nothing here may claim exactness.
             truncated = observed >= limit
             is_exact = total_known and not truncated and total == observed
+            # A full page also ended the search early, so its total-count is
+            # a floor for the window, as on the row path (#148, #202).
+            total_is_lower_bound = total_known and truncated
             breakdowns, breakdown_residuals = aggregate_breakdowns_with_residuals(
                 rows, list(sample_by), top_n=top_n
             )
@@ -1149,14 +1155,18 @@ async def query_logs(
                 "is_exact": is_exact,
                 "analysis_mode": "exact" if is_exact else "bounded_sample",
                 "total_hits": resolved_total,
-                "total_hits_is_known": total_known,
+                "total_hits_is_known": total_known and not total_is_lower_bound,
+                "total_hits_is_lower_bound": total_is_lower_bound,
                 "total_hit_source": "logsearch_total_count" if total_known else "observed_rows",
                 "observed_hits": observed,
                 "log_limit_per_slice": limit,
                 "slices_scanned": 1,
                 "truncated_slices": 1 if truncated else 0,
                 "recommendation": (
-                    "Narrow the time window or raise limit for a closer count."
+                    "total_hits is a lower bound: the page filled. Use count_only=True "
+                    "with the same filter for the window's count."
+                    if total_is_lower_bound
+                    else "Narrow the time window or raise limit for a closer count."
                     if not is_exact
                     else ""
                 ),
