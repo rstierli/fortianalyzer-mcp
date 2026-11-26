@@ -2567,7 +2567,8 @@ async def _hunt_behavior(
     kind, _, raw = entity.partition(":")
     kind = kind.strip().lower()
     ref = raw.strip()
-    if kind not in ("epid", "euid") or not ref.isdigit():
+    # isascii(): isdigit() alone passes digits int() cannot read (#187).
+    if kind not in ("epid", "euid") or not (ref.isascii() and ref.isdigit()):
         raise SkillExecutionError("entity must be 'epid:N' or 'euid:N'")
     entity_id = int(ref)
 
@@ -3504,14 +3505,15 @@ def _parse_entity_subject(entity: str) -> tuple[list[int], list[int], str | None
     """
     text = entity.strip()
     lowered = text.lower()
+    # isascii(): isdigit() alone passes digits int() cannot read (#187).
     if lowered.startswith("epid:"):
         rest = text[5:].strip()
-        if rest.isdigit():
+        if rest.isascii() and rest.isdigit():
             return [int(rest)], [], None, None
         return [], [], None, "entity 'epid:' expects a numeric id"
     if lowered.startswith("euid:"):
         rest = text[5:].strip()
-        if rest.isdigit():
+        if rest.isascii() and rest.isdigit():
             return [], [int(rest)], None, None
         return [], [], None, "entity 'euid:' expects a numeric id"
     # Bare IP: what the IPS address filters accept. A name with a dot in it
