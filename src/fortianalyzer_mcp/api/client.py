@@ -14,6 +14,7 @@ from typing import Any, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pyFMG.fortimgr import FortiManager
+from requests import Response
 
 from fortianalyzer_mcp.utils.config import Settings
 from fortianalyzer_mcp.utils.errors import (
@@ -91,6 +92,21 @@ class _IoBusy(Exception):
     """The I/O lock was not free within the time a caller was willing to wait."""
 
 
+#: The longest status message quoted from the answer to a login.
+_STATUS_TEXT_MAX = 200
+
+
+def _status_text(message: Any) -> str:
+    """A status message as a login error quotes it.
+
+    The text is FortiAnalyzer's, or of whatever answered in its place, and it
+    goes into the tool error and the log: printable characters only, and no
+    more than ``_STATUS_TEXT_MAX`` of them.
+    """
+    text = "".join(ch for ch in str(message) if ch.isprintable())
+    return text if len(text) <= _STATUS_TEXT_MAX else text[:_STATUS_TEXT_MAX] + "..."
+
+
 class FortiAnalyzerClient:
     """Client for FortiAnalyzer JSON RPC API using pyfmg library.
 
@@ -112,6 +128,21 @@ class FortiAnalyzerClient:
     # session returns on a per-request basis (not a clean no-session error), so a
     # long-lived client must re-login on it instead of retrying the dead session.
     _RECONNECTABLE_ERROR_CODES = frozenset({-2, -11, -20, -21})
+    # pyFMG's own code for a reply whose body is not JSON: it hands back the
+    # HTTP response in place of FortiAnalyzer's result. FortiAnalyzer's codes
+    # are zero or negative. Such a reply is not FortiAnalyzer's JSON-RPC
+    # answer: a proxy's 502 or 503 page, or one from FortiAnalyzer's own web
+    # server. The raw request path gives its refusal of a status of 500 and
+    # up the same code, for the same reason.
+    _NOT_JSON_CODE = 100
+    # The answers to a login that refuse the administrator, each an
+    # authentication error. Measured on FortiManager 8.0.2, which answers the
+    # same JSON-RPC login (fortimanager-mcp#141), not on FortiAnalyzer: -22
+    # "Login fail" for a wrong user name or password, -11 "No permission for
+    # the resource" for an administrator without JSON API access, and -23
+    # "Reach login limit" during the lockout after failed logins (seen
+    # once). Any other code says nothing about the credentials.
+    _LOGIN_REJECTED_CODES = frozenset({-22, -11, -23})
     # Seconds allowed for the session logout on disconnect. Shutdown waits
     # for it, so it is capped well below FORTIANALYZER_TIMEOUT (default 30).
     _LOGOUT_TIMEOUT = 5
@@ -275,17 +306,24 @@ class FortiAnalyzerClient:
                         use_ssl=True,
                         verify_ssl=self.resolve_verify(),
                         timeout=self.timeout,
+                        # With it on, pyFMG's login() goes on to read the
+                        # workspace mode, for lock helpers of its own that
+                        # this client does not use. After a login that opened
+                        # no session that read raised, so a rejected login
+                        # never came back as a result. After one that did, a
+                        # page in answer to it dropped the client with the
+                        # new session still open.
+                        check_adom_workspace=False,
                     )
                 else:
                     raise AuthenticationError(
                         "No authentication provided. Set API token or username/password."
                     )
 
-                code, response = await self._run_io(self._fmg.login)
+                code, _ = await self._run_io(self._fmg.login)
 
                 if code != 0:
-                    error_msg = response.get("status", {}).get("message", "Login failed")
-                    raise AuthenticationError(f"FortiAnalyzer login failed: {error_msg}")
+                    raise self._login_failure(self._fmg)
 
                 if self.api_token:
                     # An API-token login makes no request: pyfmg makes the
@@ -306,7 +344,9 @@ class FortiAnalyzerClient:
                         if not isinstance(probe, dict):
                             # pyfmg returns (100, <Response>) for a non-JSON body.
                             raise ConnectionError(f"/sys/status answered without JSON-RPC: {probe}")
-                        detail = probe.get("status", {}).get("message", "unknown error")
+                        detail = _status_text(
+                            probe.get("status", {}).get("message", "unknown error")
+                        )
                         raise AuthenticationError(
                             f"FortiAnalyzer token verification failed: {detail}",
                             code=probe_code,
@@ -326,6 +366,38 @@ class FortiAnalyzerClient:
                 self._fmg = None
                 logger.error(f"Connection failed: {e}")
                 raise ConnectionError(f"Failed to connect to FortiAnalyzer: {e}") from e
+
+    @staticmethod
+    def _login_failure(fmg: FortiManager) -> FortiAnalyzerError:
+        """The error for a login pyFMG reports as failed.
+
+        pyFMG's own result says only that no session was opened. FortiAnalyzer's
+        reply to the login says why, and pyFMG keeps it as the last response
+        it parsed. Only that is read: the request beside it holds the password.
+        """
+        reply = fmg.req_resp_object.response_json
+        if reply is None:
+            # pyFMG parsed nothing, so the body was not JSON. Its login()
+            # does not keep the HTTP status, so that is not named here.
+            return ConnectionError(
+                "the reply to the login was not FortiAnalyzer's JSON-RPC answer "
+                "(its body is not JSON)"
+            )
+        result = reply.get("result") if isinstance(reply, dict) else None
+        if isinstance(result, list) and result:
+            result = result[0]
+        status = result.get("status") if isinstance(result, dict) else None
+        if isinstance(status, dict) and isinstance(status.get("code"), int) and status["code"]:
+            code = status["code"]
+            message = _status_text(status.get("message", "no message"))
+            if code in FortiAnalyzerClient._LOGIN_REJECTED_CODES:
+                return AuthenticationError(f"FortiAnalyzer login failed: {message}", code=code)
+            # Any other code, such as -1 for an internal error, says nothing
+            # about the credentials.
+            return ConnectionError(f"FortiAnalyzer login failed with code {code}: {message}")
+        # No code that refuses the administrator, and yet no session: nothing
+        # says the credentials are wrong.
+        return ConnectionError("the login was answered without a session")
 
     async def disconnect(self) -> None:
         """Disconnect and cleanup resources.
@@ -510,6 +582,7 @@ class FortiAnalyzerClient:
 
         Raises:
             ConnectionError: The on-demand connect failed.
+            AuthenticationError: The on-demand connect was refused.
             Exception: A transient error (see ``_is_transient_error``)
                 from a dropped session, re-raised as is. Either way the
                 caller's own request would wait out the same timeout.
@@ -539,8 +612,9 @@ class FortiAnalyzerClient:
         except Exception as e:
             # Unreachable (failed on-demand connect, or a transient error from
             # a dropped session): raise rather than fall back and let the real
-            # request wait out the same connect timeout a second time.
-            if isinstance(e, ConnectionError) or self._is_transient_error(e):
+            # request wait out the same connect timeout a second time. A
+            # refused login or token too: the request would log in once more.
+            if isinstance(e, ConnectionError | AuthenticationError) or self._is_transient_error(e):
                 raise
             # Any other probe failure: do NOT cache, so a later call can still
             # detect the TZ.
@@ -615,7 +689,7 @@ class FortiAnalyzerClient:
 
     def _note_reachability(self, exc: Exception) -> None:
         """Record what a failed request says about reaching FortiAnalyzer."""
-        if self._is_unreachable_error(exc):
+        if self._is_unreachable_error(exc) or getattr(exc, "code", None) == self._NOT_JSON_CODE:
             self._unreachable = True
         elif isinstance(exc, FortiAnalyzerError) and not isinstance(exc, ConnectionError):
             # FortiAnalyzer answered with an error code. Our ConnectionError
@@ -750,6 +824,11 @@ class FortiAnalyzerClient:
 
         if isinstance(response, dict):
             error_msg = response.get("status", {}).get("message", str(response))
+        elif isinstance(response, Response):
+            error_msg = (
+                "The reply was not FortiAnalyzer's JSON-RPC answer "
+                f"(HTTP {response.status_code}, its body is not JSON)"
+            )
         else:
             error_msg = str(response)
 
@@ -824,9 +903,15 @@ class FortiAnalyzerClient:
         # can still be JSON with neither "error" nor "result", which the
         # empty-reply rule below would turn into a success with no rows.
         if response.status_code >= 400:
+            # A status of 500 and up is a gateway's or a web server's page in
+            # place of FortiAnalyzer's JSON-RPC answer, and marks it
+            # unreachable. Below 500 the reply still counts as FortiAnalyzer's
+            # own, as before: its API rate limit is taken to answer 429 (not
+            # measured).
             raise APIError(
                 f"HTTP {response.status_code} from FortiAnalyzer for {method.upper()} {url}; "
-                "the reply was not read"
+                "the reply was not read",
+                code=self._NOT_JSON_CODE if response.status_code >= 500 else None,
             )
 
         try:
@@ -837,6 +922,17 @@ class FortiAnalyzerClient:
 
         # Debug logging - show what we received (with sensitive data masked)
         logger.debug(f"API Response: {sanitize_json_for_logging(result, indent=2)[:2000]}")
+
+        # A JSON-RPC answer to one request is an object. The checks below are
+        # membership tests, which on a list read its items: [] passed as the
+        # empty reply.
+        if not isinstance(result, dict):
+            raise parse_faz_error(
+                self._NOT_JSON_CODE,
+                "The reply was not FortiAnalyzer's JSON-RPC answer "
+                f"(HTTP {response.status_code}, its body is not a JSON object)",
+                f"{method.upper()} {url}",
+            )
 
         # Check for JSON-RPC error response first
         if "error" in result:

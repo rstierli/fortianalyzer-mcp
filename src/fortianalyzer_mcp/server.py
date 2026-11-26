@@ -411,9 +411,14 @@ def register_dynamic_tools(mcp_server: MCPServer) -> None:
         # Copied so the coercion below never mutates the caller's dict.
         params = dict(parameters) if parameters else {}
 
-        # Import tools dynamically and execute. This already imports every tool
-        # module, so -- unlike TOOL_CATALOGUE, which must stay static to avoid
-        # exactly this import -- tool_map below can be derived from it for free.
+        # Import tools dynamically and execute. This imports every tool module,
+        # so tool_map below can be derived from it. Importing a module
+        # registers its tools on ``mcp``, wrapped by masking when it is on, and
+        # dynamic mode lists its discovery tools only: what this import adds
+        # is taken off the list again, and the functions stay callable from
+        # here. tests/conftest.py's import_dispatcher_isolated keeps
+        # faz_skill off the list the same way.
+        listed = {tool.name for tool in await mcp.list_tools()}
         from fortianalyzer_mcp.tools import (
             dvm_tools,
             event_tools,
@@ -428,6 +433,9 @@ def register_dynamic_tools(mcp_server: MCPServer) -> None:
             traffic_tools,
             ueba_tools,
         )
+
+        for name in {tool.name for tool in await mcp.list_tools()} - listed:
+            mcp.remove_tool(name)
 
         tool_modules = (
             system_tools,
