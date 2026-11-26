@@ -1194,6 +1194,73 @@ class TestResolvedLiteralEscaping:
         )
 
     @pytest.mark.parametrize(
+        ("pattern", "expected"),
+        [
+            ("%100\\% {t}%", "%100\\% edge-fw-01%"),
+            ("%a\\_b {t}%", "%a\\_b edge-fw-01%"),
+            ("%{t} c:\\\\temp%", "%edge-fw-01 c:\\\\temp%"),
+        ],
+        ids=["escaped-percent", "escaped-underscore", "escaped-backslash"],
+    )
+    def test_like_keeps_the_callers_escapes_beside_an_embedded_token(
+        self, unmasker: ArgUnmasker, engine: FPEEngine, pattern: str, expected: str
+    ):
+        """The caller wrote the pattern for ``like``, its backslashes
+        included. Respelling the whole value doubled them, so ``\\%`` became
+        a backslash and a wildcard (#187, the ``like`` half of #164)."""
+        token = engine.mint("hostname", "edge-fw-01")
+
+        out = unmasker.unmask_filter(f'msg like "{pattern.format(t=token)}"')
+
+        assert out == f'msg like "{expected}"'
+
+    def test_like_doubles_a_backslash_of_the_plaintext_beside_an_embedded_token(
+        self, unmasker: ArgUnmasker, engine: FPEEngine
+    ):
+        token = engine.mint("url_tail", "/a\\b")
+
+        assert unmasker.unmask_filter(f'msg like "%see {token}%"') == 'msg like "%see /a\\\\b%"'
+
+    def test_like_refuses_the_callers_escapes_beside_a_plaintext_backslash(
+        self, unmasker: ArgUnmasker, engine: FPEEngine
+    ):
+        """Which backslash is whose cannot be told from the resolved text, and
+        either spelling would compare against something else."""
+        token = engine.mint("url_tail", "/a\\b")
+
+        with pytest.raises(ValidationError, match="backslash"):
+            unmasker.unmask_filter(f'msg like "%100\\% {token}%"')
+
+    async def test_query_logs_sends_the_callers_escapes_as_written(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path, engine: FPEEngine
+    ):
+        import os
+
+        import fortianalyzer_mcp.server as server_module
+        from tests.test_masking_argument_echo import PermissiveClient, _masked_server
+
+        if os.environ.get("FAZ_TOOL_MODE") == "dynamic":
+            pytest.skip("reads the full-mode tool set off the shared server")
+        sent: list[Any] = []
+
+        class Recording(PermissiveClient):
+            async def logsearch_start(self, *args: Any, **kwargs: Any) -> dict:
+                sent.append(kwargs.get("filter"))
+                return {"tid": 4242}
+
+        _, sweep = _masked_server(monkeypatch, tmp_path, mask_device_identity=False)
+        monkeypatch.setattr(server_module, "faz_client", Recording())
+        token = engine.mint("hostname", "edge-fw-01")
+
+        out = await sweep.tools["query_logs"](
+            time_range="2024-01-01 00:00:00|2024-01-02 00:00:00",
+            filter=f'msg like "%100\\% {token}%"',
+        )
+
+        assert out["status"] == "success", out
+        assert sent == ['msg like "%100\\% edge-fw-01%"']
+
+    @pytest.mark.parametrize(
         ("template", "plaintext", "expected"),
         [
             ('url=="{token}"', 'a"b', "url=='a\"b'"),
