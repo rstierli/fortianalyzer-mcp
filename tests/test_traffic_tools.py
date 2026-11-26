@@ -377,7 +377,9 @@ class TestPolicyPortAnalysisToolBounded:
         assert analysis["truncated_slices"] == 1
         assert analysis["log_limit_per_slice"] == LOG_FETCH_LIMIT
         assert analysis["total_hits"] == 2503
-        assert analysis["total_hits_is_known"] is True
+        assert analysis["total_hits_is_known"] is False
+        # The full slice ended its search early: the sum is a floor (#202).
+        assert analysis["total_hits_is_lower_bound"] is True
         assert analysis["total_hit_source"] == "logsearch_total-count"
         assert "estimated_total_hits" not in analysis
         assert "estimate_available" not in analysis
@@ -572,6 +574,7 @@ class TestPolicyTrafficProfileToolBounded:
         assert profile["slices_scanned"] == 4
         assert profile["total_hits"] == 4
         assert profile["total_hits_is_known"] is True
+        assert profile["total_hits_is_lower_bound"] is False
         assert profile["total_hit_source"] == "logsearch_total-count"
         assert "estimated_total_hits" not in profile
         # Default sample_by is ["port", "service", "app"] -- the three
@@ -586,6 +589,71 @@ class TestPolicyTrafficProfileToolBounded:
 
 class TestPolicyProtocolSummaryToolBounded:
     """Tests for bounded protocol summary tool behavior."""
+
+    async def test_every_slice_full_reports_a_floor_not_a_count(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The #202 measurement shape: four slices, every page full. Each
+        slice total covers only what the search read before it stopped, so
+        the sum must not be labelled known (7.6.8: 18,744 reported, 40,312
+        counted)."""
+
+        async def fake_slice(*_args: object, **_kwargs: object) -> dict[str, object]:
+            return {
+                "logs": [{"proto": "6", "dstport": 6556} for _ in range(LOG_FETCH_LIMIT)],
+                "total_hits": 4686,
+                "total_hits_is_known": True,
+            }
+
+        monkeypatch.setattr(traffic_tools, "_query_policy_log_slice", fake_slice)
+
+        result = await traffic_tools.analyze_policy_traffic(
+            adom="root",
+            policy_ids=[95],
+            time_range="2024-01-01 00:00:00|2024-01-08 00:00:00",
+        )
+
+        entry = result["results"][0]
+        assert entry["truncated_slices"] == entry["slices_scanned"]
+        assert entry["total_hits"] == 4686 * entry["slices_scanned"]
+        assert entry["total_hits_is_known"] is False
+        assert entry["total_hits_is_lower_bound"] is True
+        assert entry["total_hit_source"] == "logsearch_total-count"
+        assert "count_only" in entry["recommendation"]
+
+    async def test_a_slice_without_a_total_still_leaves_the_total_unknown(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A floor needs every slice's total; one missing total keeps the
+        old answer: unknown, counted from the rows observed."""
+        call_count = 0
+
+        async def fake_slice(*_args: object, **_kwargs: object) -> dict[str, object]:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return {"logs": [], "total_hits": None, "total_hits_is_known": False}
+            return {
+                "logs": [{"proto": "6"} for _ in range(LOG_FETCH_LIMIT)],
+                "total_hits": 5000,
+                "total_hits_is_known": True,
+            }
+
+        monkeypatch.setattr(traffic_tools, "_query_policy_log_slice", fake_slice)
+
+        result = await traffic_tools.analyze_policy_traffic(
+            adom="root",
+            policy_ids=[7],
+            time_range="2024-01-01 00:00:00|2024-01-08 00:00:00",
+        )
+
+        entry = result["results"][0]
+        assert entry["total_hits_is_known"] is False
+        assert entry["total_hits_is_lower_bound"] is False
+        assert entry["total_hit_source"] == "observed_rows"
+        assert entry["total_hits"] == entry["observed_hits"]
 
     async def test_bounded_result_with_truncation(
         self,
@@ -626,7 +694,10 @@ class TestPolicyProtocolSummaryToolBounded:
         assert summary["truncated_slices"] == 1
         assert summary["observed_hits"] == LOG_FETCH_LIMIT + 3
         assert summary["total_hits"] == 1203
-        assert summary["total_hits_is_known"] is True
+        assert summary["total_hits_is_known"] is False
+        # The full slice ended its search early: the sum is a floor (#202).
+        assert summary["total_hits_is_lower_bound"] is True
+        assert "count_only" in summary["recommendation"]
         assert summary["total_hit_source"] == "logsearch_total-count"
         assert "estimated_total_hits" not in summary
         assert "recommendation" in summary
