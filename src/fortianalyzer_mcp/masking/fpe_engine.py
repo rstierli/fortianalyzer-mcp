@@ -315,6 +315,19 @@ class VerificationBudgetExhausted(MaskingError):
     """
 
 
+def _utf8(value: str) -> bytes:
+    """``value`` as UTF-8, or a MaskingError for a str that has no UTF-8 form.
+
+    A lone surrogate (what ``json.loads`` makes of ``"\\ud800"``) is such a
+    str. Raised as UnicodeEncodeError, it passed the callers that fall back to
+    a placeholder on a MaskingError, and the whole result failed.
+    """
+    try:
+        return value.encode()
+    except UnicodeEncodeError as exc:
+        raise MaskingError("value has no UTF-8 form") from exc
+
+
 def _derive_tweak(label: str, chunk_index: int = 0) -> str:
     """Derive a 56-bit FF3-1 tweak (14 hex chars) from a stable label.
 
@@ -888,7 +901,7 @@ class FPEEngine:
         """
         if not value:
             raise MaskingError("cannot mask an empty URL tail")
-        encoded = base64.b32encode(value.encode()).decode("ascii").lower().rstrip("=")
+        encoded = base64.b32encode(_utf8(value)).decode("ascii").lower().rstrip("=")
         return f"url-{self._key_id}-{self._encrypt_str('url_tail', encoded)}"
 
     def mask_serial(self, value: str) -> str:
@@ -908,7 +921,7 @@ class FPEEngine:
         """
         if not value.strip():
             raise MaskingError("cannot mask an empty serial")
-        encoded = base64.b32encode(value.strip().encode()).decode("ascii").lower().rstrip("=")
+        encoded = base64.b32encode(_utf8(value.strip())).decode("ascii").lower().rstrip("=")
         return f"sn-{self._key_id}-{self._encrypt_str('serial', encoded)}"
 
     def unmask_serial(self, token: str) -> str:

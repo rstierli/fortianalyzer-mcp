@@ -5,6 +5,8 @@ duality, list-valued fields, free-text IOC scanning, response echo keys,
 fail-closed placeholders, and the mcp.tool registration patch.
 """
 
+import json
+
 import pytest
 
 from fortianalyzer_mcp.masking.fields import DOMAIN, EMAIL, FIELD_TYPES, TEXT
@@ -288,6 +290,101 @@ class TestFailClosed:
         assert out["status"] == "error"
         assert out["error"] == "masking_failed"
         assert "192.0.2.102" not in str(out)
+
+
+#: What ``json.loads`` makes of ``"\ud800"``: a lone surrogate, which a str
+#: can hold and UTF-8 cannot encode.
+LONE_SURROGATE = json.loads('"x\\ud800y"')
+
+
+class TestALoneSurrogate:
+    """One value with a lone surrogate under a masked key made the whole page
+    ``masking_failed``: the placeholder that stands for an unmaskable value
+    could not be computed for it, and the clean rows went with it."""
+
+    @staticmethod
+    def _page(key: str, value: str) -> dict:
+        return {
+            "status": "success",
+            "logs": [{"srcip": "192.0.2.10"}, {key: value, "dstip": "198.51.100.7"}],
+        }
+
+    @pytest.mark.parametrize(
+        ("key", "identity"),
+        [
+            ("srcname", False),
+            ("hostname", False),
+            ("user", False),
+            ("srcip", False),
+            ("qname", False),
+            ("sender", False),
+            ("url", False),
+            ("devid", True),
+        ],
+    )
+    def test_only_the_bad_value_becomes_a_placeholder(
+        self, monkeypatch: pytest.MonkeyPatch, key: str, identity: bool
+    ) -> None:
+        monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
+        masker = OutputMasker(FPEEngine(KEY), mask_device_identity=identity)
+
+        out = masker.mask_tool_result(self._page(key, LONE_SURROGATE), "query_logs")
+
+        assert out["status"] == "success", out
+        clean, bad = out["logs"]
+        assert clean["srcip"] not in ("192.0.2.10", "") and "192.0.2.10" not in str(out)
+        assert bad[key].startswith("masked-unrepresentable-")
+        assert bad["dstip"] != "198.51.100.7" and "198.51.100.7" not in str(out)
+        assert "\ud800" not in str(out)
+
+    def test_the_placeholder_is_the_same_for_the_same_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("FAZ_MASKING_KEY", KEY)
+        masker = OutputMasker(FPEEngine(KEY))
+
+        first = masker.mask_result(self._page("user", LONE_SURROGATE))
+        again = masker.mask_result(self._page("user", LONE_SURROGATE))
+        other = masker.mask_result(self._page("user", json.loads('"z\\ud800y"')))
+
+        assert first["logs"][1]["user"] == again["logs"][1]["user"]
+        assert first["logs"][1]["user"] != other["logs"][1]["user"]
+
+    @pytest.mark.parametrize(
+        "identity", [False, True], ids=["identity-readable", "identity-masked"]
+    )
+    async def test_query_logs_returns_the_page_with_the_bad_value_masked(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path, identity: bool
+    ) -> None:
+        import os
+
+        import fortianalyzer_mcp.server as server_module
+        from tests.test_masking_argument_echo import PermissiveClient, _masked_server
+
+        if os.environ.get("FAZ_TOOL_MODE") == "dynamic":
+            pytest.skip("reads the full-mode tool set off the shared server")
+        rows = [
+            {"srcip": "192.0.2.10", "user": "jdoe"},
+            {"srcip": "192.0.2.11", "user": LONE_SURROGATE},
+        ]
+
+        class Page(PermissiveClient):
+            async def logsearch_fetch(self, *args: object, **kwargs: object) -> dict:
+                return {"percentage": 100, "data": rows, "total-count": len(rows)}
+
+        _, sweep = _masked_server(monkeypatch, tmp_path, mask_device_identity=identity)
+        monkeypatch.setattr(server_module, "faz_client", Page())
+
+        out = await sweep.tools["query_logs"](
+            time_range="2024-01-01 00:00:00|2024-01-02 00:00:00", fields=["srcip", "user"]
+        )
+
+        assert out["status"] == "success", out
+        assert out["count"] == 2
+        assert out["logs"][1]["user"].startswith("masked-unrepresentable-")
+        text = str(out)
+        for clear in ("192.0.2.10", "192.0.2.11", "jdoe", "\ud800"):
+            assert clear not in text
 
 
 class TestTargetFailClosed:

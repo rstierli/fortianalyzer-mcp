@@ -640,8 +640,23 @@ class ArgUnmasker:
                 # (``\%`` and ``\_``, measured). Around an embedded token the
                 # caller's own wildcards sit in the same text and cannot be told
                 # apart, so there they stay as written.
+                #
+                # So do the caller's own backslashes. A token holds none, so
+                # every backslash of ``core`` is the caller's, written for
+                # ``like``, and resolving adds only the plaintext's. With no
+                # backslash of the caller's, each one is the plaintext's and is
+                # doubled; with no backslash of the plaintext's, the caller's
+                # stay as they are. With both, which is which cannot be told
+                # from the resolved text, and the filter is refused.
                 whole = _WHOLE_TOKEN_RE.fullmatch(core) is not None
-                escaped = like_spelling(resolved, escape_wildcards=whole)
+                if whole or "\\" not in core:
+                    escaped = like_spelling(resolved, escape_wildcards=whole)
+                elif resolved.count("\\") != core.count("\\"):
+                    raise ValidationError(
+                        "a like pattern holds backslashes of its own beside a resolved value "
+                        "that holds one too, which this writer cannot tell apart; the filter "
+                        "was not sent"
+                    )
             if is_like and not quote:
                 # An unquoted pattern is quoted on the way out, as a bare
                 # comparison value is below, and keeps the ``like`` writing.

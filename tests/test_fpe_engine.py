@@ -139,6 +139,20 @@ class TestMaskingErrorPrivacy:
 
         assert offending not in str(excinfo.value)
 
+    @pytest.mark.parametrize("vtype", ["url_tail", "serial"])
+    def test_a_lone_surrogate_is_a_masking_error_that_omits_the_value(
+        self, engine: FPEEngine, vtype: str
+    ):
+        """Both forms are base32 over the value's UTF-8 bytes, and a lone
+        surrogate has none. As a UnicodeEncodeError it passed the callers that
+        fall back to a placeholder on a MaskingError (#187)."""
+        offending = "/a\ud800b"
+
+        with pytest.raises(MaskingError) as excinfo:
+            engine.mint(vtype, offending)
+
+        assert offending not in "".join(traceback.format_exception(excinfo.value))
+
 
 # --------------------------------------------------------------------- #
 # Hostnames / usernames (incl. FF3-1 min-domain padding edges)          #
