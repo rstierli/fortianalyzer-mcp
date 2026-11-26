@@ -132,7 +132,7 @@ class FortiAnalyzerClient:
     # HTTP response in place of FortiAnalyzer's result. FortiAnalyzer's codes
     # are zero or negative. Such a reply is not FortiAnalyzer's JSON-RPC
     # answer: a proxy's 502 or 503 page, or one from FortiAnalyzer's own web
-    # server. The raw request path gives its refusal of a status of 400 and
+    # server. The raw request path gives its refusal of a status of 500 and
     # up the same code, for the same reason.
     _NOT_JSON_CODE = 100
     # The answers to a login that refuse the administrator, each an
@@ -903,10 +903,15 @@ class FortiAnalyzerClient:
         # can still be JSON with neither "error" nor "result", which the
         # empty-reply rule below would turn into a success with no rows.
         if response.status_code >= 400:
+            # A status of 500 and up is a gateway's or a web server's page in
+            # place of FortiAnalyzer's JSON-RPC answer, and marks it
+            # unreachable. Below 500 the reply still counts as FortiAnalyzer's
+            # own, as before: its API rate limit is taken to answer 429 (not
+            # measured).
             raise APIError(
                 f"HTTP {response.status_code} from FortiAnalyzer for {method.upper()} {url}; "
                 "the reply was not read",
-                code=self._NOT_JSON_CODE,
+                code=self._NOT_JSON_CODE if response.status_code >= 500 else None,
             )
 
         try:

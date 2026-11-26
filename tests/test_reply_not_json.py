@@ -165,21 +165,59 @@ async def test_a_page_starts_no_new_login(
     assert wire.calls[-1] == ("get", "/sys/status")
 
 
-async def test_a_429_page_counts_the_same(client: FortiAnalyzerClient, wire: Wire) -> None:
-    """The rule is the reply, not the status: FortiAnalyzer's JSON-RPC answers
-    with 200 and puts its errors in the body. What FortiAnalyzer's own rate
-    limit answers was not measured."""
+async def test_a_429_page_on_the_pyfmg_path_marks_unreachable(
+    client: FortiAnalyzerClient, wire: Wire
+) -> None:
+    """On the pyFMG path the rule is the body: a page that is not JSON is
+    code 100, whatever its status. What FortiAnalyzer's own rate limit
+    answers was not measured."""
     wire.page = (429, b"<html>Too Many Requests</html>")
     with pytest.raises(APIError):
         await client.get_system_status()
     assert not client.is_reachable
 
-    wire.page = None
-    await client.get_system_status()
-    wire.page = (429, b"<html>Too Many Requests</html>")
-    with pytest.raises(APIError):
+
+ALERTS = "/eventmgmt/adom/root/alerts"
+
+
+@pytest.mark.parametrize("status", [429, 403, 404, 499])
+async def test_a_4xx_on_the_raw_path_is_fortianalyzer_answering(
+    client: FortiAnalyzerClient, wire: Wire, status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """As on 2.18.0. FortiAnalyzer's own API rate limit answers 429, so a
+    status below 500 is taken as its answer: the same error, and the flag
+    /health reads is cleared as for any answer."""
+    app = built_app(monkeypatch)
+    monkeypatch.setattr(server, "faz_client", client)
+    wire.replies[ALERTS] = (status, b'{"message": "refused"}')
+    for unreachable_before in (True, False):
+        client._unreachable = unreachable_before
+        with pytest.raises(APIError) as refused:
+            await client.get_alerts(adom="root", time_range=WINDOW)
+        assert str(refused.value) == (
+            f"HTTP {status} from FortiAnalyzer for GET {ALERTS}; the reply was not read"
+        )
+        assert refused.value.code is None
+        assert (await health(app))["fortianalyzer_connected"] is True
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 504])
+async def test_a_5xx_on_the_raw_path_marks_unreachable(
+    client: FortiAnalyzerClient, wire: Wire, status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = built_app(monkeypatch)
+    monkeypatch.setattr(server, "faz_client", client)
+    wire.replies[ALERTS] = (status, b'{"jsonrpc": "2.0", "id": 1}')
+    with pytest.raises(APIError) as refused:
         await client.get_alerts(adom="root", time_range=WINDOW)
-    assert not client.is_reachable
+    assert str(refused.value) == (
+        f"HTTP {status} from FortiAnalyzer for GET {ALERTS}; the reply was not read"
+    )
+    assert (await health(app))["fortianalyzer_connected"] is False
+
+    del wire.replies[ALERTS]
+    await client.get_alerts(adom="root", time_range=WINDOW)
+    assert (await health(app))["fortianalyzer_connected"] is True
 
 
 async def test_an_error_code_is_still_an_answer(client: FortiAnalyzerClient, wire: Wire) -> None:
