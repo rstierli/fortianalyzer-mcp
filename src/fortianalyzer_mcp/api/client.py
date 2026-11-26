@@ -918,6 +918,17 @@ class FortiAnalyzerClient:
         # Debug logging - show what we received (with sensitive data masked)
         logger.debug(f"API Response: {sanitize_json_for_logging(result, indent=2)[:2000]}")
 
+        # A JSON-RPC answer to one request is an object. The checks below are
+        # membership tests, which on a list read its items: [] passed as the
+        # empty reply.
+        if not isinstance(result, dict):
+            raise parse_faz_error(
+                self._NOT_JSON_CODE,
+                "The reply was not FortiAnalyzer's JSON-RPC answer "
+                f"(HTTP {response.status_code}, its body is not a JSON object)",
+                f"{method.upper()} {url}",
+            )
+
         # Check for JSON-RPC error response first
         if "error" in result:
             error = result["error"]
