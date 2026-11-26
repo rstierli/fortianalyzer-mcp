@@ -621,10 +621,15 @@ async def run_triage(params: TriageParams) -> TriageResult:
 
         if not subject:
             if subject_details is None:
+                # A read that succeeded empty has no reason to quote (#187).
+                details = (
+                    f"the details lookup failed ({err})"
+                    if details_res is None
+                    else "the details lookup returned no record"
+                )
                 raise SkillExecutionError(
                     f"alert {subject_id} not found in the {_SUBJECT_LOOKUP_WINDOW} "
-                    f"filter lookup or the {params.context_time_range} window, and the "
-                    f"details lookup failed ({err})"
+                    f"filter lookup or the {params.context_time_range} window, and {details}"
                 )
             subject = subject_details
             warnings.append(
