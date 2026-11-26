@@ -75,10 +75,10 @@ async def test_event_defaults_to_the_event_file() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_serial_skips_the_lookup() -> None:
+async def test_a_serial_is_searched_once_no_device_is_named_after_it() -> None:
     client = _client()
     await _search(client, device=HA_A)
-    client.get_logstats.assert_not_called()
+    client.get_logstats.assert_awaited_once()
     assert client.search_logfiles.await_args.kwargs["devid"] == HA_A
 
 
@@ -87,8 +87,39 @@ async def test_a_lowercased_serial_is_sent_as_the_appliance_stores_it() -> None:
     """Live 7.6.7 answers a lowercase devid with "not in the user scope"."""
     client = _client()
     await _search(client, device=HA_A.lower())
-    client.get_logstats.assert_not_called()
+    client.get_logstats.assert_awaited_once()
     assert client.search_logfiles.await_args.kwargs["devid"] == HA_A
+
+
+#: A device whose name has the shape of a serial: two letters a serial can
+#: start with, then ten letters and digits.
+SERIAL_SHAPED_NAME = "fwbranch0001"
+NAMED_LIKE_A_SERIAL = "FGVMMLTM00000004"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", [SERIAL_SHAPED_NAME, SERIAL_SHAPED_NAME.upper()])
+async def test_a_name_of_serial_shape_is_looked_up_as_a_name(name: str) -> None:
+    """It was uppercased and sent as a devid without the lookup."""
+    client = _client()
+    devs = [*STATS["data"]["devs"], {"devid": NAMED_LIKE_A_SERIAL, "devname": name}]
+    client.get_logstats = AsyncMock(return_value={"data": {"devs": devs}})
+
+    result = await _search(client, device=name)
+
+    assert result["status"] == "success", result
+    client.get_logstats.assert_awaited_once()
+    assert client.search_logfiles.await_args.kwargs["devid"] == NAMED_LIKE_A_SERIAL
+
+
+@pytest.mark.asyncio
+async def test_a_serial_no_device_is_named_after_is_searched_as_the_serial() -> None:
+    client = _client()
+
+    result = await _search(client, device=f"  {SERIAL_SHAPED_NAME}  ")
+
+    assert result["status"] == "success", result
+    assert client.search_logfiles.await_args.kwargs["devid"] == "FWBRANCH0001"
 
 
 @pytest.mark.asyncio
