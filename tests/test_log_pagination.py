@@ -644,6 +644,39 @@ class TestCancelLogSearch:
         assert result["status"] == "success"
         assert tid not in log_tools._SEARCH_REGISTRY
 
+    async def test_another_adom_is_refused_as_fetch_more_logs_refuses_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The cancel went to the other ADOM, the handle was released and the
+        answer was success."""
+        fake = FakeFaz(_rows(25))
+        _install(monkeypatch, fake)
+        tid = (await log_tools.query_logs(adom="root", time_range=CUSTOM_RANGE, limit=10))["tid"]
+
+        bad = await log_tools.cancel_log_search(tid=tid, adom="other")
+
+        assert bad["status"] == "error"
+        assert bad["error"] == "adom_mismatch"
+        assert bad["operation"] == "cancel_log_search"
+        assert fake.cancelled == []
+        assert tid in log_tools._SEARCH_REGISTRY
+
+        ok = await log_tools.cancel_log_search(tid=tid, adom="root")
+        assert ok["status"] == "success"
+        assert fake.cancelled == [tid]
+        assert tid not in log_tools._SEARCH_REGISTRY
+
+    async def test_an_unknown_handle_is_still_a_success(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Documented: clearing the handle always succeeds, under any ADOM."""
+        fake = FakeFaz(_rows(25))
+        _install(monkeypatch, fake)
+
+        result = await log_tools.cancel_log_search(tid=4242, adom="other")
+
+        assert result["status"] == "success"
+
 
 class PrematureFaz:
     """Models the 7.6.7 premature-100 case under poll-before-fetch.

@@ -1646,7 +1646,10 @@ async def cancel_log_search(
     appliance-side cancel is best-effort; clearing the handle always succeeds.
 
     Args:
-        adom: ADOM name (default: reuse the ADOM recorded for this handle)
+        adom: ADOM name (default: reuse the ADOM recorded for this handle). A
+            known handle is bound to its ADOM: passing a different one returns
+            error="adom_mismatch" and leaves the handle in place, as
+            fetch_more_logs does.
         tid: Pagination handle from a previous query_logs call
 
     Returns:
@@ -1664,10 +1667,23 @@ async def cancel_log_search(
                 error="invalid_tid", message="Invalid TID", operation="cancel_log_search"
             )
 
-        # Use the ADOM query_logs ran under when the caller omits it.
+        # Use the ADOM query_logs ran under when the caller omits it. A known
+        # handle is bound to that ADOM, as in fetch_more_logs: a cancel under
+        # another one would go there and still release the handle.
         context = _get_search_context(tid)
         if adom is None:
             adom = context["adom"] if context else get_default_adom()
+        elif context is not None and adom != context["adom"]:
+            return error_response(
+                error="adom_mismatch",
+                message=(
+                    f"This handle is bound to ADOM {context['adom']!r}; it cannot be cancelled "
+                    f"under ADOM {adom!r}. Pass that ADOM, or leave adom out."
+                ),
+                operation="cancel_log_search",
+                adom=adom,
+                tid=tid,
+            )
         adom = validate_adom(adom)
 
         client = _get_client()
