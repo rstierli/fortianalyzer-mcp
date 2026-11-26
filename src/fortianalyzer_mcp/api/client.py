@@ -2600,4 +2600,8 @@ class FortiAnalyzerClient:
                         )
                     except Exception as exc:  # detail is best-effort enrichment
                         logger.warning("enrichment detail fetch failed for %s: %s", euid, exc)
+                        # Without a mark the row reads as one that has no
+                        # detail (#187). The class name only: the text is
+                        # the appliance's and this key is not masked.
+                        row["enrichment-detail-error"] = type(exc).__name__
         return rows
