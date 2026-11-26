@@ -530,6 +530,9 @@ async def analyze_policy_traffic(
         adom_value = validate_adom(adom or get_default_adom())
         action = validate_action(action)
         policy_ids = validate_policy_ids(policy_ids or [])
+        # Once for the call: each policy builds the filter again, and a blank
+        # device refused there reads as every policy failing on its own.
+        _build_device_filter(device)
 
         # Validate dimensions before any appliance work: a typo should cost
         # nothing. Derived dimensions bypass the field registry, which only

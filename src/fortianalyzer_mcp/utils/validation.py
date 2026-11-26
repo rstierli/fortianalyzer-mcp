@@ -391,7 +391,22 @@ def build_device_filter(device: str | None) -> list[dict[str, str]]:
         ``devname``. A bare prefix match is deliberately NOT enough: hostnames
         like ``FGT-HQ-01`` start with a serial prefix, and sending them as
         ``devid`` makes FAZ silently return zero results.
+
+        The value is read without its surrounding whitespace, so a serial
+        with a space or a newline after it is still that serial (#187). A
+        value of whitespace only names no device and is refused. A lower-case
+        value stays a ``devname``: a device can be named like a serial, which
+        only a lookup could tell, and logsearch refuses a lower-case serial
+        (measured on 7.6.8 and 8.0.2, #187).
+
+    Raises:
+        ValidationError: If ``device`` is whitespace only.
     """
+    if device and not device.strip():
+        raise ValidationError(
+            "device is blank: pass a device name or serial, or leave it out for every FortiGate"
+        )
+    device = (device or "").strip()
     if not device:
         # FAZ rejects an empty device filter with 0 results; default to all FGTs.
         return [{"devid": "All_FortiGate"}]
