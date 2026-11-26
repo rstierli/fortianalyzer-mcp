@@ -185,7 +185,9 @@ class AssetLookupParams(BaseModel):
 
     adom: str | None = None
     epids: list[int] | None = Field(
-        default=None, description="Endpoint IDs to scope the query server-side"
+        default=None,
+        min_length=1,
+        description="Endpoint IDs to scope the query server-side",
     )
     hostname: str | None = Field(
         default=None, description="Case-insensitive substring match on the endpoint name"
@@ -1005,6 +1007,7 @@ class HuntParams(BaseModel):
     )
     filter: str | None = Field(
         default=None,
+        min_length=1,
         description="A raw FAZ filter expression to sweep on (hypothesis hunt). "
         "Passed to the log sweep verbatim — the caller owns its correctness.",
     )
@@ -1024,6 +1027,7 @@ class HuntParams(BaseModel):
     )
     sweep_logtypes: list[str] = Field(
         default_factory=lambda: ["traffic", "attack", "app-ctrl", "dns"],
+        min_length=1,
         description="Log types swept for the indicator/TTP/filter. Each is one "
         "logview search slot; the total is capped by max_sweep_searches. "
         "('attack' is FAZ's IPS log type; 'ips' is not a valid FAZ logtype.) "
@@ -1322,6 +1326,7 @@ class DeepInvestigateParams(BaseModel):
     )
     impact_logtypes: list[str] = Field(
         default_factory=lambda: ["traffic", "dns", "app-ctrl", "dlp"],
+        min_length=1,
         description="Log types swept per entity in the forward (impact) pass. "
         "Each (entity, logtype) pair is one logview search slot; the total "
         "fan-out is capped by max_lateral_searches.",

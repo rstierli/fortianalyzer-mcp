@@ -621,10 +621,15 @@ async def run_triage(params: TriageParams) -> TriageResult:
 
         if not subject:
             if subject_details is None:
+                # A read that succeeded empty has no reason to quote (#187).
+                details = (
+                    f"the details lookup failed ({err})"
+                    if details_res is None
+                    else "the details lookup returned no record"
+                )
                 raise SkillExecutionError(
                     f"alert {subject_id} not found in the {_SUBJECT_LOOKUP_WINDOW} "
-                    f"filter lookup or the {params.context_time_range} window, and the "
-                    f"details lookup failed ({err})"
+                    f"filter lookup or the {params.context_time_range} window, and {details}"
                 )
             subject = subject_details
             warnings.append(
@@ -2567,7 +2572,8 @@ async def _hunt_behavior(
     kind, _, raw = entity.partition(":")
     kind = kind.strip().lower()
     ref = raw.strip()
-    if kind not in ("epid", "euid") or not ref.isdigit():
+    # isascii(): isdigit() alone passes digits int() cannot read (#187).
+    if kind not in ("epid", "euid") or not (ref.isascii() and ref.isdigit()):
         raise SkillExecutionError("entity must be 'epid:N' or 'euid:N'")
     entity_id = int(ref)
 
@@ -3504,19 +3510,25 @@ def _parse_entity_subject(entity: str) -> tuple[list[int], list[int], str | None
     """
     text = entity.strip()
     lowered = text.lower()
+    # isascii(): isdigit() alone passes digits int() cannot read (#187).
     if lowered.startswith("epid:"):
         rest = text[5:].strip()
-        if rest.isdigit():
+        if rest.isascii() and rest.isdigit():
             return [int(rest)], [], None, None
         return [], [], None, "entity 'epid:' expects a numeric id"
     if lowered.startswith("euid:"):
         rest = text[5:].strip()
-        if rest.isdigit():
+        if rest.isascii() and rest.isdigit():
             return [], [int(rest)], None, None
         return [], [], None, "entity 'euid:' expects a numeric id"
-    # Bare IP: a dotted/coloned token with no letters other than hex.
-    if any(sep in text for sep in (".", ":")) and " " not in text:
-        return [], [], text, None
+    # Bare IP: what the IPS address filters accept. A name with a dot in it
+    # used to be typed as an IP here and searched as srcip==<name> (#187).
+    from fortianalyzer_mcp.utils.validation import ValidationError, validate_ip_or_cidr
+
+    try:
+        return [], [], validate_ip_or_cidr(text, "entity"), None
+    except ValidationError:
+        pass
     return (
         [],
         [],

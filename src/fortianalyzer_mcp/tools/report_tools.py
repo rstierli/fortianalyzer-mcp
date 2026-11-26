@@ -185,7 +185,9 @@ def _run_period_args(has_schedule: bool, time_period: str) -> dict[str, Any]:
     }
 
 
-async def _get_layout_id_by_title(client: Any, adom: str, title: str) -> int | None:
+async def _get_layout_id_by_title(
+    client: Any, adom: str, title: str
+) -> tuple[int | None, list[str]]:
     """Look up layout-id by report title.
 
     Searches LAYOUTS (not templates). Only layouts can be run.
@@ -196,36 +198,43 @@ async def _get_layout_id_by_title(client: Any, adom: str, title: str) -> int | N
         title: Report layout title to search for
 
     Returns:
-        layout-id if found, None otherwise
+        (layout-id or None when no layout matches, warnings). A match by
+        substring is named in the warnings, because the title that runs is
+        not the one the caller wrote.
+
+    Raises:
+        Whatever reading the layout list raised: a failed read says nothing
+        about whether the layout exists (#187).
     """
-    try:
-        result = await client.get_report_layouts(adom=adom)
-        layouts = result.get("data", []) if isinstance(result, dict) else result
-        if not isinstance(layouts, list):
-            layouts = [layouts] if layouts else []
+    result = await client.get_report_layouts(adom=adom)
+    layouts = result.get("data", []) if isinstance(result, dict) else result
+    if not isinstance(layouts, list):
+        layouts = [layouts] if layouts else []
 
-        # Filter out templates - only search actual layouts
-        layouts = [layout for layout in layouts if layout.get("is-template") != 1]
+    # Filter out templates - only search actual layouts
+    layouts = [layout for layout in layouts if layout.get("is-template") != 1]
 
-        # Search for matching title (case-insensitive)
-        title_lower = title.lower()
-        for layout in layouts:
-            layout_title = layout.get("title", "")
-            if layout_title.lower() == title_lower:
-                layout_id = layout.get("layout-id")
-                return layout_id if isinstance(layout_id, int) else None
+    # Search for matching title (case-insensitive)
+    title_lower = title.lower()
+    for layout in layouts:
+        layout_title = layout.get("title", "")
+        if layout_title.lower() == title_lower:
+            layout_id = layout.get("layout-id")
+            return (layout_id if isinstance(layout_id, int) else None), []
 
-        # Try partial match if exact match fails
-        for layout in layouts:
-            layout_title = layout.get("title", "")
-            if title_lower in layout_title.lower():
-                layout_id = layout.get("layout-id")
-                return layout_id if isinstance(layout_id, int) else None
+    # Try partial match if exact match fails
+    for layout in layouts:
+        layout_title = layout.get("title", "")
+        if title_lower in layout_title.lower():
+            layout_id = layout.get("layout-id")
+            if not isinstance(layout_id, int):
+                return None, []
+            return layout_id, [
+                f"No layout is titled '{title}'. Ran '{layout_title}' "
+                f"(layout-id {layout_id}), the first layout whose title contains it."
+            ]
 
-        return None
-    except Exception as e:
-        logger.warning(f"Failed to lookup layout by title: {e}")
-        return None
+    return None, []
 
 
 async def _check_schedule_exists(client: Any, adom: str, layout_id: int) -> dict[str, Any]:
@@ -432,7 +441,9 @@ async def run_report(
 
     Returns:
         dict with TID for tracking report progress. ``schedule_created`` is
-        always False: this tool never creates a schedule.
+        always False: this tool never creates a schedule. ``warnings`` is
+        present when no layout has the given title and one whose title
+        contains it ran; it names that title.
 
     Example:
         >>> # Run by layout title
@@ -447,12 +458,13 @@ async def run_report(
 
         # Step 1: Determine layout_id
         layout_id: int | None = None
+        layout_warnings: list[str] = []
         if layout.isdigit():
             layout_id = int(layout)
             logger.info(f"Using layout-id {layout_id}")
         else:
             # Look up layout-id by title
-            layout_id = await _get_layout_id_by_title(client, adom, layout)
+            layout_id, layout_warnings = await _get_layout_id_by_title(client, adom, layout)
             if layout_id is None:
                 return {
                     "status": "error",
@@ -500,7 +512,7 @@ async def run_report(
                 "api_response": result,
             }
 
-        return {
+        response: dict[str, Any] = {
             "status": "success",
             "tid": tid,
             "layout": layout,
@@ -510,6 +522,9 @@ async def run_report(
             "schedule_created": False,
             "message": f"Report started. Use get_running_reports() to check progress, then get_report_data(tid='{tid}') to download.",
         }
+        if layout_warnings:
+            response["warnings"] = layout_warnings
+        return response
     except Exception as e:
         logger.error(f"Failed to run report '{layout}': {e}")
         return {"status": "error", "message": redact(str(e))}
@@ -760,7 +775,10 @@ async def run_and_wait_report(
         timeout: Maximum wait time in seconds (default: 300)
 
     Returns:
-        dict with report result including TID for downloading data
+        dict with report result including TID for downloading data.
+        ``warnings`` is present when no layout has the given title and one
+        whose title contains it ran; it names that title. An error after the
+        report was started carries its ``tid``.
 
     Example:
         >>> result = await run_and_wait_report(
@@ -772,23 +790,27 @@ async def run_and_wait_report(
         ...     print(f"Report completed! TID: {result['tid']}")
         ...     # Use get_report_data(tid=result['tid']) to download
     """
+    tid: Any = None
     try:
         adom = validate_adom(adom or get_default_adom())
         client = _get_client()
 
         # Step 1: Determine layout_id
         layout_id: int | None = None
+        layout_warnings: list[str] = []
         if layout.isdigit():
             layout_id = int(layout)
             logger.info(f"Using layout-id {layout_id}")
         else:
-            layout_id = await _get_layout_id_by_title(client, adom, layout)
+            layout_id, layout_warnings = await _get_layout_id_by_title(client, adom, layout)
             if layout_id is None:
                 return {
                     "status": "error",
                     "message": f"Report layout '{layout}' not found. Use list_report_layouts() to see available reports.",
                 }
             logger.info(f"Found layout-id {layout_id} for '{layout}'")
+        # Every result that echoes ``layout`` also says which title ran.
+        layout_note: dict[str, Any] = {"warnings": layout_warnings} if layout_warnings else {}
 
         # Step 2: Look the layout's schedule up; it decides the form of the run.
         # A failed lookup says nothing about the layout, so nothing is started.
@@ -849,6 +871,7 @@ async def run_and_wait_report(
                         f"Report timed out after {timeout}s. Use "
                         f"get_report_data(tid='{tid}') to check if it completed."
                     ),
+                    **layout_note,
                 }
 
             # Check running reports to see if our TID is still in progress
@@ -882,6 +905,7 @@ async def run_and_wait_report(
                         "adom": adom,
                         "time_period": time_period,
                         "message": "Report completed. Use get_report_data() to download.",
+                        **layout_note,
                     }
                     if requested_window is not None:
                         response["requested_window"] = requested_window
@@ -902,6 +926,7 @@ async def run_and_wait_report(
                         "adom": adom,
                         "time_period": time_period,
                         "message": "Report completed. Use get_report_data() to download.",
+                        **layout_note,
                     }
                     if requested_window is not None:
                         response["requested_window"] = requested_window
@@ -915,6 +940,7 @@ async def run_and_wait_report(
                         "adom": adom,
                         "time_period": time_period,
                         "message": f"Report ended in state '{state}' without completing.",
+                        **layout_note,
                     }
                 # pending/running: not yet visible in the running list
                 # (startup race); fall through and keep polling.
@@ -923,6 +949,18 @@ async def run_and_wait_report(
 
     except Exception as e:
         logger.error(f"Failed to run and wait for report '{layout}': {e}")
+        if tid:
+            # The report was started before the error; without its tid a
+            # retry starts a second one (#187).
+            return {
+                "status": "error",
+                "tid": tid,
+                "message": (
+                    f"{redact(str(e))}. The report was started as tid '{tid}' before this "
+                    "error: look it up with get_running_reports() or "
+                    f"fetch_report(tid='{tid}') before starting another."
+                ),
+            }
         return {"status": "error", "message": redact(str(e))}
 
 

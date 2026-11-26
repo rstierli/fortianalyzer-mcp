@@ -126,7 +126,9 @@ async def get_indicator_enrichment(
     (``enrichment-reputation`` = Good/Suspicious/Malicious/
     NoReputationAvailable), ``enrichment-confidence`` (0-100), status and the
     indicator/enrichment UUIDs. With detail_level "extended", also attaches
-    the raw ``enrichment-detail`` from the reputation source. Reads existing
+    the raw ``enrichment-detail`` from the reputation source; a row whose
+    detail could not be fetched carries ``enrichment-detail-error`` (the
+    error's class name) instead. Reads existing
     enrichment only — it does not trigger a new lookup. Requires SOAR
     licensed with a reputation source that has enriched the indicator.
 

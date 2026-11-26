@@ -118,6 +118,9 @@ def _build_ips_filter(
     # filter literal can hold and quotes the rest with the quote character the
     # value does not contain, before interpolation. Keep the baseline
     # `attack="..."` (single `=`, always quoted) form for backward compatibility.
+    # One attack clause only: the second argument used to be dropped (#187).
+    if attack_exact and attack_contains:
+        raise ValidationError("pass attack_exact or attack_contains, not both")
     if attack_exact:
         safe = sanitize_filter_value(attack_exact, "attack_exact")
         if not safe.startswith(('"', "'")):
@@ -218,7 +221,8 @@ async def search_ips_logs(
             - "info": Informational
             Can provide multiple: ["critical", "high"]
         attack_contains: Partial match on attack name (e.g., "Remote.Code.Execution")
-        attack_exact: Exact match on attack name
+        attack_exact: Exact match on attack name. Pass this or
+            attack_contains, not both.
         action: Filter by action taken. Options:
             - "detected": Attack detected but allowed
             - "blocked": Attack blocked
@@ -414,6 +418,10 @@ async def get_pcap_by_session(
             - file_size: Size of PCAP file in bytes
             - attack_info: Attack details from log entry
             - message: Status or error message
+            - devices, warnings: only when the session id matched rows from
+              more than one device. Session ids are per device; ``devices``
+              lists devid and devname of each, the one the result is from
+              first. Pass ``device`` to choose.
 
     Example:
         >>> result = await get_pcap_by_session(
@@ -476,6 +484,26 @@ async def get_pcap_by_session(
         log_entry = next((row for row in rows if row.get("pcapurl")), rows[0])
         pcapurl = log_entry.get("pcapurl")
 
+        # Session ids are per device, so rows from another device are another
+        # session with the same id (#187). Name each device, the one this
+        # result is from first. The identity goes under devid/devname, which
+        # masking types; the warning names none.
+        devices: dict[Any, dict[str, Any]] = {}
+        for row in [log_entry, *rows]:
+            devices.setdefault(
+                row.get("devid"), {"devid": row.get("devid"), "devname": row.get("devname")}
+            )
+        device_note: dict[str, Any] = {}
+        if len(devices) > 1:
+            device_note = {
+                "devices": list(devices.values()),
+                "warnings": [
+                    f"Session id {session_id} matched rows from {len(devices)} devices, "
+                    "and session ids are per device. This result is from the first entry "
+                    "of 'devices'. Pass device= to choose another."
+                ],
+            }
+
         if not pcapurl:
             return {
                 "status": "no_pcap",
@@ -488,6 +516,7 @@ async def get_pcap_by_session(
                     "dstip": log_entry.get("dstip"),
                 },
                 "message": "Log entry found but no PCAP available for this session",
+                **device_note,
             }
 
         # Download PCAP
@@ -597,6 +626,7 @@ async def get_pcap_by_session(
                 "cve": log_entry.get("cve"),
             },
             "message": f"PCAP downloaded successfully to {saved_file}",
+            **device_note,
         }
 
     except ValidationError as e:

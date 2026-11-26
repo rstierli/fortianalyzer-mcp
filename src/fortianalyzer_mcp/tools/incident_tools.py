@@ -381,12 +381,15 @@ async def update_incident(
         incident_id = validate_incident_id(incident_id)
         if severity is not None:
             severity = validate_severity(severity)
-        if status is not None and status.lower() not in _VALID_INCIDENT_STATUSES:
-            valid = ", ".join(sorted(_VALID_INCIDENT_STATUSES))
-            return {
-                "status": "error",
-                "message": f"Validation error: Invalid status '{status}'. Must be one of: {valid}",
-            }
+        if status is not None:
+            # Sent as checked, the way create_incident sends it (#187).
+            status = status.strip().lower()
+            if status not in _VALID_INCIDENT_STATUSES:
+                valid = ", ".join(sorted(_VALID_INCIDENT_STATUSES))
+                return {
+                    "status": "error",
+                    "message": f"Validation error: Invalid status '{status}'. Must be one of: {valid}",
+                }
         client = _get_client()
 
         logger.info(f"Updating incident {incident_id} in ADOM {adom}")

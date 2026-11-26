@@ -355,13 +355,15 @@ async def run_and_wait_ioc_rescan(
         timeout: Maximum wait time in seconds (default: 300)
 
     Returns:
-        dict with rescan result
+        dict with rescan result. An error after the rescan was started
+        carries its ``tid``.
 
     Example:
         >>> result = await run_and_wait_ioc_rescan(time_range="7-day")
         >>> if result["status"] == "success":
         ...     print(f"Found {result['data'].get('hits', 0)} IOC matches")
     """
+    tid: Any = None
     try:
         adom = validate_adom(adom or get_default_adom())
         client = _get_client()
@@ -427,4 +429,16 @@ async def run_and_wait_ioc_rescan(
 
     except Exception as e:
         logger.error(f"Failed to run and wait for IOC rescan: {e}")
+        if tid:
+            # The rescan was started before the error; without its tid a
+            # retry starts a second one (#187).
+            return {
+                "status": "error",
+                "tid": tid,
+                "message": (
+                    f"{redact(str(e))}. The rescan was started as tid {tid} before this "
+                    f"error: look it up with get_ioc_rescan_status(tid={tid}) before "
+                    "starting another."
+                ),
+            }
         return {"status": "error", "message": redact(str(e))}
